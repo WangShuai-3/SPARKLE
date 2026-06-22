@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stambient"
+version = "0.1.0"
+description = "SPARKLE: Spatial Ambient RNA Kernel-based Leakage Estimator"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+dependencies = [
+    "numpy>=1.21",
+    "scipy>=1.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "matplotlib>=3.5",
+    "anndata>=0.8",
+]
+all = [
+    "stambient[dev]",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

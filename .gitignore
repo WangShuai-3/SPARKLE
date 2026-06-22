@@ -1,0 +1,40 @@
+# Data files
+*.h5ad
+*.h5
+*.npy
+*.npz
+*.rds
+*.rda
+*.RData
+*.gz
+*.tar.gz
+*.zip
+*.tar
+*.mtx
+*.tsv.gz
+*.csv.gz
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# pytest cache
+.pytest_cache/
