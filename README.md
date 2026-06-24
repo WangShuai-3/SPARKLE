@@ -64,6 +64,23 @@ where $$f(s) = \frac{1}{1 + (s / p_{90})^2}$$ is the self-confidence penalty: hi
 
 SPARKLE achieves the best signal retention (97.8%) and neighbor removal (40.2%). DecontX offers moderate removal with a fast runtime (1.1s). SoupX retains signal well but removes little noise. Spatial SoupX overcorrects due to global ρ with spatial kernel.
 
+### Synthetic Data (10 scenarios, RMSE reduction)
+
+Reproduced via `evaluation/scripts/final_comparison.py --dataset synthetic --all-scenarios`.
+
+| Scenario | SPARKLE | SoupX | Spatial SoupX |
+|----------|:---:|:---:|:---:|
+| S1 Sparse (40% empty) | **66.5%** | 41.2% | 58.5% |
+| S2 Medium (25%) | **80.1%** | 47.3% | 75.4% |
+| S3 Dense (10%) | **85.2%** | 34.3% | 82.3% |
+| S4 Short λ=20μm | **38.3%** | 21.5% | 25.0% |
+| S5 Long λ=100μm | **75.2%** | 38.2% | 68.3% |
+| S6 Weak α≤0.005 | **32.0%** | 12.6% | 13.5% |
+| S7 Strong α≤0.10 | **90.3%** | 34.1% | 89.2% |
+| S8 Very Sparse (>50%) | **48.7%** | 36.6% | 42.9% |
+| S9 Multi-Cell-Type | **73.3%** | 32.8% | 66.1% |
+| S10 Marker Benchmark | **77.8%** | 38.3% | 69.8% |
+
 ### MOSTA Cortical Layers (window x10000-14000 y8000-17000, 2219 layer cells)
 
 

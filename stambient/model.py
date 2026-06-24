@@ -98,6 +98,7 @@ class SPARKLE:
         per_gene_lambda: bool = False,
         cell_level: bool = False,
         cell_based: bool = False,
+        self_confidence_penalty: bool = True,
         local_radius_factor: float = 3.0,
         classification: Optional[np.ndarray] = None,
         verbose: bool = True,
@@ -117,6 +118,7 @@ class SPARKLE:
         self.per_gene_lambda = per_gene_lambda
         self.cell_level = cell_level
         self.cell_based = cell_based
+        self.self_confidence_penalty = self_confidence_penalty
         self.local_radius_factor = local_radius_factor
         self.classification = classification
         self.verbose = verbose
@@ -309,7 +311,7 @@ class SPARKLE:
             r2_threshold=self.r2_threshold,
             lambda_grid=self.lambda_grid,
             use_expr_weight=self.use_expr_weight,
-            self_confidence_penalty=True,
+            self_confidence_penalty=self.self_confidence_penalty,
             verbose=self.verbose,
         )
         self.lambda_ = diag["lambda_estimated"]

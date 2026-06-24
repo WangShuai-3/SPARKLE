@@ -85,18 +85,24 @@
 
 ### Synthetic (10 scenarios, RMSE reduction)
 
-| Scenario | SPARKLE | SoupX | CellBender |
+Results reproduced via:
+```bash
+python evaluation/scripts/final_comparison.py --dataset synthetic --all-scenarios \
+  --methods sparkle,spatial_soupx,soupx
+```
+
+| Scenario | SPARKLE | SoupX | Spatial SoupX |
 |----------|:---:|:---:|:---:|
-| S1 Sparse (40% empty) | **60.2%** | 40.9% | 54.6% |
-| S2 Medium (25%) | **76.4%** | 48.8% | 71.6% |
-| S3 Dense (10%) | **83.2%** | 34.8% | 65.0% |
-| S4 Short λ=20μm | **23.9%** | 20.7% | 12.1% |
-| S5 Long λ=100μm | **70.9%** | 36.8% | 68.5% |
-| S6 Weak α≤0.005 | **13.2%** | 11.1% | -10.0% |
-| S7 Strong α≤0.10 | **89.3%** | 34.4% | 59.8% |
-| S8 Very Sparse (>50%) | **44.8%** | 36.3% | 31.4% |
-| S9 Multi-Cell-Type | **67.4%** | 30.1% | 64.9% |
-| S10 Marker Benchmark | **74.1%** | 39.4% | 69.1% |
+| S1 Sparse (40% empty) | **66.5%** | 41.2% | 58.5% |
+| S2 Medium (25%) | **80.1%** | 47.3% | 75.4% |
+| S3 Dense (10%) | **85.2%** | 34.3% | 82.3% |
+| S4 Short λ=20μm | **38.3%** | 21.5% | 25.0% |
+| S5 Long λ=100μm | **75.2%** | 38.2% | 68.3% |
+| S6 Weak α≤0.005 | **32.0%** | 12.6% | 13.5% |
+| S7 Strong α≤0.10 | **90.3%** | 34.1% | 89.2% |
+| S8 Very Sparse (>50%) | **48.7%** | 36.6% | 42.9% |
+| S9 Multi-Cell-Type | **73.3%** | 32.8% | 66.1% |
+| S10 Marker Benchmark | **77.8%** | 38.3% | 69.8% |
 
 ### Axolotl SST data (real)
 

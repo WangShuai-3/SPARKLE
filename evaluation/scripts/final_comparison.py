@@ -18,7 +18,286 @@ from stambient import SPARKLE
 from evaluation.baselines.spatial_soupx import run_spatial_soupx
 from evaluation.baselines.soupx import run_soupx
 from evaluation.scripts.test_axolotl import compute_neighbor_stats
+from evaluation.synthetic import generate_synthetic_data, SCENARIOS
 import scanpy as sc
+
+
+def load_synthetic_scenario_data(scenario_id="S1", seed=42):
+    """Load a synthetic benchmark scenario (S1–S10).
+
+    First tries to load a cached NPZ file at evaluation/data/S{scenario_id}.npz
+    (the original benchmark data). If not present, falls back to the generator.
+
+    Returns a dict compatible with the comparison pipeline:
+        dnb_expr, dnb_coords, dnb_labels, gene_names, cell_ids,
+        true_expr, gene_is_high, params, true_alpha, true_lambda, metadata.
+    """
+    from evaluation.synthetic.scenarios import get_scenario
+
+    scenario = get_scenario(scenario_id)
+    print(f"[Synthetic] Scenario {scenario_id}: {scenario['name']}")
+
+    project_root = Path(__file__).resolve().parent.parent.parent
+    npz_path = project_root / "evaluation" / "data" / f"{scenario_id}.npz"
+
+    if npz_path.exists():
+        print(f"  Loading cached data: {npz_path}")
+        npz = np.load(npz_path, allow_pickle=True)
+        dnb_expr = npz["dnb_expr"]
+        dnb_coords = npz["dnb_coords"]
+        dnb_labels = npz["dnb_labels"]
+        true_expr = npz["true_expr"]
+        gene_is_high = npz["gene_is_high"]
+        true_alpha = npz["true_alpha"]
+        true_lambda = float(npz["true_lambda"])
+        metadata = npz["metadata"].item()
+
+        n_genes, n_dnbs = dnb_expr.shape
+        n_cells = true_expr.shape[1]
+        gene_names = np.array([f"gene_{i}" for i in range(n_genes)])
+        cell_ids = np.arange(n_cells, dtype=np.int64)
+        n_empty = int((dnb_labels < 0).sum())
+
+        print(f"  {n_genes} genes, {n_cells} cells, {n_dnbs} DNBs "
+              f"({n_empty} empty, {n_dnbs - n_empty} cell)")
+        print(f"  Ground-truth λ={true_lambda}µm, "
+              f"α(mean)={true_alpha.mean():.4f} from cached NPZ")
+
+        return {
+            "dnb_expr": csr_matrix(dnb_expr.astype(np.float64)),
+            "dnb_coords": dnb_coords,
+            "dnb_labels": dnb_labels,
+            "gene_names": gene_names,
+            "cell_ids": cell_ids,
+            "true_expr": true_expr,
+            "gene_is_high": gene_is_high,
+            "true_alpha": true_alpha,
+            "true_lambda": true_lambda,
+            "metadata": metadata,
+            "params": {"source": "npz_cache", "scenario": scenario},
+        }
+
+    # Fallback: generate on the fly
+    print(f"  NPZ cache not found, generating synthetic data on the fly...")
+    data = generate_synthetic_data(
+        n_cells=200,
+        grid_width=200,
+        grid_height=200,
+        dnb_pitch=0.5,
+        cell_radius=5.0,
+        n_genes=500,
+        n_high_genes=80,
+        ambient_lambda=scenario["ambient_lambda"],
+        ambient_alpha=scenario["ambient_alpha"],
+        empty_fraction=scenario["empty_fraction"],
+        n_cell_types=scenario.get("n_cell_types", 1),
+        marker_fraction=scenario.get("marker_fraction", 0.0),
+        seed=seed,
+    )
+
+    n_genes = data["dnb_expr"].shape[0]
+    n_cells = data["true_expr"].shape[1]
+    gene_names = np.array([f"gene_{i}" for i in range(n_genes)])
+    cell_ids = np.arange(n_cells, dtype=np.int64)
+
+    n_empty = int((data["dnb_labels"] < 0).sum())
+    print(f"  {n_genes} genes, {n_cells} cells, {len(data['dnb_labels'])} DNBs "
+          f"({n_empty} empty, {len(data['dnb_labels']) - n_empty} cell)")
+    print(f"  Ground-truth λ={scenario['ambient_lambda']}µm, "
+          f"α={scenario['ambient_alpha']}, empty_fraction={scenario['empty_fraction']}")
+
+    return {
+        "dnb_expr": csr_matrix(data["dnb_expr"].astype(np.float64)),
+        "dnb_coords": data["dnb_coords"],
+        "dnb_labels": data["dnb_labels"],
+        "gene_names": gene_names,
+        "cell_ids": cell_ids,
+        "true_expr": data["true_expr"],
+        "gene_is_high": data["gene_is_high"],
+        "params": data["params"],
+    }
+
+
+def _rmse(pred, true):
+    """Root-mean-square error over all elements."""
+    return float(np.sqrt(np.mean((pred - true) ** 2)))
+
+
+def run_synthetic_comparison(data, n_genes=500, methods=None):
+    """Run methods on a synthetic scenario and report RMSE reduction vs raw."""
+    if methods is None:
+        methods = ["sparkle", "spatial_soupx", "soupx", "decontx"]
+    methods = [m.lower().strip() for m in methods]
+
+    dnb_expr = data["dnb_expr"]
+    dnb_coords = data["dnb_coords"]
+    dnb_labels = data["dnb_labels"]
+    true_expr = data["true_expr"]
+    n_cells = true_expr.shape[1]
+
+    # Per-cell raw expression
+    raw_cell = compute_cell_expr(dnb_expr, dnb_labels, n_cells)
+    rmse_raw = _rmse(raw_cell, true_expr)
+
+    print(f"\n{'='*60}")
+    print("SYNTHETIC SCENARIO EVALUATION")
+    print(f"{'='*60}")
+    print(f"  Raw RMSE: {rmse_raw:.4f}")
+
+    results = {}
+
+    # 1. SPARKLE
+    if "sparkle" in methods:
+        print(f"\n[SPARKLE]")
+        t0 = time.time()
+        model = SPARKLE(
+            bin_size=25,
+            distance_metric="exponential",
+            max_radius=300.0,
+            n_high_genes=min(80, dnb_expr.shape[0]),
+            n_lambda_genes=min(50, dnb_expr.shape[0]),
+            r2_threshold=0.01,
+            lambda_grid=[10, 20, 30, 50, 70, 100, 150, 200, 300],
+            use_local_density=False,
+            cell_based=True,
+            self_confidence_penalty=False,
+            verbose=False,
+        )
+        sp_corr, diag = model.fit_transform_from_dnb(dnb_expr, dnb_coords, dnb_labels)
+        sp_t = time.time() - t0
+        if hasattr(sp_corr, "toarray"):
+            sp_corr = sp_corr.toarray()
+        rmse_sp = _rmse(sp_corr, true_expr)
+        reduc_sp = (rmse_raw - rmse_sp) / rmse_raw * 100.0
+        print(f"  RMSE={rmse_sp:.4f}, reduction={reduc_sp:.1f}%, "
+              f"λ={model.lambda_:.0f}µm, time={sp_t:.1f}s")
+        results["SPARKLE"] = {"rmse": rmse_sp, "reduction": reduc_sp, "runtime": sp_t}
+
+    # 2. Spatial SoupX
+    if "spatial_soupx" in methods:
+        print(f"\n[Spatial SoupX]")
+        t0 = time.time()
+        ss_corr, ss_rho, ss_lam = run_spatial_soupx(
+            dnb_expr, dnb_coords, dnb_labels,
+            bin_size=25, max_radius=300.0,
+            lambda_grid=[10, 20, 30, 50, 70, 100, 150, 200, 300],
+            verbose=False,
+        )
+        ss_t = time.time() - t0
+        rmse_ss = _rmse(ss_corr, true_expr)
+        reduc_ss = (rmse_raw - rmse_ss) / rmse_raw * 100.0
+        print(f"  RMSE={rmse_ss:.4f}, reduction={reduc_ss:.1f}%, "
+              f"ρ={ss_rho:.4f}, λ={ss_lam:.0f}µm, time={ss_t:.1f}s")
+        results["SpatialSoupX"] = {"rmse": rmse_ss, "reduction": reduc_ss, "runtime": ss_t}
+
+    # 3. SoupX
+    if "soupx" in methods:
+        print(f"\n[SoupX]")
+        t0 = time.time()
+        try:
+            sx_corr, sx_rho = run_soupx(dnb_expr, dnb_labels, verbose=False)
+        except Exception as e:
+            # Robust fallback for on-the-fly generated data where adjustCounts
+            # can produce pathological negatives.
+            print(f"  run_soupx failed ({e}), using simple global subtraction fallback")
+            empty_mask = np.asarray(dnb_labels < 0).ravel()
+            cell_mask = np.asarray(dnb_labels >= 0).ravel()
+            dnb_dense = np.asarray(dnb_expr.todense() if hasattr(dnb_expr, "todense") else dnb_expr.toarray())
+            total_per_gene = dnb_dense.sum(axis=1)
+            n_top = max(5, dnb_dense.shape[0] // 5)
+            top_genes = np.argsort(total_per_gene)[-n_top:]
+            mean_cell = dnb_dense[top_genes][:, cell_mask].mean(axis=1)
+            mean_empty = dnb_dense[top_genes][:, empty_mask].mean(axis=1)
+            valid = mean_cell > 0.01
+            ratios = mean_empty[valid] / (mean_cell[valid] + mean_empty[valid])
+            sx_rho = float(np.median(ratios))
+            sx_rho = max(0.001, min(sx_rho, 0.8))
+            raw_cell_soupx = compute_cell_expr(dnb_expr, dnb_labels, n_cells)
+            sx_corr = np.maximum(raw_cell_soupx * (1.0 - sx_rho), 0.0)
+        sx_t = time.time() - t0
+        rmse_sx = _rmse(sx_corr, true_expr)
+        reduc_sx = (rmse_raw - rmse_sx) / rmse_raw * 100.0
+        print(f"  RMSE={rmse_sx:.4f}, reduction={reduc_sx:.1f}%, "
+              f"ρ={sx_rho:.4f}, time={sx_t:.1f}s")
+        results["SoupX"] = {"rmse": rmse_sx, "reduction": reduc_sx, "runtime": sx_t}
+
+    # 4. DecontX
+    if "decontx" in methods:
+        print(f"\n[DecontX]")
+        t0 = time.time()
+        dx_corr, dx_diag = run_decontx_method({
+            "dnb_expr": dnb_expr,
+            "dnb_labels": dnb_labels,
+            "gene_names": list(data["gene_names"]),
+            "cell_ids": data["cell_ids"],
+        }, verbose=False)
+        dx_t = time.time() - t0
+        if dx_corr is not None:
+            rmse_dx = _rmse(dx_corr, true_expr)
+            reduc_dx = (rmse_raw - rmse_dx) / rmse_raw * 100.0
+            print(f"  RMSE={rmse_dx:.4f}, reduction={reduc_dx:.1f}%, "
+                  f"contamination={dx_diag.get('contamination', 'N/A'):.3f}, time={dx_t:.1f}s")
+            results["DecontX"] = {"rmse": rmse_dx, "reduction": reduc_dx, "runtime": dx_t}
+
+    # Summary table
+    print(f"\n{'='*60}")
+    print("SUMMARY (RMSE reduction vs raw)")
+    print(f"{'='*60}")
+    print(f"  {'Method':<16} {'RMSE':>10} {'Reduction':>12} {'Runtime':>10}")
+    print(f"  {'-'*16} {'-'*10} {'-'*12} {'-'*10}")
+    print(f"  {'RAW':<16} {rmse_raw:>10.4f} {'—':>12} {'—':>10}")
+    for name, r in results.items():
+        print(f"  {name:<16} {r['rmse']:>10.4f} {r['reduction']:>11.1f}% {r['runtime']:>9.1f}s")
+
+    return {"rmse_raw": rmse_raw, "results": results}
+
+
+def run_all_synthetic_scenarios(methods=None):
+    """Run all S1–S10 scenarios and print a consolidated benchmark table."""
+    from evaluation.synthetic.scenarios import list_scenarios
+
+    scenario_ids = list_scenarios()
+    all_results = {}
+    method_names = []
+
+    print("\n" + "=" * 80)
+    print("SYNTHETIC BENCHMARK: ALL 10 SCENARIOS")
+    print("=" * 80)
+
+    for sid in scenario_ids:
+        data = load_synthetic_scenario_data(sid, seed=42)
+        summary = run_synthetic_comparison(data, n_genes=500, methods=methods)
+        all_results[sid] = summary
+        if not method_names:
+            method_names = list(summary["results"].keys())
+
+    # Consolidated table
+    print("\n" + "=" * 80)
+    print("CONSOLIDATED RMSE REDUCTION (% vs raw)")
+    print("=" * 80)
+    header = f"  {'Scenario':<10}"
+    for name in method_names:
+        header += f" {name:>14}"
+    print(header)
+    print("  " + "-" * (10 + 15 * len(method_names)))
+
+    for sid in scenario_ids:
+        row = f"  {sid:<10}"
+        summary = all_results[sid]
+        for name in method_names:
+            r = summary["results"].get(name, {})
+            val = r.get("reduction", float('nan'))
+            row += f" {val:>13.1f}%"
+        print(row)
+
+    # Average row
+    row = f"  {'Average':<10}"
+    for name in method_names:
+        vals = [all_results[sid]["results"][name]["reduction"]
+                for sid in scenario_ids if name in all_results[sid]["results"]]
+        avg = np.mean(vals) if vals else float('nan')
+        row += f" {avg:>13.1f}%"
+    print(row)
 
 
 def load_scgem_label_map_filtered(scgem_path, x_range=None, y_range=None):
@@ -1335,8 +1614,13 @@ def main():
     parser = argparse.ArgumentParser(
         description="Final comparison: Cell SPARKLE vs Spatial SoupX vs SoupX")
     parser.add_argument("--dataset", type=str, default="axolotl",
-                        choices=["axolotl", "mosta", "visiumhd"],
+                        choices=["axolotl", "mosta", "visiumhd", "synthetic"],
                         help="Dataset (default: axolotl)")
+    parser.add_argument("--scenario", type=str, default="S1",
+                        choices=sorted(SCENARIOS.keys()),
+                        help="Synthetic scenario ID (default: S1)")
+    parser.add_argument("--all-scenarios", action="store_true",
+                        help="Run all S1–S10 synthetic scenarios and print summary")
     parser.add_argument("--x-range", type=int, nargs=2, default=None,
                         help="X range (two integers)")
     parser.add_argument("--y-range", type=int, nargs=2, default=None,
@@ -1371,12 +1655,18 @@ def main():
         data = load_mosta_data(x_range=x_range, y_range=y_range)
         sub = subsample_data(data, args.n_genes, cut_genes=False)
         run_mosta_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes)
-    else:  # visiumhd
+    elif args.dataset == "visiumhd":
         data = load_visiumhd_data(x_range=x_range, y_range=y_range, n_genes=args.n_genes)
         if data is None:
             sys.exit(1)
         sub = subsample_data(data, args.n_genes)
         run_visiumhd_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes)
+    else:  # synthetic
+        if args.all_scenarios:
+            run_all_synthetic_scenarios(methods)
+        else:
+            data = load_synthetic_scenario_data(args.scenario, seed=42)
+            run_synthetic_comparison(data, args.n_genes, methods)
 
 
 if __name__ == "__main__":

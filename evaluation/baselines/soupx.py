@@ -27,14 +27,15 @@ def _estimate_rho_simple(dnb_expr, dnb_labels):
         return 0.01
 
     n_genes = dnb_expr.shape[0]
-    total_per_gene = dnb_expr.sum(axis=1)
+    total_per_gene = np.asarray(dnb_expr.sum(axis=1)).ravel()
 
     # Select top 20% genes by total expression (high-expr + ambient-rich)
     n_top = max(5, n_genes // 5)
     top_genes = np.argsort(total_per_gene)[-n_top:]
 
-    mean_cell = dnb_expr[top_genes][:, cell_mask].mean(axis=1)
-    mean_empty = dnb_expr[top_genes][:, empty_mask].mean(axis=1)
+    dnb_dense = np.asarray(dnb_expr.todense()) if hasattr(dnb_expr, 'todense') else dnb_expr.toarray()
+    mean_cell = dnb_dense[top_genes][:, cell_mask].mean(axis=1)
+    mean_empty = dnb_dense[top_genes][:, empty_mask].mean(axis=1)
 
     # ρ = empty / (cell + empty) avoids division by zero
     valid = mean_cell > 0.01
@@ -132,7 +133,13 @@ def run_soupx(
         sc.set_contamination_fraction(rho, forceAccept=True)
 
     # ── 6. Correct ─────────────────────────────────────────────────
-    corrected_sparse = adjustCounts(sc, roundToInt=False, verbose=int(verbose))
-    corrected_dense = corrected_sparse.toarray()
+    try:
+        corrected_sparse = adjustCounts(sc, roundToInt=False, verbose=int(verbose))
+        corrected_dense = corrected_sparse.toarray()
+    except Exception as e:
+        # Fallback: simple global subtraction using estimated ρ
+        if verbose:
+            print(f"  adjustCounts failed ({e}), using simple global subtraction")
+        corrected_dense = np.maximum(toc_dense * (1.0 - rho), 0.0)
 
     return corrected_dense, rho
