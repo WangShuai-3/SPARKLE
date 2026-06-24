@@ -80,11 +80,12 @@ def load_synthetic_scenario_data(scenario_id="S1", seed=42):
     # Fallback: generate on the fly
     print(f"  NPZ cache not found, generating synthetic data on the fly...")
     data = generate_synthetic_data(
-        n_cells=200,
+        n_cells=scenario.get("n_cells", 200),
         grid_width=200,
         grid_height=200,
         dnb_pitch=0.5,
         cell_radius=5.0,
+        cell_radius_cv=0.2,
         n_genes=500,
         n_high_genes=80,
         ambient_lambda=scenario["ambient_lambda"],
@@ -92,6 +93,7 @@ def load_synthetic_scenario_data(scenario_id="S1", seed=42):
         empty_fraction=scenario["empty_fraction"],
         n_cell_types=scenario.get("n_cell_types", 1),
         marker_fraction=scenario.get("marker_fraction", 0.0),
+        cluster_strength=scenario.get("cluster_strength", 0.5),
         seed=seed,
     )
 
@@ -100,11 +102,8 @@ def load_synthetic_scenario_data(scenario_id="S1", seed=42):
     gene_names = np.array([f"gene_{i}" for i in range(n_genes)])
     cell_ids = np.arange(n_cells, dtype=np.int64)
 
-    n_empty = int((data["dnb_labels"] < 0).sum())
-    print(f"  {n_genes} genes, {n_cells} cells, {len(data['dnb_labels'])} DNBs "
-          f"({n_empty} empty, {len(data['dnb_labels']) - n_empty} cell)")
     print(f"  Ground-truth λ={scenario['ambient_lambda']}µm, "
-          f"α={scenario['ambient_alpha']}, empty_fraction={scenario['empty_fraction']}")
+          f"α(mean)={data['true_alpha'].mean():.4f}, empty_fraction={scenario['empty_fraction']}")
 
     return {
         "dnb_expr": csr_matrix(data["dnb_expr"].astype(np.float64)),
@@ -114,6 +113,8 @@ def load_synthetic_scenario_data(scenario_id="S1", seed=42):
         "cell_ids": cell_ids,
         "true_expr": data["true_expr"],
         "gene_is_high": data["gene_is_high"],
+        "true_alpha": data["true_alpha"],
+        "true_lambda": data["true_lambda"],
         "params": data["params"],
     }
 

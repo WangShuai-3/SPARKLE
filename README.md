@@ -66,20 +66,23 @@ SPARKLE achieves the best signal retention (97.8%) and neighbor removal (40.2%).
 
 ### Synthetic Data (10 scenarios, RMSE reduction)
 
-Reproduced via `evaluation/scripts/final_comparison.py --dataset synthetic --all-scenarios`.
+Reproduced via `evaluation/scripts/final_comparison.py --dataset synthetic --all-scenarios`. The synthetic benchmark evaluates raw RMSE against ground-truth per-cell expression, so SPARKLE is run with `self_confidence_penalty=False` to maximise ambient removal (real-data runs keep the penalty on by default to protect biological signal).
 
 | Scenario | SPARKLE | SoupX | Spatial SoupX |
 |----------|:---:|:---:|:---:|
-| S1 Sparse (40% empty) | **66.5%** | 41.2% | 58.5% |
-| S2 Medium (25%) | **80.1%** | 47.3% | 75.4% |
-| S3 Dense (10%) | **85.2%** | 34.3% | 82.3% |
-| S4 Short λ=20μm | **38.3%** | 21.5% | 25.0% |
-| S5 Long λ=100μm | **75.2%** | 38.2% | 68.3% |
-| S6 Weak α≤0.005 | **32.0%** | 12.6% | 13.5% |
-| S7 Strong α≤0.10 | **90.3%** | 34.1% | 89.2% |
-| S8 Very Sparse (>50%) | **48.7%** | 36.6% | 42.9% |
-| S9 Multi-Cell-Type | **73.3%** | 32.8% | 66.1% |
-| S10 Marker Benchmark | **77.8%** | 38.3% | 69.8% |
+| S1 Sparse (40% empty) | **69.5%** | 28.3% | 61.6% |
+| S2 Medium (25%) | **77.0%** | 35.3% | 69.6% |
+| S3 Dense (10%) | **85.2%** | 14.7% | 76.4% |
+| S4 Short λ=20µm | **50.6%** | 7.4% | 37.7% |
+| S5 Long λ=100µm | **82.8%** | 24.4% | 77.8% |
+| S6 Weak α≤0.005 | **60.8%** | 12.4% | 49.8% |
+| S7 Strong α≤0.10 | **94.7%** | 20.0% | 91.2% |
+| S8 Very Sparse (>50%) | **55.6%** | 9.3% | 46.4% |
+| S9 Multi-Cell-Type | **60.9%** | 28.2% | −14.2% |
+| S10 Marker Benchmark | **74.7%** | 24.0% | 12.2% |
+| **Average** | **71.2%** | **20.4%** | **50.8%** |
+
+SPARKLE leads in all scenarios. The multi-type scenarios (S9–S10) expose the limitation of a global contamination fraction ρ: Spatial SoupX over-subtracts cell-type-specific marker genes, producing negative RMSE reductions, while SPARKLE’s cell-based, gene-specific model preserves the true signal.
 
 ### MOSTA Cortical Layers (window x10000-14000 y8000-17000, 2219 layer cells)
 

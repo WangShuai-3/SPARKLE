@@ -1,55 +1,95 @@
-"""Vectorized synthetic spatial transcriptomics data generator.
+"""Physically-motivated synthetic spatial transcriptomics data generator.
 
-The generator produces DNB-level expression with spatially-decaying ambient
-RNA contamination, plus per-cell ground-truth expression for benchmarking.
+Design goals:
+  1. Mimic real Stereo-seq/Visium HD data: cells occupy part of the FOV,
+     inter-cellular space is empty.
+  2. Match SPARKLE's cell-based diffusion model, so the correction target is
+     exactly the model SPARKLE assumes.
+  3. Output is DNB-level data compatible with the Axolotl pipeline:
+       dnb_expr  : [genes x DNBs]
+       dnb_coords: [DNBs x 2]
+       dnb_labels: [DNBs] cell ID (-1 for empty DNBs)
 
-Ambient RNA is modeled consistently with SPARKLE's cell-based correction:
-  - source strength of cell c for gene g = true_expr[g, c] / cell_area[c]
-  - ambient received by a target with area A_t from cell c =
-      alpha_g * A_t * exp(-d / lambda) * source strength[c]
-  - for a cell target, A_t = cell_area
-  - for an empty DNB target, A_t = 1
+Ambient model (SPARKLE-consistent):
+  - Cell c source strength for gene g:  s_{gc} = true_expr[g, c] / A_c
+    where A_c is the observed number of DNBs assigned to cell c.
+  - Empty DNB e receives ambient:       a_{ge} = alpha_g * sum_c w(d_{e,c}) * s_{gc}
+  - Cell c receives total ambient:      A_c * alpha_g * sum_{c'!=c} w(d_{c,c'}) * s_{gc'}
+    distributed uniformly over its DNBs.
+  - Weight: w(d) = exp(-d / lambda), truncated at 3*lambda.
+
+Cells are placed on a jittered grid and occupy circular regions with variable
+radii. The requested `empty_fraction` is enforced globally: if natural
+inter-cellular space already exceeds the target, the uncovered DNBs closest to
+cell centres are assigned to those cells; otherwise covered DNBs are randomly
+removed to create empty space.
 """
 
-from typing import Dict
+from typing import Dict, Optional, Tuple
 import numpy as np
 from scipy.spatial import cKDTree
 
 
-def _jittered_grid_centers(
+def _place_cell_centers(
     n_cells: int,
     width_um: float,
     height_um: float,
-    cell_radius: float,
+    mean_radius: float,
     rng: np.random.RandomState,
-) -> np.ndarray:
-    """Place cell centers on a jittered grid that fits inside the FOV."""
+    n_cell_types: int = 1,
+    cluster_strength: float = 0.0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Place cell centers on a jittered grid with optional type clusters."""
     aspect = width_um / height_um
     cols = max(1, int(np.round(np.sqrt(n_cells * aspect))))
     rows = max(1, int(np.ceil(n_cells / cols)))
 
-    jitter = cell_radius * 0.35
-    safe_x_min = cell_radius + jitter
-    safe_x_max = width_um - cell_radius - jitter
-    safe_y_min = cell_radius + jitter
-    safe_y_max = height_um - cell_radius - jitter
-
-    if safe_x_min >= safe_x_max or safe_y_min >= safe_y_max:
-        centers = np.column_stack([
-            rng.uniform(cell_radius, width_um - cell_radius, n_cells),
-            rng.uniform(cell_radius, height_um - cell_radius, n_cells),
-        ])
-        return centers
-
-    x_grid = np.linspace(safe_x_min, safe_x_max, cols)
-    y_grid = np.linspace(safe_y_min, safe_y_max, rows)
+    # Grid spacing
+    x_grid = np.linspace(mean_radius * 2, width_um - mean_radius * 2, cols)
+    y_grid = np.linspace(mean_radius * 2, height_um - mean_radius * 2, rows)
     xx, yy = np.meshgrid(x_grid, y_grid)
     centers = np.column_stack([xx.ravel(), yy.ravel()])[:n_cells]
 
+    # Random jitter (up to 35% of mean radius)
+    jitter = mean_radius * 0.35
     centers += rng.uniform(-jitter, jitter, centers.shape)
-    centers[:, 0] = np.clip(centers[:, 0], cell_radius, width_um - cell_radius)
-    centers[:, 1] = np.clip(centers[:, 1], cell_radius, height_um - cell_radius)
-    return centers
+    centers[:, 0] = np.clip(centers[:, 0], mean_radius, width_um - mean_radius)
+    centers[:, 1] = np.clip(centers[:, 1], mean_radius, height_um - mean_radius)
+
+    # Cell types: random with optional spatial clustering
+    cell_types = np.zeros(n_cells, dtype=np.int64)
+    if n_cell_types > 1:
+        if cluster_strength > 0:
+            # Cluster centers in space, assign nearby cells to the same type
+            type_centers = rng.uniform(
+                low=[mean_radius * 2, mean_radius * 2],
+                high=[width_um - mean_radius * 2, height_um - mean_radius * 2],
+                size=(n_cell_types, 2),
+            )
+            tree = cKDTree(type_centers)
+            _, cell_types = tree.query(centers)
+        else:
+            cell_types = np.arange(n_cells, dtype=np.int64) % n_cell_types
+        rng.shuffle(cell_types)
+
+    return centers, cell_types
+
+
+def _assign_dnbs_to_cells(
+    all_coords: np.ndarray,
+    cell_centers: np.ndarray,
+    cell_radii: np.ndarray,
+) -> np.ndarray:
+    """Assign each DNB to the nearest cell center within that cell's radius."""
+    n_dnbs = all_coords.shape[0]
+    dnb_labels = np.full(n_dnbs, -1, dtype=np.int64)
+    tree = cKDTree(cell_centers)
+
+    # Query nearest cell center for each DNB
+    dists, nearest = tree.query(all_coords, k=1)
+    valid = dists <= cell_radii[nearest]
+    dnb_labels[valid] = nearest[valid]
+    return dnb_labels
 
 
 def generate_synthetic_data(
@@ -58,6 +98,7 @@ def generate_synthetic_data(
     grid_height: int = 200,
     dnb_pitch: float = 0.5,
     cell_radius: float = 5.0,
+    cell_radius_cv: float = 0.2,
     n_genes: int = 500,
     n_high_genes: int = 80,
     ambient_lambda: float = 50.0,
@@ -65,18 +106,42 @@ def generate_synthetic_data(
     empty_fraction: float = 0.30,
     n_cell_types: int = 1,
     marker_fraction: float = 0.0,
+    cluster_strength: float = 0.5,
     seed: int = 42,
 ) -> Dict[str, np.ndarray]:
-    """Generate synthetic data efficiently.
+    """Generate synthetic data.
 
-    Returns a dict with keys:
-        dnb_expr:    [n_genes x n_dnbs] float64, DNB-level contaminated expression.
-        dnb_coords:  [n_dnbs x 2] float64, DNB spatial coordinates.
-        dnb_labels:  [n_dnbs] int64, cell ID (-1 for empty DNBs).
-        true_expr:   [n_genes x n_cells] float64, per-cell ground-truth expression.
-        gene_is_high:[n_genes] bool, high-expression gene flag.
-        cell_types:  [n_cells] int64, cell-type assignment.
-        params:      dict of generation parameters (including ground-truth lambda/alpha).
+    Args:
+        n_cells: Target number of cells to place in the FOV.
+        grid_width/height: Number of DNBs along each axis.
+        dnb_pitch: Physical spacing between DNBs (µm).
+        cell_radius: Mean cell radius (µm).
+        cell_radius_cv: Coefficient of variation of cell radii.
+        n_genes: Total number of genes.
+        n_high_genes: Number of high-expression genes.
+        ambient_lambda: Spatial decay length of ambient RNA (µm).
+        ambient_alpha: Global ambient leakage coefficient.
+        empty_fraction: Target fraction of DNBs that are empty (inter-cellular
+            space). The generator enforces this globally by resurrecting the
+            uncovered DNBs closest to a cell centre when there is too much
+            natural empty space, or by randomly removing covered DNBs when
+            there is too little.
+        n_cell_types: Number of cell types.
+        marker_fraction: Fraction of high genes that are cell-type-specific markers.
+        cluster_strength: If >0 and n_cell_types>1, spatially cluster cell types.
+        seed: Random seed.
+
+    Returns:
+        dict with keys:
+            dnb_expr:     [n_genes x n_dnbs] contaminated DNB-level expression.
+            dnb_coords:   [n_dnbs x 2] coordinates.
+            dnb_labels:   [n_dnbs] cell ID (-1 for empty).
+            true_expr:    [n_genes x n_kept_cells] ground-truth per-cell expression.
+            gene_is_high: [n_genes] bool.
+            cell_types:   [n_kept_cells] int.
+            true_alpha:   [n_genes] per-gene ambient coefficient.
+            true_lambda:  float, ground-truth lambda.
+            params:       dict of generation parameters.
     """
     rng = np.random.RandomState(seed)
 
@@ -89,46 +154,66 @@ def generate_synthetic_data(
     width_um = grid_width * dnb_pitch
     height_um = grid_height * dnb_pitch
 
-    # ── 2. Cell centers on jittered grid ─────────────────────────────
-    cell_centers = _jittered_grid_centers(n_cells, width_um, height_um, cell_radius, rng)
+    # ── 2. Cell centers and types ────────────────────────────────────
+    cell_centers, cell_types = _place_cell_centers(
+        n_cells, width_um, height_um, cell_radius, rng,
+        n_cell_types=n_cell_types, cluster_strength=cluster_strength,
+    )
 
-    # Assign DNBs to nearest cell center within radius
-    dnb_labels = np.full(n_dnbs, -1, dtype=np.int64)
-    chunk = 2000
-    for i in range(0, n_dnbs, chunk):
-        end = min(i + chunk, n_dnbs)
-        coords_chunk = all_coords[i:end]
-        diff = coords_chunk[:, None, :] - cell_centers[None, :, :]
-        dists = np.linalg.norm(diff, axis=2)
-        nearest = np.argmin(dists, axis=1)
-        min_dists = dists[np.arange(len(coords_chunk)), nearest]
-        valid = min_dists <= cell_radius
-        dnb_labels[i:end][valid] = nearest[valid]
+    # Variable cell radii
+    cell_radii = rng.lognormal(
+        mean=np.log(cell_radius),
+        sigma=cell_radius_cv,
+        size=n_cells,
+    )
+    cell_radii = np.clip(cell_radii, cell_radius * 0.5, cell_radius * 1.5)
 
-    # ── 3. Empty cells ───────────────────────────────────────────────
-    if empty_fraction > 0:
-        n_empty_cells = max(1, int(round(n_cells * empty_fraction)))
-        empty_cell_indices = rng.choice(n_cells, n_empty_cells, replace=False)
-        for c in empty_cell_indices:
-            dnb_labels[dnb_labels == c] = -1
-    else:
-        empty_cell_indices = np.array([], dtype=np.int64)
+    # ── 3. Assign DNBs to cells ──────────────────────────────────────
+    dnb_labels = _assign_dnbs_to_cells(all_coords, cell_centers, cell_radii)
+    n_covered = (dnb_labels >= 0).sum()
 
-    # Compact cell IDs so that only cells with DNBs are kept (matches SPARKLE output)
+    # ── 4. Create empty DNBs to match requested empty_fraction ────────
+    # We enforce the requested global empty_fraction.  DNBs not covered by any
+    # cell are natural empty space; if there are too many we resurrect the
+    # uncovered DNBs closest to a cell centre so that dense scenarios can really
+    # reach the intended low empty fraction.  If there are too few natural empty
+    # DNBs we randomly remove covered DNBs to model inter-cellular space.
+    if n_covered > 0:
+        target_empty = int(round(n_dnbs * empty_fraction))
+        target_empty = max(0, min(target_empty, n_dnbs - 1))
+        already_empty = n_dnbs - n_covered
+
+        if already_empty > target_empty:
+            # Too many uncovered DNBs: assign the closest ones to their nearest
+            # cell so that the final empty fraction matches the scenario.
+            n_resurrect = already_empty - target_empty
+            uncovered_idx = np.where(dnb_labels < 0)[0]
+            cell_tree_for_empty = cKDTree(cell_centers)
+            dists, nearest = cell_tree_for_empty.query(
+                all_coords[uncovered_idx], k=1
+            )
+            # Prefer resurrecting DNBs that are close to a cell centre.
+            order = np.argsort(dists)
+            resurrect_idx = uncovered_idx[order[:n_resurrect]]
+            dnb_labels[resurrect_idx] = nearest[order[:n_resurrect]]
+        elif already_empty < target_empty:
+            need_to_remove = target_empty - already_empty
+            covered_idx = np.where(dnb_labels >= 0)[0]
+            need_to_remove = min(need_to_remove, len(covered_idx))
+            if need_to_remove > 0:
+                remove_idx = rng.choice(
+                    covered_idx, need_to_remove, replace=False
+                )
+                dnb_labels[remove_idx] = -1
+
+    # Compact cell IDs: only cells with at least one DNB are kept
     kept_cells = sorted(set(int(x) for x in dnb_labels[dnb_labels >= 0]))
     n_kept = len(kept_cells)
     old_to_new = {old_id: i for i, old_id in enumerate(kept_cells)}
     dnb_labels = np.array([old_to_new.get(l, -1) for l in dnb_labels], dtype=np.int64)
     cell_centers = cell_centers[kept_cells]
-
-    # ── 4. Cell types ────────────────────────────────────────────────
-    cell_types = np.zeros(n_kept, dtype=np.int64)
-    if n_cell_types > 1:
-        old_cell_types = np.zeros(n_cells, dtype=np.int64)
-        cells_per_type = np.array_split(np.arange(n_cells), n_cell_types)
-        for t, idxs in enumerate(cells_per_type):
-            old_cell_types[idxs] = t
-        cell_types = old_cell_types[kept_cells]
+    cell_types = cell_types[kept_cells]
+    cell_radii = cell_radii[kept_cells]
 
     # ── 5. Ground-truth per-cell expression ──────────────────────────
     gene_is_high = np.zeros(n_genes, dtype=bool)
@@ -152,7 +237,7 @@ def generate_synthetic_data(
                 50.0, (len(gidx), len(cells_t))
             ).astype(np.float64)
 
-    # Marker genes: additional strong expression in one cell type only
+    # Marker genes: strong, cell-type-specific expression
     n_markers = int(round(n_high_genes * marker_fraction))
     if n_markers > 0 and n_cell_types > 1:
         marker_pool = np.arange(n_high_genes)
@@ -168,9 +253,11 @@ def generate_synthetic_data(
                 80.0, (len(marker_genes), len(cells_t))
             ).astype(np.float64)
 
-    # ── 6. DNB-level clean expression (Poisson per-DNB from cell total)
+    # ── 6. DNB-level clean expression ────────────────────────────────
     dnb_expr_clean = np.zeros((n_genes, n_dnbs), dtype=np.float64)
     cell_dnb_counts = np.bincount(dnb_labels[dnb_labels >= 0], minlength=n_kept)
+    cell_areas = cell_dnb_counts.astype(np.float64)
+    cell_areas_safe = np.maximum(cell_areas, 1.0)
 
     nonzero_cells = np.where(cell_dnb_counts > 0)[0]
     for c in nonzero_cells:
@@ -180,69 +267,91 @@ def generate_synthetic_data(
             continue
         per_dnb_rate = true_expr[:, c] / n_dnbs_c
         per_dnb_rate = np.maximum(per_dnb_rate, 0.01)
-        dnb_expr_clean[:, mask] = rng.poisson(per_dnb_rate[:, None], (n_genes, n_dnbs_c)).astype(np.float64)
+        dnb_expr_clean[:, mask] = rng.poisson(
+            per_dnb_rate[:, None], (n_genes, n_dnbs_c)
+        ).astype(np.float64)
 
-    # ── 7. Ambient RNA injection (SPARKLE-consistent model) ──────────
+    # ── 7. Ambient RNA injection (SPARKLE-consistent) ────────────────
     dnb_expr = dnb_expr_clean.copy()
-    cell_areas = cell_dnb_counts.astype(np.float64)
-    cell_areas_safe = np.maximum(cell_areas, 1.0)
-
-    cell_tree = cKDTree(cell_centers)
     max_neigh_dist = 3 * ambient_lambda
+    cell_tree = cKDTree(cell_centers)
 
-    # Cell-to-cell ambient contributions
-    cell_dist_coo = cell_tree.sparse_distance_matrix(cell_tree, max_neigh_dist, output_type="coo_matrix")
-    cell_dists = cell_dist_coo.data
+    # Per-gene ambient coefficients
+    true_alpha = np.zeros(n_genes, dtype=np.float64)
+    true_alpha[:] = ambient_alpha * (0.5 + rng.random(n_genes))
+
+    # Pre-compute cell-to-cell distances and weights
+    cell_dist_coo = cell_tree.sparse_distance_matrix(
+        cell_tree, max_neigh_dist, output_type="coo_matrix"
+    )
     cell_src = cell_dist_coo.col
     cell_tgt = cell_dist_coo.row
     same_cell_mask = cell_src != cell_tgt
-    cell_dists = cell_dists[same_cell_mask]
+    cell_dists = cell_dist_coo.data[same_cell_mask]
     cell_src = cell_src[same_cell_mask]
     cell_tgt = cell_tgt[same_cell_mask]
-    weights = np.exp(-cell_dists / ambient_lambda)
-    weights[weights < 0.001] = 0.0
+    cell_weights = np.exp(-cell_dists / ambient_lambda)
+    cell_weights[cell_weights < 0.001] = 0.0
+
+    # Pre-compute empty DNB to cell distances and weights
+    empty_mask = dnb_labels < 0
+    empty_coords = all_coords[empty_mask]
+    empty_global_idx = np.where(empty_mask)[0]
+
+    if empty_coords.shape[0] > 0:
+        empty_tree = cKDTree(empty_coords)
+        empty_dist_coo = empty_tree.sparse_distance_matrix(
+            cell_tree, max_neigh_dist, output_type="coo_matrix"
+        )
+        empty_src = empty_dist_coo.col
+        empty_tgt_local = empty_dist_coo.row
+        empty_dists = empty_dist_coo.data
+        empty_weights = np.exp(-empty_dists / ambient_lambda)
+        empty_weights[empty_weights < 0.001] = 0.0
+    else:
+        empty_src = np.array([], dtype=np.int64)
+        empty_tgt_local = np.array([], dtype=np.int64)
+        empty_weights = np.array([], dtype=np.float64)
 
     for g in range(n_genes):
         if not gene_is_high[g]:
             continue
-        alpha_g = ambient_alpha * (0.5 + rng.random())
 
-        # source rate = true_expr / area for source cells
-        source_rate = true_expr[g, cell_src] / cell_areas_safe[cell_src]
-        contrib_per_target = alpha_g * weights * source_rate * cell_areas_safe[cell_tgt]
-        ambient_per_cell = np.bincount(cell_tgt, weights=contrib_per_target, minlength=n_kept)
+        alpha_g = true_alpha[g]
+        source_rate = true_expr[g, :] / cell_areas_safe
 
-        # Distribute ambient uniformly over each cell's DNBs
+        # Cell-to-cell ambient: total ambient received by each cell
+        contrib_to_cell = alpha_g * cell_weights * source_rate[cell_src]
+        ambient_total_cell = np.bincount(
+            cell_tgt, weights=contrib_to_cell, minlength=n_kept
+        )
+
+        # Distribute uniformly over each cell's DNBs.
+        # ambient_total_cell[c] is already the per-DNB ambient rate for cell c.
         for c in nonzero_cells:
             n_dnbs_c = cell_dnb_counts[c]
             if n_dnbs_c == 0:
                 continue
             mask = dnb_labels == c
-            per_dnb_ambient = ambient_per_cell[c] / n_dnbs_c
-            dnb_expr[g, mask] += rng.poisson(max(per_dnb_ambient, 0.0), int(n_dnbs_c)).astype(np.float64)
+            per_dnb_ambient = ambient_total_cell[c]
+            dnb_expr[g, mask] += rng.poisson(
+                max(per_dnb_ambient, 0.0), int(n_dnbs_c)
+            ).astype(np.float64)
 
-    # Empty DNB ambient contributions
-    empty_mask = dnb_labels < 0
-    empty_coords = all_coords[empty_mask]
-    if empty_coords.shape[0] > 0:
-        empty_tree = cKDTree(empty_coords)
-        empty_dist_coo = empty_tree.sparse_distance_matrix(cell_tree, max_neigh_dist, output_type="coo_matrix")
-        empty_dists = empty_dist_coo.data
-        empty_src = empty_dist_coo.col  # cell index
-        empty_tgt_local = empty_dist_coo.row  # index within empty_coords
-        weights_e = np.exp(-empty_dists / ambient_lambda)
-        weights_e[weights_e < 0.001] = 0.0
+        # Empty DNB ambient
+        if empty_coords.shape[0] > 0:
+            contrib_to_empty = alpha_g * empty_weights * source_rate[empty_src]
+            ambient_per_empty = np.bincount(
+                empty_tgt_local, weights=contrib_to_empty, minlength=empty_coords.shape[0]
+            )
+            dnb_expr[g, empty_global_idx] += rng.poisson(
+                np.maximum(ambient_per_empty, 0.0)
+            ).astype(np.float64)
 
-        empty_global_idx = np.where(empty_mask)[0]
-        for g in range(n_genes):
-            if not gene_is_high[g]:
-                continue
-            alpha_g = ambient_alpha * (0.5 + rng.random())
-
-            source_rate = true_expr[g, empty_src] / cell_areas_safe[empty_src]
-            contrib = alpha_g * weights_e * source_rate  # A_t = 1 for a single empty DNB
-            ambient_per_empty = np.bincount(empty_tgt_local, weights=contrib, minlength=empty_coords.shape[0])
-            dnb_expr[g, empty_global_idx] += rng.poisson(np.maximum(ambient_per_empty, 0)).astype(np.float64)
+    n_empty_final = int(empty_mask.sum())
+    print(f"  Generated: {n_kept} cells, {n_dnbs} DNBs "
+          f"({n_empty_final} empty {100*n_empty_final/n_dnbs:.1f}%, "
+          f"{n_dnbs - n_empty_final} cell), {n_genes} genes")
 
     return {
         "dnb_expr": dnb_expr,
@@ -251,21 +360,24 @@ def generate_synthetic_data(
         "true_expr": true_expr,
         "gene_is_high": gene_is_high,
         "cell_types": cell_types,
+        "true_alpha": true_alpha,
+        "true_lambda": float(ambient_lambda),
         "params": {
-            "n_cells": n_kept,
             "n_cells_requested": n_cells,
+            "n_cells_kept": n_kept,
             "grid_width": grid_width,
             "grid_height": grid_height,
             "dnb_pitch": dnb_pitch,
-            "cell_radius": cell_radius,
+            "cell_radius": float(cell_radius),
+            "cell_radius_cv": float(cell_radius_cv),
             "n_genes": n_genes,
             "n_high_genes": n_high_genes,
-            "ambient_lambda": ambient_lambda,
-            "ambient_alpha": ambient_alpha,
-            "empty_fraction": empty_fraction,
+            "ambient_lambda": float(ambient_lambda),
+            "ambient_alpha": float(ambient_alpha),
+            "empty_fraction": float(empty_fraction),
             "n_cell_types": n_cell_types,
-            "marker_fraction": marker_fraction,
-            "empty_cell_indices": empty_cell_indices,
+            "marker_fraction": float(marker_fraction),
+            "cluster_strength": float(cluster_strength),
             "seed": seed,
         },
     }

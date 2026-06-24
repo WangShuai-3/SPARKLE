@@ -13,7 +13,7 @@ evaluation/
 │   ├── generator.py       # 200×200 DNB 网格 + cell-based ambient RNA 注入
 │   └── scenarios.py       # 预定义评测场景 S1–S10
 ├── scripts/               # 评测脚本
-│   ├── run_benchmark.py   # 主评测流程 (合成数据) — 待实现
+│   ├── run_benchmark.py   # 主评测流程 (合成数据) — 已集成到 final_comparison.py
 │   ├── test_axolotl.py    # Axolotl 真实数据测试
 │   ├── final_comparison.py# 最终方法对比（支持 axolotl/mosta/visiumhd/synthetic）
 │   └── visualize.py       # 空间热力图生成 — 待实现
@@ -32,7 +32,7 @@ evaluation/
 | DNB 网格 | 200×200 = **40,000 DNBs** |
 | DNB 间距 | 0.5 μm |
 | 基因数 | 500 (其中 80 个高表达基因) |
-| 细胞数 | 80–180 (因 empty_fraction 而异) |
+| 细胞数 | 80–280 (因 empty_fraction 而异) |
 | 空细胞比例 | 10%–60% |
 | 真实 λ | 20 / 50 / 100 μm |
 | 泄漏率 α | 0.005–0.10 |
