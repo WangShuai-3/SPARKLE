@@ -33,5 +33,8 @@ all = [
     "stambient[dev]",
 ]
 
+[tool.setuptools]
+packages = ["stambient"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
