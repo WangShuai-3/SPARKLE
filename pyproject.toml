@@ -7,7 +7,7 @@ name = "stambient"
 version = "0.1.0"
 description = "SPARKLE: Spatial Ambient RNA Kernel-based Leakage Estimator"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = {text = "MIT"}
 dependencies = [
     "numpy>=1.21",
@@ -27,7 +27,7 @@ dev = [
     "scrublet>=0.2.3",
     "decontx-python>=0.2.0",
     "leidenalg>=0.8.0",
-    "soupx>=1.6",
+    "soupx-python>=0.3.0",
 ]
 all = [
     "stambient[dev]",
