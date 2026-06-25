@@ -25,8 +25,8 @@ import scanpy as sc
 def load_synthetic_scenario_data(scenario_id="S1", seed=42):
     """Load a synthetic benchmark scenario (S1–S10).
 
-    First tries to load a cached NPZ file at evaluation/data/S{scenario_id}.npz
-    (the original benchmark data). If not present, falls back to the generator.
+    Data is always generated on the fly using evaluation.synthetic.generator.
+    This avoids NumPy version compatibility issues with old cached NPZ files.
 
     Returns a dict compatible with the comparison pipeline:
         dnb_expr, dnb_coords, dnb_labels, gene_names, cell_ids,
@@ -37,49 +37,7 @@ def load_synthetic_scenario_data(scenario_id="S1", seed=42):
     scenario = get_scenario(scenario_id)
     print(f"[Synthetic] Scenario {scenario_id}: {scenario['name']}")
 
-    project_root = Path(__file__).resolve().parent.parent.parent
-    npz_path = project_root / "evaluation" / "data" / f"{scenario_id}.npz"
-
-    if npz_path.exists():
-        print(f"  Loading cached data: {npz_path}")
-        npz = np.load(npz_path, allow_pickle=True)
-        dnb_expr = npz["dnb_expr"]
-        dnb_coords = npz["dnb_coords"]
-        dnb_labels = npz["dnb_labels"]
-        true_expr = npz["true_expr"]
-        gene_is_high = npz["gene_is_high"]
-        true_alpha = npz["true_alpha"]
-        true_lambda = float(npz["true_lambda"])
-        metadata = npz["metadata"].item()
-
-        n_genes, n_dnbs = dnb_expr.shape
-        n_cells = true_expr.shape[1]
-        gene_names = np.array([f"gene_{i}" for i in range(n_genes)])
-        cell_ids = np.arange(n_cells, dtype=np.int64)
-        n_empty = int((dnb_labels < 0).sum())
-
-        print(f"  {n_genes} genes, {n_cells} cells, {n_dnbs} DNBs "
-              f"({n_empty} empty, {n_dnbs - n_empty} cell)")
-        print(f"  Ground-truth λ={true_lambda}µm, "
-              f"α(mean)={true_alpha.mean():.4f} from cached NPZ")
-
-        return {
-            "dnb_expr": csr_matrix(dnb_expr.astype(np.float64)),
-            "dnb_coords": dnb_coords,
-            "dnb_labels": dnb_labels,
-            "gene_names": gene_names,
-            "cell_ids": cell_ids,
-            "true_expr": true_expr,
-            "gene_is_high": gene_is_high,
-            "true_alpha": true_alpha,
-            "true_lambda": true_lambda,
-            "metadata": metadata,
-            "scenario_id": scenario_id,
-            "params": {"source": "npz_cache", "scenario": scenario},
-        }
-
-    # Fallback: generate on the fly
-    print(f"  NPZ cache not found, generating synthetic data on the fly...")
+    print(f"  Generating synthetic data on the fly...")
     data = generate_synthetic_data(
         n_cells=scenario.get("n_cells", 200),
         grid_width=200,
