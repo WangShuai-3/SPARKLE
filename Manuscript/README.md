@@ -131,7 +131,7 @@ All scenarios contain 3–5 cell types with cell-type-specific markers, so the b
 
 > 核心解释：ambient RNA 让不同细胞类型之间产生虚假相关（0.296），SPARKLE 去污染后异类相关降低 60%，细胞类型间界限更清晰。
 
-新增 Doublet-score 评估：使用 Scrublet 计算每个方法校正前后的中位数 doublet score（`Dblt↓`），用于衡量 ambient RNA 造成的伪双胞信号是否被削弱。
+新增 Doublet-score 评估：使用 Scrublet 计算每个方法校正前后的中位数 doublet score（`Dblt↓`），用于衡量 ambient RNA 造成的伪双胞信号是否被削弱。200-gene 窗口结果：RAW=0.1046，SPARKLE=0.1046（reduction 0.0%）。
 
 ### Ablation (S1–S4, S7 average)
 
