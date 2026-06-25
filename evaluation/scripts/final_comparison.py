@@ -437,7 +437,7 @@ def load_axolotl_data_windowed(x_range=None, y_range=None):
 def run_axolotl_comparison(data, n_genes=200, methods=None):
     """Run 3-way comparison for Axolotl."""
     if methods is None:
-        methods = ['sparkle', 'spatial_soupx', 'soupx']
+        methods = ['sparkle', 'spatial_soupx', 'soupx', 'decontx']
     methods = [m.lower().strip() for m in methods]
 
     dnb_expr = data['dnb_expr']
@@ -548,22 +548,43 @@ def run_axolotl_comparison(data, n_genes=200, methods=None):
             results['SoupX'] = sx_aligned
             results['sx_full'] = sx_corr
 
+    # 4. DecontX
+    if 'decontx' in methods:
+        print(f"\n[6/3] DecontX...")
+        t0 = time.time()
+        dx_corr, dx_diag = run_decontx_method({
+            "dnb_expr": dnb_expr,
+            "dnb_labels": dnb_labels,
+            "gene_names": list(gene_names),
+            "cell_ids": list(cell_ids),
+        }, verbose=True)
+        dx_t = time.time() - t0
+        if dx_corr is not None:
+            dx_sst = dx_corr[sst_idx_all]
+            sst_summary(dx_sst, f"DecontX ({dx_t:.0f}s, contam={dx_diag.get('contamination', 0):.3f})")
+            results['DecontX'] = dx_sst
+            results['dx_full'] = dx_corr
+
     # Summary
     print(f"\n{'='*60}")
     print("SUMMARY")
     print(f"{'='*60}")
-    print(f"  {'Method':<18} {'sstIN':>7} {'Nbr':>7} {'s/N':>7} {'Retain':>7} {'Remove':>7}")
-    print(f"  {'-'*18} {'-'*7} {'-'*7} {'-'*7} {'-'*7} {'-'*7}")
+    print(f"  {'Method':<18} {'sstIN':>7} {'Nbr':>7} {'Oth':>7} {'s/N':>7} {'N/O':>7} {'Retain':>7} {'Remove':>7}")
+    print(f"  {'-'*18} {'-'*7} {'-'*7} {'-'*7} {'-'*7} {'-'*7} {'-'*7} {'-'*7}")
     r_si = sst_raw[sstin_mask].mean()
     r_sn = sst_raw[neighbor_mask].mean()
-    print(f"  {'Raw':<18} {r_si:7.1f} {r_sn:7.1f} {r_si/r_sn:7.2f}x {'-':>7} {'-':>7}")
+    r_so = sst_raw[other_mask].mean()
+    r_no = r_sn / r_so if r_so > 0 else float('nan')
+    print(f"  {'Raw':<18} {r_si:7.1f} {r_sn:7.1f} {r_so:7.1f} {r_si/r_sn:7.2f}x {r_no:7.2f}x {'-':>7} {'-':>7}")
 
     for name, vals in results.items():
         if name.endswith('_full'):
             continue
         si = vals[sstin_mask].mean()
         sn = vals[neighbor_mask].mean()
-        print(f"  {name:<18} {si:7.1f} {sn:7.1f} {si/sn:7.2f}x "
+        so = vals[other_mask].mean()
+        no_ratio = sn / so if so > 0 else float('nan')
+        print(f"  {name:<18} {si:7.1f} {sn:7.1f} {so:7.1f} {si/sn:7.2f}x {no_ratio:7.2f}x "
               f"{si/r_si*100:6.1f}% {(1-sn/r_sn)*100:6.1f}%")
 
     # ── scIB evaluation ──────────────────────────────────────
@@ -585,6 +606,9 @@ def run_axolotl_comparison(data, n_genes=200, methods=None):
         if 'soupx' in methods and 'sx_full' in results:
             sx_cell = results['sx_full']
             _compute_scib_metrics(sx_cell, cell_anns, "SoupX")
+        # DecontX: cell-level from run_decontx_method
+        if 'decontx' in methods and 'dx_full' in results:
+            _compute_scib_metrics(results['dx_full'], cell_anns, "DecontX")
     # Save cell-based h5ad and metrics
     print(f"\n  {'='*60}")
     print(f"  Saving results")
@@ -607,15 +631,16 @@ def run_axolotl_comparison(data, n_genes=200, methods=None):
         "raw": {
             "sstIN": float(sst_raw[sstin_mask].mean()) if sstin_mask.any() else None,
             "sstNbr": float(sst_raw[neighbor_mask].mean()) if neighbor_mask.any() else None,
+            "sstOth": float(sst_raw[other_mask].mean()) if other_mask.any() else None,
         },
         "methods": {},
     }
-    full_map = {'SPARKLE': 'sp_full', 'SpatialSoupX': 'ss_full', 'SoupX': 'sx_full'}
+    full_map = {'SPARKLE': 'sp_full', 'SpatialSoupX': 'ss_full', 'SoupX': 'sx_full', 'DecontX': 'dx_full'}
     for method_name, full_key in full_map.items():
         full = results.get(full_key)
         if full is None:
             continue
-        if method_name == 'SPARKLE':
+        if method_name in ('SPARKLE', 'DecontX'):
             gnames_save = gene_names
             sst_vals = full[sst_idx_all]
         else:
@@ -627,6 +652,7 @@ def run_axolotl_comparison(data, n_genes=200, methods=None):
         metrics["methods"][method_name] = {
             "sstIN": float(sst_vals[sstin_mask].mean()) if sstin_mask.any() else None,
             "sstNbr": float(sst_vals[neighbor_mask].mean()) if neighbor_mask.any() else None,
+            "sstOth": float(sst_vals[other_mask].mean()) if other_mask.any() else None,
         }
     save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
 
