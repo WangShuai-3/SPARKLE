@@ -19,7 +19,8 @@ evaluation/
 │   └── visualize.py       # 空间热力图生成 — 待实现
 ├── baselines/             # 对比方法
 │   ├── soupx.py           # 原始 SoupX
-│   └── spatial_soupx.py   # Spatial SoupX (bin 级空间核)
+│   ├── spatial_soupx.py   # Spatial SoupX (bin 级空间核)
+│   └── standalone_decontx.py / decontx.py  # DecontX (per-gene contamination)
 ├── data/                  # 数据
 │   └── axolotl/           # Axolotl 真实数据
 └── reports/               # 评测报告输出
@@ -55,8 +56,9 @@ evaluation/
 # 单个合成数据场景
 python evaluation/scripts/final_comparison.py --dataset synthetic --scenario S1
 
-# 全部 10 个合成数据场景
-python evaluation/scripts/final_comparison.py --dataset synthetic --all-scenarios
+# 全部 10 个合成数据场景（含 DecontX）
+python evaluation/scripts/final_comparison.py --dataset synthetic --all-scenarios \
+    --methods sparkle,spatial_soupx,soupx,decontx
 
 # Axolotl 真实数据
 python evaluation/scripts/test_axolotl.py

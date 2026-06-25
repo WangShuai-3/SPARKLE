@@ -88,24 +88,24 @@
 Results reproduced via:
 ```bash
 python evaluation/scripts/final_comparison.py --dataset synthetic --all-scenarios \
-  --methods sparkle,spatial_soupx,soupx
+  --methods sparkle,spatial_soupx,soupx,decontx
 ```
 
-All scenarios now contain 3–5 cell types with cell-type-specific markers, so the benchmark tests correction in heterogeneous tissue. SPARKLE is shown in both synthetic-benchmark mode (`self_confidence_penalty=False`) and real-data default mode (`self_confidence_penalty=True`).
+All scenarios contain 3–5 cell types with cell-type-specific markers, so the benchmark tests correction in heterogeneous tissue. SPARKLE is shown in both synthetic-benchmark mode (`self_confidence_penalty=False`) and real-data default mode (`self_confidence_penalty=True`).
 
-| Scenario | SPARKLE (no penalty) | SPARKLE (penalty) | SoupX | Spatial SoupX |
-|----------|:---:|:---:|:---:|:---:|
-| S1 Sparse multi-type (40% empty) | **65.9%** | 54.2% | 19.4% | −19.5% |
-| S2 Medium multi-type (25%) | **74.7%** | 59.1% | 24.0% | 12.2% |
-| S3 Dense multi-type (10%) | **83.1%** | 65.2% | 27.0% | 41.3% |
-| S4 Short λ multi-type (20µm) | **45.1%** | 37.0% | 9.2% | −101.1% |
-| S5 Long λ multi-type (100µm) | **81.3%** | 62.1% | 27.8% | 39.0% |
-| S6 Weak α multi-type (≤0.005) | **57.3%** | 47.8% | 32.8% | −60.4% |
-| S7 Strong α multi-type (≤0.10) | **94.2%** | 57.8% | 45.8% | 87.6% |
-| S8 Very sparse multi-type (>50%) | **54.7%** | 47.0% | 27.5% | −27.2% |
-| S9 High marker fraction (50%) | **76.8%** | 60.2% | 26.3% | 7.1% |
-| S10 Many cell types (5 types) | **68.2%** | 57.8% | 30.2% | −31.5% |
-| **Average** | **70.1%** | 54.8% | 27.0% | −5.2% |
+| Scenario | SPARKLE (no penalty) | SPARKLE (penalty) | DecontX | SoupX | Spatial SoupX |
+|----------|:---:|:---:|:---:|:---:|:---:|
+| S1 Sparse multi-type (40% empty) | **65.9%** | 54.2% | 39.2% | 19.4% | −19.5% |
+| S2 Medium multi-type (25%) | **74.7%** | 59.1% | 48.4% | 24.0% | 12.2% |
+| S3 Dense multi-type (10%) | **83.1%** | 65.2% | 42.2% | 27.0% | 41.3% |
+| S4 Short λ multi-type (20µm) | **45.1%** | 37.0% | 38.9% | 9.2% | −101.1% |
+| S5 Long λ multi-type (100µm) | **81.3%** | 62.1% | 49.9% | 27.8% | 39.0% |
+| S6 Weak α multi-type (≤0.005) | **57.3%** | 47.8% | 43.4% | 32.8% | −60.4% |
+| S7 Strong α multi-type (≤0.10) | **94.2%** | 57.8% | 50.6% | 45.8% | 87.6% |
+| S8 Very sparse multi-type (>50%) | **54.7%** | 47.0% | 34.3% | 27.5% | −27.2% |
+| S9 High marker fraction (50%) | **76.8%** | 60.2% | 44.8% | 26.3% | 7.1% |
+| S10 Many cell types (5 types) | **68.2%** | 57.8% | 52.1% | 30.2% | −31.5% |
+| **Average** | **70.1%** | 54.8% | 44.4% | 27.0% | −5.2% |
 
 ### Axolotl SST data (real)
 
