@@ -74,6 +74,7 @@ def load_synthetic_scenario_data(scenario_id="S1", seed=42):
             "true_alpha": true_alpha,
             "true_lambda": true_lambda,
             "metadata": metadata,
+            "scenario_id": scenario_id,
             "params": {"source": "npz_cache", "scenario": scenario},
         }
 
@@ -112,6 +113,7 @@ def load_synthetic_scenario_data(scenario_id="S1", seed=42):
         "gene_names": gene_names,
         "cell_ids": cell_ids,
         "true_expr": data["true_expr"],
+        "scenario_id": scenario_id,
         "gene_is_high": data["gene_is_high"],
         "true_alpha": data["true_alpha"],
         "true_lambda": data["true_lambda"],
@@ -239,6 +241,45 @@ def run_synthetic_comparison(data, n_genes=500, methods=None):
             print(f"  RMSE={rmse_dx:.4f}, reduction={reduc_dx:.1f}%, "
                   f"contamination={dx_diag.get('contamination', 'N/A'):.3f}, time={dx_t:.1f}s")
             results["DecontX"] = {"rmse": rmse_dx, "reduction": reduc_dx, "runtime": dx_t}
+
+    # Save cell-based h5ad and metrics
+    print(f"\n  {'='*60}")
+    print(f"  Saving results")
+    print(f"  {'='*60}")
+    reports_root = _reports_root()
+    tag = f"synthetic_{data['scenario_id']}"
+    save_result_h5ad(raw_cell, data['gene_names'], data['cell_ids'], None,
+                     reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW")
+    metrics = {
+        "dataset": tag,
+        "scenario": data.get("scenario_name", ""),
+        "n_cells": int(raw_cell.shape[1]),
+        "n_genes": int(raw_cell.shape[0]),
+        "rmse_raw": rmse_raw,
+        "raw": {"rmse": rmse_raw},
+        "methods": {},
+    }
+    for method_name, r in results.items():
+        # Try to recover corrected matrix saved in result dict
+        corrected = None
+        if method_name == "SPARKLE" and 'sp_corr' in locals():
+            corrected = sp_corr
+        elif method_name == "SpatialSoupX" and 'ss_corr' in locals():
+            corrected = ss_corr
+        elif method_name == "SoupX" and 'sx_corr' in locals():
+            corrected = sx_corr
+        elif method_name == "DecontX" and 'dx_corr' in locals():
+            corrected = dx_corr
+        if corrected is not None:
+            save_result_h5ad(corrected, data['gene_names'], data['cell_ids'], None,
+                             reports_root / "h5ad" / f"{tag}_{method_name}.h5ad",
+                             method_name)
+        metrics["methods"][method_name] = {
+            "rmse": r['rmse'],
+            "reduction_pct": r['reduction'],
+            "runtime": r['runtime'],
+        }
+    save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
 
     # Summary table
     print(f"\n{'='*60}")
@@ -586,6 +627,50 @@ def run_axolotl_comparison(data, n_genes=200, methods=None):
         if 'soupx' in methods and 'sx_full' in results:
             sx_cell = results['sx_full']
             _compute_scib_metrics(sx_cell, cell_anns, "SoupX")
+    # Save cell-based h5ad and metrics
+    print(f"\n  {'='*60}")
+    print(f"  Saving results")
+    print(f"  {'='*60}")
+    reports_root = _reports_root()
+    x_range = data.get('x_range')
+    y_range = data.get('y_range')
+    if x_range is not None and y_range is not None:
+        tag = f"axolotl_x{x_range[0]}-{x_range[1]}_y{y_range[0]}-{y_range[1]}"
+    else:
+        tag = "axolotl_full"
+
+    sub_gene_names = [gene_names[i] for i in top_n]
+    save_result_h5ad(raw_cell, gene_names, cell_ids, ann_map,
+                     reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW")
+    metrics = {
+        "dataset": tag,
+        "n_cells": int(raw_cell.shape[1]),
+        "n_genes": int(raw_cell.shape[0]),
+        "raw": {
+            "sstIN": float(sst_raw[sstin_mask].mean()) if sstin_mask.any() else None,
+            "sstNbr": float(sst_raw[neighbor_mask].mean()) if neighbor_mask.any() else None,
+        },
+        "methods": {},
+    }
+    full_map = {'SPARKLE': 'sp_full', 'SpatialSoupX': 'ss_full', 'SoupX': 'sx_full'}
+    for method_name, full_key in full_map.items():
+        full = results.get(full_key)
+        if full is None:
+            continue
+        if method_name == 'SPARKLE':
+            gnames_save = gene_names
+            sst_vals = full[sst_idx_all]
+        else:
+            gnames_save = sub_gene_names
+            sst_vals = full[sst_loc_n]
+        save_result_h5ad(full, gnames_save, cell_ids, ann_map,
+                         reports_root / "h5ad" / f"{tag}_{method_name}.h5ad",
+                         method_name)
+        metrics["methods"][method_name] = {
+            "sstIN": float(sst_vals[sstin_mask].mean()) if sstin_mask.any() else None,
+            "sstNbr": float(sst_vals[neighbor_mask].mean()) if neighbor_mask.any() else None,
+        }
+    save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
 
 
 def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None):
@@ -622,7 +707,54 @@ def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None
             results['DecontX'] = {'corrected': corrected, 'diag': diag}
 
     # Evaluation
-    raw_doublet_median = evaluate_mosta(results, data, sub, sub['gene_names'])
+    n_cells = len(data.get('cell_ids', []))
+    raw = compute_cell_expr(sub['dnb_expr'], sub['dnb_labels'], n_cells)
+    raw_doublet_median, raw = evaluate_mosta(results, data, sub, sub['gene_names'], raw=raw)
+
+    # Save cell-based h5ad and metrics
+    print(f"\n  {'='*60}")
+    print(f"  Saving results")
+    print(f"  {'='*60}")
+    reports_root = _reports_root()
+    x_range = data.get('x_range')
+    y_range = data.get('y_range')
+    if x_range is not None and y_range is not None:
+        tag = f"mosta_x{x_range[0]}-{x_range[1]}_y{y_range[0]}-{y_range[1]}"
+    else:
+        tag = "mosta_full"
+    ann_map = data.get('ann_map', {})
+    cell_ids = data.get('cell_ids', np.arange(raw.shape[1]))
+
+    save_result_h5ad(raw, sub['gene_names'], cell_ids, ann_map,
+                     reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW")
+    metrics = {
+        "dataset": tag,
+        "n_cells": int(raw.shape[1]),
+        "n_genes": int(raw.shape[0]),
+        "raw": {
+            "doublet_median": raw_doublet_median,
+        },
+        "methods": {},
+    }
+    for method_name, r in results.items():
+        corrected = r.get('corrected')
+        if corrected is not None:
+            save_result_h5ad(corrected, sub['gene_names'], cell_ids, ann_map,
+                             reports_root / "h5ad" / f"{tag}_{method_name}.h5ad",
+                             method_name)
+            metrics["methods"][method_name] = {
+                "runtime": r['diag'].get('runtime', 0),
+                "de_genes": r.get('mosta_de_genes'),
+                "layer_spearman": r.get('mosta_layer_spearman'),
+                "asw": r.get('mosta_asw'),
+                "clisi": r.get('mosta_clisi'),
+                "silhouette": r.get('mosta_silhouette'),
+                "pca_var_top5": r.get('mosta_pca_var_top5'),
+                "avg_clust_coef": r.get('mosta_avg_clust_coef'),
+                "doublet_median": r.get('mosta_doublet_median'),
+                "doublet_reduction_pct": r.get('mosta_doublet_reduction'),
+            }
+    save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
 
     # Summary
     print(f"\n{'='*60}")
@@ -791,6 +923,7 @@ def load_mosta_data(x_range=None, y_range=None):
     return {
         'dnb_expr': dnb_expr, 'dnb_coords': dnb_coords, 'dnb_labels': dnb_labels,
         'gene_names': gene_names, 'cell_ids': cell_ids, 'ann_map': ann_map, 'adata': adata,
+        'x_range': x_range, 'y_range': y_range,
     }
 
 
@@ -1063,7 +1196,73 @@ def compute_doublet_scores(expr, expected_doublet_rate=0.06, random_state=42):
         return np.full(n_cells, np.nan)
 
 
-def evaluate_mosta(results, data, sub, gene_names):
+def _reports_root():
+    """Return and create evaluation/reports sub-directories."""
+    root = Path(__file__).resolve().parent.parent / "reports"
+    (root / "h5ad").mkdir(parents=True, exist_ok=True)
+    (root / "metrics").mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _convert_for_json(obj):
+    """Recursively convert numpy scalars/arrays to Python JSON types."""
+    if isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    if isinstance(obj, (np.floating, np.float64, np.float32)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {k: _convert_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_convert_for_json(v) for v in obj]
+    return obj
+
+
+def save_result_h5ad(expr, gene_names, cell_ids, ann_map, out_path,
+                     method_name=""):
+    """Save a [genes x cells] expression matrix as cell-based h5ad.
+
+    Args:
+        expr: [genes x cells] dense or sparse matrix.
+        gene_names: list/array of gene names.
+        cell_ids: list/array of cell IDs. Only the first expr.shape[1] IDs
+            are used, allowing corrected outputs that dropped trailing cells.
+        ann_map: dict cell_id -> annotation, may be None.
+        out_path: Path to write.
+        method_name: optional method tag stored in .uns.
+    """
+    n_cells_expr = expr.shape[1]
+    cell_ids_use = np.asarray(cell_ids)[:n_cells_expr]
+    X = expr.T
+    if hasattr(X, "toarray"):
+        X = X.toarray()
+    else:
+        X = np.asarray(X)
+
+    adata = ad.AnnData(X=X.astype(np.float32))
+    adata.var_names = [str(g) for g in gene_names]
+    adata.obs_names = [f"Cell_{cid}" for cid in cell_ids_use]
+    adata.obs["cell_id"] = cell_ids_use
+    if ann_map is not None:
+        adata.obs["annotation"] = [
+            str(ann_map.get(int(cid), "Unknown")) for cid in cell_ids_use
+        ]
+    if method_name:
+        adata.uns["method"] = str(method_name)
+    adata.write_h5ad(out_path)
+    print(f"    Saved h5ad: {out_path}")
+
+
+def save_metrics_json(metrics, out_path):
+    """Save a metrics dict as JSON."""
+    import json
+    with open(out_path, "w") as f:
+        json.dump(_convert_for_json(metrics), f, indent=2)
+    print(f"    Saved metrics: {out_path}")
+
+
+def evaluate_mosta(results, data, sub, gene_names, raw=None):
     """对每个方法计算层间 DE 基因数、异类细胞间相关性、scIB 指标。
 
     指标说明：
@@ -1089,7 +1288,8 @@ def evaluate_mosta(results, data, sub, gene_names):
         return
 
     n_cells = len(cell_ids)
-    raw = compute_cell_expr(sub['dnb_expr'], sub['dnb_labels'], n_cells)
+    if raw is None:
+        raw = compute_cell_expr(sub['dnb_expr'], sub['dnb_labels'], n_cells)
 
     # Helper: layer-aggregated Spearman (mean per layer, then pairwise)
     def compute_layer_spearman(expr):
@@ -1207,7 +1407,7 @@ def evaluate_mosta(results, data, sub, gene_names):
         r['mosta_doublet_reduction'] = reduction
         print(f"  {method_name:<16} {median_score:>14.4f} {reduction:>11.1f}%")
 
-    return raw_doublet_median
+    return raw_doublet_median, raw
 
 
 def load_visiumhd_data(x_range=None, y_range=None, n_genes=None, verbose=True):
@@ -1474,6 +1674,7 @@ def load_visiumhd_data(x_range=None, y_range=None, n_genes=None, verbose=True):
         'cell_ids': cell_ids_arr,
         'ann_map': ann_map_out,
         'adata': None,
+        'x_range': x_range, 'y_range': y_range,
     }
 
 def _compute_scib_metrics(cell_expr, cell_anns, method_name, n_top_genes=2000):
@@ -1681,6 +1882,52 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
             reduction = float('nan')
         r['visiumhd_doublet_reduction'] = reduction
         print(f"  {method_name:<16} {median_score:>14.4f} {reduction:>11.1f}%")
+
+    # Save cell-based h5ad and metrics
+    print(f"\n  {'='*60}")
+    print(f"  Saving results")
+    print(f"  {'='*60}")
+    reports_root = _reports_root()
+    x_range = data.get('x_range')
+    y_range = data.get('y_range')
+    if x_range is not None and y_range is not None:
+        tag = f"visiumhd_x{x_range[0]}-{x_range[1]}_y{y_range[0]}-{y_range[1]}"
+    else:
+        tag = "visiumhd_full"
+
+    save_result_h5ad(raw_cell, sub['gene_names'], cell_ids, ann_map,
+                     reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW")
+    metrics = {
+        "dataset": tag,
+        "n_cells": int(raw_cell.shape[1]),
+        "n_genes": int(raw_cell.shape[0]),
+        "raw": {
+            "doublet_median": raw_doublet_median,
+            "asw": raw_metrics.get('asw'),
+            "clisi": raw_metrics.get('clisi'),
+            "silhouette": raw_metrics.get('silhouette'),
+            "pca_var_top5": raw_metrics.get('pca_var_top5'),
+            "avg_clust_coef": raw_metrics.get('avg_clust_coef'),
+        },
+        "methods": {},
+    }
+    for method_name, r in results.items():
+        corrected = r.get('corrected')
+        if corrected is not None:
+            save_result_h5ad(corrected, sub['gene_names'], cell_ids, ann_map,
+                             reports_root / "h5ad" / f"{tag}_{method_name}.h5ad",
+                             method_name)
+            metrics["methods"][method_name] = {
+                "runtime": r['diag'].get('runtime', 0),
+                "asw": r.get('scib_asw'),
+                "clisi": r.get('scib_clisi'),
+                "silhouette": r.get('scib_silhouette'),
+                "pca_var_top5": r.get('scib_pca_var_top5'),
+                "avg_clust_coef": r.get('scib_avg_clust_coef'),
+                "doublet_median": r.get('visiumhd_doublet_median'),
+                "doublet_reduction_pct": r.get('visiumhd_doublet_reduction'),
+            }
+    save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
 
     # ── Summary ───────────────────────────────────────────────
     print(f"\n{'='*60}")
