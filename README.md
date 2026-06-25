@@ -66,29 +66,30 @@ SPARKLE achieves the best signal retention (97.8%) and neighbor removal (40.2%).
 
 ### Synthetic Data (10 scenarios, RMSE reduction)
 
-Reproduced via `evaluation/scripts/final_comparison.py --dataset synthetic --all-scenarios`. The benchmark reports RMSE reduction against ground-truth per-cell expression. SPARKLE is shown in two modes:
+Reproduced via `evaluation/scripts/final_comparison.py --dataset synthetic --all-scenarios`. **All scenarios now contain 3–5 cell types with cell-type-specific marker genes**, so the benchmark tests correction in a complex cellular environment rather than homogeneous tissue. SPARKLE is shown in two modes:
 
 - **SPARKLE (no penalty)**: `self_confidence_penalty=False`, aggressive ambient removal that maximises RMSE.
 - **SPARKLE (penalty)**: `self_confidence_penalty=True` (default for real data), protects high-expressor signal at a small RMSE cost.
 
 | Scenario | SPARKLE (no penalty) | SPARKLE (penalty) | SoupX | Spatial SoupX |
 |----------|:---:|:---:|:---:|:---:|
-| S1 Sparse (40% empty) | **69.5%** | 50.3% | 28.3% | 61.6% |
-| S2 Medium (25%) | **77.0%** | 53.4% | 35.3% | 69.6% |
-| S3 Dense (10%) | **85.2%** | 60.3% | 14.7% | 76.4% |
-| S4 Short λ=20µm | **50.6%** | 35.8% | 7.4% | 37.7% |
-| S5 Long λ=100µm | **82.8%** | 55.3% | 24.4% | 77.8% |
-| S6 Weak α≤0.005 | **60.8%** | 44.5% | 12.4% | 49.8% |
-| S7 Strong α≤0.10 | **94.7%** | 56.2% | 20.0% | 91.2% |
-| S8 Very Sparse (>50%) | **55.6%** | 44.0% | 9.3% | 46.4% |
-| S9 Multi-Cell-Type | **60.9%** | **51.7%** | 28.2% | −14.2% |
-| S10 Marker Benchmark | **74.7%** | **59.1%** | 24.0% | 12.2% |
-| **Average** | **71.2%** | 51.5% | 20.4% | 50.8% |
+| S1 Sparse multi-type (40% empty) | **65.9%** | 54.2% | 19.4% | −19.5% |
+| S2 Medium multi-type (25%) | **74.7%** | 59.1% | 24.0% | 12.2% |
+| S3 Dense multi-type (10%) | **83.1%** | 65.2% | 27.0% | 41.3% |
+| S4 Short λ multi-type (20µm) | **45.1%** | 37.0% | 9.2% | −101.1% |
+| S5 Long λ multi-type (100µm) | **81.3%** | 62.1% | 27.8% | 39.0% |
+| S6 Weak α multi-type (≤0.005) | **57.3%** | 47.8% | 32.8% | −60.4% |
+| S7 Strong α multi-type (≤0.10) | **94.2%** | 57.8% | 45.8% | 87.6% |
+| S8 Very sparse multi-type (>50%) | **54.7%** | 47.0% | 27.5% | −27.2% |
+| S9 High marker fraction (50%) | **76.8%** | 60.2% | 26.3% | 7.1% |
+| S10 Many cell types (5 types) | **68.2%** | 57.8% | 30.2% | −31.5% |
+| **Average** | **70.1%** | 54.8% | 27.0% | −5.2% |
 
 **Take-aways:**
+- SPARKLE (no penalty) leads in **all 10 scenarios**.
 - SPARKLE (penalty) still outperforms SoupX on **all 10 scenarios**.
-- SPARKLE (penalty) outperforms Spatial SoupX on the multi-type scenarios **S9–S10**, where Spatial SoupX’s global ρ over-subtracts cell-type-specific marker genes (negative RMSE reduction).
-- For single-type scenarios, Spatial SoupX can beat the penalised SPARKLE in pure RMSE, matching the Axolotl observation that penalty trades a small RMSE gain for stronger biological signal retention.
+- SPARKLE (penalty) outperforms Spatial SoupX on **7/10 scenarios** (S1–S2, S4, S6, S8–S10); Spatial SoupX only wins in high-ambient / dense settings (S3, S5, S7), where the strong global signal drowns out marker-gene over-subtraction.
+- The pervasive negative RMSE reductions for Spatial SoupX (e.g. −101.1% in S4, −60.4% in S6) show that a global contamination fraction ρ severely over-subtracts cell-type-specific marker genes in heterogeneous tissue.
 
 ### MOSTA Cortical Layers (window x10000-14000 y8000-17000, 2219 layer cells)
 

@@ -91,21 +91,21 @@ python evaluation/scripts/final_comparison.py --dataset synthetic --all-scenario
   --methods sparkle,spatial_soupx,soupx
 ```
 
-SPARKLE is shown in both synthetic-benchmark mode (`self_confidence_penalty=False`, aggressive RMSE optimisation) and real-data default mode (`self_confidence_penalty=True`, signal protection).
+All scenarios now contain 3–5 cell types with cell-type-specific markers, so the benchmark tests correction in heterogeneous tissue. SPARKLE is shown in both synthetic-benchmark mode (`self_confidence_penalty=False`) and real-data default mode (`self_confidence_penalty=True`).
 
 | Scenario | SPARKLE (no penalty) | SPARKLE (penalty) | SoupX | Spatial SoupX |
 |----------|:---:|:---:|:---:|:---:|
-| S1 Sparse (40% empty) | **69.5%** | 50.3% | 28.3% | 61.6% |
-| S2 Medium (25%) | **77.0%** | 53.4% | 35.3% | 69.6% |
-| S3 Dense (10%) | **85.2%** | 60.3% | 14.7% | 76.4% |
-| S4 Short λ=20µm | **50.6%** | 35.8% | 7.4% | 37.7% |
-| S5 Long λ=100µm | **82.8%** | 55.3% | 24.4% | 77.8% |
-| S6 Weak α≤0.005 | **60.8%** | 44.5% | 12.4% | 49.8% |
-| S7 Strong α≤0.10 | **94.7%** | 56.2% | 20.0% | 91.2% |
-| S8 Very Sparse (>50%) | **55.6%** | 44.0% | 9.3% | 46.4% |
-| S9 Multi-Cell-Type | **60.9%** | **51.7%** | 28.2% | −14.2% |
-| S10 Marker Benchmark | **74.7%** | **59.1%** | 24.0% | 12.2% |
-| **Average** | **71.2%** | 51.5% | 20.4% | 50.8% |
+| S1 Sparse multi-type (40% empty) | **65.9%** | 54.2% | 19.4% | −19.5% |
+| S2 Medium multi-type (25%) | **74.7%** | 59.1% | 24.0% | 12.2% |
+| S3 Dense multi-type (10%) | **83.1%** | 65.2% | 27.0% | 41.3% |
+| S4 Short λ multi-type (20µm) | **45.1%** | 37.0% | 9.2% | −101.1% |
+| S5 Long λ multi-type (100µm) | **81.3%** | 62.1% | 27.8% | 39.0% |
+| S6 Weak α multi-type (≤0.005) | **57.3%** | 47.8% | 32.8% | −60.4% |
+| S7 Strong α multi-type (≤0.10) | **94.2%** | 57.8% | 45.8% | 87.6% |
+| S8 Very sparse multi-type (>50%) | **54.7%** | 47.0% | 27.5% | −27.2% |
+| S9 High marker fraction (50%) | **76.8%** | 60.2% | 26.3% | 7.1% |
+| S10 Many cell types (5 types) | **68.2%** | 57.8% | 30.2% | −31.5% |
+| **Average** | **70.1%** | 54.8% | 27.0% | −5.2% |
 
 ### Axolotl SST data (real)
 
