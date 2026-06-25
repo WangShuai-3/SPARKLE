@@ -622,16 +622,17 @@ def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None
             results['DecontX'] = {'corrected': corrected, 'diag': diag}
 
     # Evaluation
-    evaluate_mosta(results, data, sub, sub['gene_names'])
+    raw_doublet_median = evaluate_mosta(results, data, sub, sub['gene_names'])
 
     # Summary
     print(f"\n{'='*60}")
     print("SUMMARY")
     print(f"{'='*60}")
-    print(f"  {'Method':<16} {'Runtime':>8} {'DE':>8} {'Sprmn':>8} {'ASW↑':>6} {'cLISI↓':>6} {'Sil↑':>6} {'PCA5↑':>6} {'ClustCoef↑':>8}")
-    print(f"  {'─'*16} {'─'*8} {'─'*8} {'─'*8} {'─'*6} {'─'*6} {'─'*6} {'─'*6} {'─'*8}")
+    print(f"  {'Method':<16} {'Runtime':>8} {'DE':>8} {'Sprmn':>8} {'ASW↑':>6} {'cLISI↓':>6} {'Sil↑':>6} {'PCA5↑':>6} {'ClustCoef↑':>8} {'Dblt↓':>8}")
+    print(f"  {'─'*16} {'─'*8} {'─'*8} {'─'*8} {'─'*6} {'─'*6} {'─'*6} {'─'*6} {'─'*8} {'─'*8}")
     # RAW row (metrics from evaluate_mosta scIB section are on raw_cell_expr)
-    print(f"  {'RAW':<16} {'─':>8} {'─':>8} {'─':>8} {'─':>6} {'─':>6} {'─':>6} {'─':>6} {'─':>8}")
+    raw_dblt_str = f"{raw_doublet_median:.4f}" if isinstance(raw_doublet_median, float) else str(raw_doublet_median)
+    print(f"  {'RAW':<16} {'─':>8} {'─':>8} {'─':>8} {'─':>6} {'─':>6} {'─':>6} {'─':>6} {'─':>8} {raw_dblt_str:>8}")
     for method_name, r in results.items():
         d = r['diag']
         runtime = d.get('runtime', 0)
@@ -642,13 +643,15 @@ def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None
         sil = r.get('mosta_silhouette')
         pca5 = r.get('mosta_pca_var_top5')
         clust = r.get('mosta_avg_clust_coef')
+        dblt = r.get('mosta_doublet_median')
         s_str = f"{s:.4f}" if isinstance(s, float) and not np.isnan(s) else str(s)
         asw_str = f"{asw:.4f}" if asw is not None else "N/A"
         clisi_str = f"{clisi:.4f}" if clisi is not None else "N/A"
         sil_str = f"{sil:.4f}" if sil is not None else "N/A"
         pca5_str = f"{pca5:.4f}" if pca5 is not None else "N/A"
         clust_str = f"{clust:.4f}" if clust is not None else "N/A"
-        print(f"  {method_name:<16} {runtime:7.1f}s  {str(de):>8} {s_str:>8} {asw_str:>6} {clisi_str:>6} {sil_str:>6} {pca5_str:>6} {clust_str:>8}")
+        dblt_str = f"{dblt:.4f}" if dblt is not None else "N/A"
+        print(f"  {method_name:<16} {runtime:7.1f}s  {str(de):>8} {s_str:>8} {asw_str:>6} {clisi_str:>6} {sil_str:>6} {pca5_str:>6} {clust_str:>8} {dblt_str:>8}")
 
 def load_mosta_data(x_range=None, y_range=None):
     """加载 MOSTA 成年鼠脑 Stereo-seq 数据。
@@ -1016,6 +1019,50 @@ def compute_cell_expr(dnb_expr, dnb_labels, n_cells):
     return raw
 
 
+def compute_doublet_scores(expr, expected_doublet_rate=0.06, random_state=42):
+    """Compute per-cell doublet scores using Scrublet.
+
+    Ambient RNA can create artificial doublet-like expression states (mixed
+    signals from neighbouring cells). Effective correction should lower the
+    median doublet score.
+
+    Args:
+        expr: [genes x cells] expression matrix (sparse or dense), raw or
+            corrected counts.
+        expected_doublet_rate: Expected doublet fraction in the experiment.
+        random_state: Random seed passed to Scrublet.
+
+    Returns:
+        scores: [cells] array with higher values = more doublet-like.
+    """
+    import scrublet as scr
+
+    # Scrublet expects cells x genes
+    if hasattr(expr, "toarray"):
+        counts = expr.T.toarray().astype(np.float64)
+    elif hasattr(expr, "T"):
+        counts = np.asarray(expr.T, dtype=np.float64)
+    else:
+        counts = np.asarray(expr, dtype=np.float64).T
+
+    n_cells = counts.shape[0]
+    if n_cells < 50:
+        return np.full(n_cells, np.nan)
+
+    try:
+        scrub = scr.Scrublet(
+            counts,
+            expected_doublet_rate=expected_doublet_rate,
+            sim_doublet_ratio=2.0,
+            random_state=random_state,
+        )
+        scores, _ = scrub.scrub_doublets(verbose=False)
+        return np.asarray(scores, dtype=np.float64)
+    except Exception as e:
+        print(f"    Scrublet failed ({e}), returning NaN scores")
+        return np.full(n_cells, np.nan)
+
+
 def evaluate_mosta(results, data, sub, gene_names):
     """对每个方法计算层间 DE 基因数、异类细胞间相关性、scIB 指标。
 
@@ -1135,6 +1182,32 @@ def evaluate_mosta(results, data, sub, gene_names):
         r['mosta_pca_var_top5'] = metrics.get('pca_var_top5')
         r['mosta_avg_clust_coef'] = metrics.get('avg_clust_coef')
 
+    # ── Doublet score evaluation ───────────────────────────────
+    print(f"\n  {'='*60}")
+    print(f"  Doublet Score Evaluation (median score ↓)")
+    print(f"  {'='*60}")
+
+    raw_doublet = compute_doublet_scores(raw)
+    raw_doublet_median = float(np.nanmedian(raw_doublet))
+    print(f"  {'Method':<16} {'Median score':>14} {'Reduction':>12}")
+    print(f"  {'─'*16} {'─'*14} {'─'*12}")
+    print(f"  {'RAW':<16} {raw_doublet_median:>14.4f} {'—':>12}")
+
+    for method_name, r in results.items():
+        corrected = r.get('corrected')
+        if corrected is None:
+            continue
+        scores = compute_doublet_scores(corrected)
+        median_score = float(np.nanmedian(scores))
+        r['mosta_doublet_median'] = median_score
+        if not np.isnan(raw_doublet_median) and raw_doublet_median > 0:
+            reduction = (raw_doublet_median - median_score) / raw_doublet_median * 100.0
+        else:
+            reduction = float('nan')
+        r['mosta_doublet_reduction'] = reduction
+        print(f"  {method_name:<16} {median_score:>14.4f} {reduction:>11.1f}%")
+
+    return raw_doublet_median
 
 
 def load_visiumhd_data(x_range=None, y_range=None, n_genes=None, verbose=True):
@@ -1581,19 +1654,48 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
         r['scib_pca_var_top5'] = metrics.get('pca_var_top5')
         r['scib_avg_clust_coef'] = metrics.get('avg_clust_coef')
 
+    # ── Doublet score evaluation ───────────────────────────────
+    print(f"\n  {'='*60}")
+    print(f"  Doublet Score Evaluation (median score ↓)")
+    print(f"  {'='*60}")
+
+    raw_doublet = compute_doublet_scores(raw_cell)
+    raw_doublet_median = float(np.nanmedian(raw_doublet))
+    print(f"  {'Method':<16} {'Median score':>14} {'Reduction':>12}")
+    print(f"  {'─'*16} {'─'*14} {'─'*12}")
+    print(f"  {'RAW':<16} {raw_doublet_median:>14.4f} {'—':>12}")
+
+    for method_name, r in results.items():
+        corrected = r.get('corrected')
+        if corrected is None:
+            continue
+        n_cells_corr = corrected.shape[1]
+        if n_cells_corr != len(cell_anns):
+            corrected = corrected[:, :len(cell_anns)]
+        scores = compute_doublet_scores(corrected)
+        median_score = float(np.nanmedian(scores))
+        r['visiumhd_doublet_median'] = median_score
+        if not np.isnan(raw_doublet_median) and raw_doublet_median > 0:
+            reduction = (raw_doublet_median - median_score) / raw_doublet_median * 100.0
+        else:
+            reduction = float('nan')
+        r['visiumhd_doublet_reduction'] = reduction
+        print(f"  {method_name:<16} {median_score:>14.4f} {reduction:>11.1f}%")
+
     # ── Summary ───────────────────────────────────────────────
     print(f"\n{'='*60}")
     print("SUMMARY")
     print(f"{'='*60}")
-    print(f"  {'Method':<16} {'Runtime':>8} {'ASW↑':>8} {'cLISI↓':>8} {'Sil↑':>8} {'PCA5↑':>8} {'ClustCoef↑':>10}")
-    print(f"  {'─'*16} {'─'*8} {'─'*8} {'─'*8} {'─'*8} {'─'*8} {'─'*10}")
+    print(f"  {'Method':<16} {'Runtime':>8} {'ASW↑':>8} {'cLISI↓':>8} {'Sil↑':>8} {'PCA5↑':>8} {'ClustCoef↑':>10} {'Dblt↓':>8}")
+    print(f"  {'─'*16} {'─'*8} {'─'*8} {'─'*8} {'─'*8} {'─'*8} {'─'*10} {'─'*8}")
 
     raw_asw_str = f"{raw_metrics['asw']:.4f}" if raw_metrics['asw'] is not None else "N/A"
     raw_clisi_str = f"{raw_metrics['clisi']:.4f}" if raw_metrics['clisi'] is not None else "N/A"
     raw_sil_str = f"{raw_metrics['silhouette']:.4f}" if raw_metrics.get('silhouette') is not None else "N/A"
     raw_pca5_str = f"{raw_metrics['pca_var_top5']:.4f}" if raw_metrics.get('pca_var_top5') is not None else "N/A"
     raw_clust_str = f"{raw_metrics['avg_clust_coef']:.4f}" if raw_metrics.get('avg_clust_coef') is not None else "N/A"
-    print(f"  {'RAW':<16} {'':>8} {raw_asw_str:>8} {raw_clisi_str:>8} {raw_sil_str:>8} {raw_pca5_str:>8} {raw_clust_str:>10}")
+    raw_dblt_str = f"{raw_doublet_median:.4f}" if isinstance(raw_doublet_median, float) else "N/A"
+    print(f"  {'RAW':<16} {'':>8} {raw_asw_str:>8} {raw_clisi_str:>8} {raw_sil_str:>8} {raw_pca5_str:>8} {raw_clust_str:>10} {raw_dblt_str:>8}")
 
     for method_name, r in results.items():
         d = r['diag']
@@ -1603,12 +1705,14 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
         sil = r.get('scib_silhouette')
         pca5 = r.get('scib_pca_var_top5')
         clust = r.get('scib_avg_clust_coef')
+        dblt = r.get('visiumhd_doublet_median')
         asw_str = f"{asw:.4f}" if asw is not None else "N/A"
         clisi_str = f"{clisi:.4f}" if clisi is not None else "N/A"
         sil_str = f"{sil:.4f}" if sil is not None else "N/A"
         pca5_str = f"{pca5:.4f}" if pca5 is not None else "N/A"
         clust_str = f"{clust:.4f}" if clust is not None else "N/A"
-        print(f"  {method_name:<16} {runtime:7.1f}s {asw_str:>8} {clisi_str:>8} {sil_str:>8} {pca5_str:>8} {clust_str:>10}")
+        dblt_str = f"{dblt:.4f}" if dblt is not None else "N/A"
+        print(f"  {method_name:<16} {runtime:7.1f}s {asw_str:>8} {clisi_str:>8} {sil_str:>8} {pca5_str:>8} {clust_str:>10} {dblt_str:>8}")
 
 
 def main():

@@ -107,6 +107,10 @@ Reproduced via `evaluation/scripts/final_comparison.py --dataset synthetic --all
 
 SPARKLE achieves the best overall balance: 906 DE genes (+28% vs raw), lowest Pearson (0.1039, −62%), and lowest Spearman (0.0424, −71%), delivering the strongest cell-type separation. DecontX finds the most DE genes (1012) but its Spearman (0.1230) drops only 16% from raw (0.1467), indicating weak ambient removal — the uniform ~33% contamination estimate over-corrects most genes to near-zero, collapsing cross-type variance. Spatial SoupX cuts Spearman by 51% (0.0721) but with fewer DE genes (672). SoupX produces NaN Pearson at both gene counts due to global ρ with large panels.
 
+#### Doublet score (Scrublet)
+
+Ambient RNA can create artificial doublet-like expression states. `final_comparison.py` now reports the median Scrublet doublet score before and after correction for every method (lower = fewer artificial doublets). In the 200-gene window above, the summary table includes a `Dblt↓` column with the median score and percentage reduction vs raw.
+
 ### Excluded Methods
 
 **CellBender** — VAE prior estimation fails on spatial DNB data (empty DNBs have 1-2 UMI → zero division / NaN). Falls back to empirical subtraction on full datasets.
@@ -189,3 +193,4 @@ pip install -e .
 
 - numpy, scipy, scikit-learn
 - anndata (optional, for h5ad I/O in evaluation)
+- scrublet (optional, for doublet-score evaluation in `final_comparison.py`)
