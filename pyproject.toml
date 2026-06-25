@@ -21,6 +21,7 @@ dev = [
     "anndata>=0.8",
     "scrublet>=0.2.3",
     "decontx-python>=0.2.0",
+    "leidenalg>=0.8.0",
 ]
 all = [
     "stambient[dev]",
