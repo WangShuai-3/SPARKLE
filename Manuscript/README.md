@@ -91,19 +91,21 @@ python evaluation/scripts/final_comparison.py --dataset synthetic --all-scenario
   --methods sparkle,spatial_soupx,soupx
 ```
 
-| Scenario | SPARKLE | SoupX | Spatial SoupX |
-|----------|:---:|:---:|:---:|
-| S1 Sparse (40% empty) | **69.5%** | 28.3% | 61.6% |
-| S2 Medium (25%) | **77.0%** | 35.3% | 69.6% |
-| S3 Dense (10%) | **85.2%** | 14.7% | 76.4% |
-| S4 Short λ=20µm | **50.6%** | 7.4% | 37.7% |
-| S5 Long λ=100µm | **82.8%** | 24.4% | 77.8% |
-| S6 Weak α≤0.005 | **60.8%** | 12.4% | 49.8% |
-| S7 Strong α≤0.10 | **94.7%** | 20.0% | 91.2% |
-| S8 Very Sparse (>50%) | **55.6%** | 9.3% | 46.4% |
-| S9 Multi-Cell-Type | **60.9%** | 28.2% | −14.2% |
-| S10 Marker Benchmark | **74.7%** | 24.0% | 12.2% |
-| **Average** | **71.2%** | **20.4%** | **50.8%** |
+SPARKLE is shown in both synthetic-benchmark mode (`self_confidence_penalty=False`, aggressive RMSE optimisation) and real-data default mode (`self_confidence_penalty=True`, signal protection).
+
+| Scenario | SPARKLE (no penalty) | SPARKLE (penalty) | SoupX | Spatial SoupX |
+|----------|:---:|:---:|:---:|:---:|
+| S1 Sparse (40% empty) | **69.5%** | 50.3% | 28.3% | 61.6% |
+| S2 Medium (25%) | **77.0%** | 53.4% | 35.3% | 69.6% |
+| S3 Dense (10%) | **85.2%** | 60.3% | 14.7% | 76.4% |
+| S4 Short λ=20µm | **50.6%** | 35.8% | 7.4% | 37.7% |
+| S5 Long λ=100µm | **82.8%** | 55.3% | 24.4% | 77.8% |
+| S6 Weak α≤0.005 | **60.8%** | 44.5% | 12.4% | 49.8% |
+| S7 Strong α≤0.10 | **94.7%** | 56.2% | 20.0% | 91.2% |
+| S8 Very Sparse (>50%) | **55.6%** | 44.0% | 9.3% | 46.4% |
+| S9 Multi-Cell-Type | **60.9%** | **51.7%** | 28.2% | −14.2% |
+| S10 Marker Benchmark | **74.7%** | **59.1%** | 24.0% | 12.2% |
+| **Average** | **71.2%** | 51.5% | 20.4% | 50.8% |
 
 ### Axolotl SST data (real)
 
