@@ -1220,11 +1220,11 @@ def save_result_h5ad(expr, gene_names, cell_ids, ann_map, out_path,
     cell_ids_use = np.asarray(cell_ids)[:n_cells_expr]
     X = expr.T
     if hasattr(X, "toarray"):
-        X = X.toarray()
+        X = X.astype(np.float32)
     else:
-        X = np.asarray(X)
+        X = np.asarray(X, dtype=np.float32)
 
-    adata = ad.AnnData(X=X.astype(np.float32))
+    adata = ad.AnnData(X=X)
     adata.var_names = [str(g) for g in gene_names]
     adata.obs_names = [f"Cell_{cid}" for cid in cell_ids_use]
     adata.obs["cell_id"] = cell_ids_use
