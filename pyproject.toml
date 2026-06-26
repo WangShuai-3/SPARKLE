@@ -28,6 +28,7 @@ dev = [
     "decontx-python>=0.2.0",
     "leidenalg>=0.8.0",
     "soupx-python>=0.3.0",
+    "pysctransform>=0.1",
 ]
 all = [
     "stambient[dev]",

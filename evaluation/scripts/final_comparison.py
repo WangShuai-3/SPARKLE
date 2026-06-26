@@ -20,6 +20,7 @@ from evaluation.baselines.soupx import run_soupx
 from evaluation.scripts.test_axolotl import compute_neighbor_stats
 from evaluation.synthetic import generate_synthetic_data, SCENARIOS
 import scanpy as sc
+from pysctransform import SCTransform
 
 
 def load_synthetic_scenario_data(scenario_id="S1", seed=42):
@@ -1664,11 +1665,14 @@ def load_visiumhd_data(x_range=None, y_range=None, n_genes=None, verbose=True):
 def _compute_scib_metrics(cell_expr, cell_anns, method_name, n_top_genes=2000):
     """Compute Cell-type ASW and cLISI via scib-metrics for a given expression matrix.
 
+    Preprocessing uses SCTransform (pearson residuals) + PCA, replacing the
+    standard scanpy normalize-log1p-HVG-scale pipeline.
+
     Args:
         cell_expr: [genes × cells] array
         cell_anns: [cells] cell type annotations
         method_name: label for printing
-        n_top_genes: number of HVGs to use
+        n_top_genes: number of variable features for SCTransform
 
     Returns:
         dict with 'asw', 'clisi', 'silhouette' scores (or None on failure)
@@ -1690,19 +1694,13 @@ def _compute_scib_metrics(cell_expr, cell_anns, method_name, n_top_genes=2000):
         adata.obs_names = [f"Cell_{i}" for i in range(adata.n_obs)]
         adata.var_names = [f"Gene_{i}" for i in range(adata.n_vars)]
 
-        # Preprocessing: normalize, log1p, HVGs, PCA, neighbors
-        sc.pp.normalize_total(adata, target_sum=1e4)
-        sc.pp.log1p(adata)
-        try:
-            sc.pp.highly_variable_genes(adata, n_top_genes=min(n_top_genes, adata.n_vars),
-                                         flavor='seurat_v3')
-        except Exception:
-            sc.pp.highly_variable_genes(adata, n_top_genes=min(n_top_genes, adata.n_vars),
-                                         flavor='seurat')
-        adata = adata[:, adata.var.highly_variable].copy()
-        sc.pp.scale(adata, max_value=10)
-        n_pcs = min(50, adata.n_obs - 1, adata.n_vars - 1)
-        sc.tl.pca(adata, n_comps=n_pcs, svd_solver='arpack')
+        # Preprocessing: SCTransform → pearson residuals → PCA
+        n_hvgs = min(n_top_genes, adata.n_vars)
+        residuals = SCTransform(adata, var_features_n=n_hvgs)
+        adata.obsm["pearson_residuals"] = residuals.values
+        n_pcs = min(50, adata.n_obs - 1, n_hvgs - 1)
+        adata.obsm["X_pca"] = sc.pp.pca(adata.obsm["pearson_residuals"],
+                                         n_comps=n_pcs)
 
         # Compute scIB metrics via scib_metrics package
         from scib_metrics import silhouette_label, clisi_knn
@@ -1728,8 +1726,10 @@ def _compute_scib_metrics(cell_expr, cell_anns, method_name, n_top_genes=2000):
         sil = silhouette_score(X_pca, labels_arr)
 
         # PCA explained variance (top 5 PCs)
-        var_ratio = adata.uns['pca']['variance_ratio']
-        pca_var_top5 = float(np.sum(var_ratio[:5]))
+        from sklearn.decomposition import PCA
+        pca_model = PCA(n_components=n_pcs)
+        pca_model.fit(adata.obsm["pearson_residuals"])
+        pca_var_top5 = float(np.sum(pca_model.explained_variance_ratio_[:5]))
 
         # Average Clustering Coefficient from KNN graph
         n_nodes = indices.shape[0]
