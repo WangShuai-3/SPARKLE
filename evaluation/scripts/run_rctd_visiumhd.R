@@ -10,9 +10,9 @@
 #   - evaluation/reports/h5ad_visiumhd/*.h5ad
 #
 # Outputs (written to evaluation/reports/rctd_visiumhd/):
-#   - rctd_<METHOD>.rds              RCTD object per method
 #   - rctd_doublet_results.csv       per-cell RCTD predictions per method
 #   - rctd_summary_metrics.csv       comparison metrics per method
+#   - rctd_shared_metrics.csv        shared-cell comparison against RAW
 #
 # Required R packages (install first if missing):
 #   /home/shuaiwang/miniconda3/envs/r-env/bin/Rscript -e "install.packages(c('remotes','data.table','Matrix','hdf5r'), repos='https://cloud.r-project.org/')"
@@ -126,9 +126,12 @@ read_segmentation_coords <- function(feature_slice_h5) {
   coords
 }
 
-compute_rctd_metrics <- function(rctd, method_name) {
-  res <- rctd@results$results_df
-  weights <- rctd@results$weights
+compute_rctd_metrics <- function(res, weights, method_name) {
+  # Compute RCTD quality/purity metrics from a results_df and weights matrix.
+  if (is(res, "RCTD")) {
+    weights <- res@results$weights
+    res <- res@results$results_df
+  }
 
   n_cells <- nrow(res)
   spot_class <- as.character(res$spot_class)
@@ -138,7 +141,7 @@ compute_rctd_metrics <- function(rctd, method_name) {
   pct_doublet_uncertain <- mean(spot_class == "doublet_uncertain") * 100
   pct_doublet <- pct_doublet_certain + pct_doublet_uncertain
 
-  w <- as.matrix(weights)
+  w <- as.matrix(weights[rownames(res), , drop = FALSE])
   w <- w / rowSums(w)
   sorted_w <- t(apply(w, 1, sort, decreasing = TRUE))
   top1 <- sorted_w[, 1]
@@ -166,7 +169,7 @@ compute_rctd_metrics <- function(rctd, method_name) {
 # -----------------------------------------------------------------------------
 # 1. Build scRNA reference (class1 / Level1 annotations)
 # -----------------------------------------------------------------------------
-message("[1/4] Loading scRNA reference and metadata ...")
+message("[1/5] Loading scRNA reference and metadata ...")
 
 read_10x_h5 <- function(h5_path) {
   # Read 10x Genomics HDF5 feature-barcode matrix into a genes x cells dgCMatrix.
@@ -214,15 +217,16 @@ message(sprintf("  Reference: %d genes x %d cells, %d class1 types",
 # -----------------------------------------------------------------------------
 # 2. Load cell coordinates from segmentation mask
 # -----------------------------------------------------------------------------
-message("[2/4] Loading cell coordinates from segmentation mask ...")
+message("[2/5] Loading cell coordinates from segmentation mask ...")
 coords <- read_segmentation_coords(FEATURE_SLICE_H5)
 message(sprintf("  Coordinates loaded for %d segmented cells", nrow(coords)))
 
 # -----------------------------------------------------------------------------
 # 3. Run RCTD doublet mode on each h5ad
 # -----------------------------------------------------------------------------
-message("[3/4] Running RCTD doublet mode on each h5ad ...")
+message("[3/5] Running RCTD doublet mode on each h5ad ...")
 results_list <- list()
+weights_list <- list()
 metrics_list <- list()
 
 for (i in seq_along(H5AD_FILES)) {
@@ -281,15 +285,43 @@ for (i in seq_along(H5AD_FILES)) {
 
   res_df <- as.data.table(rctd@results$results_df, keep.rownames = "cell_barcode")
   res_df[, method := method]
+  # Keep barcode as row name for matching with weights matrix
+  rownames(res_df) <- res_df$cell_barcode
   results_list[[method]] <- res_df
+  weights_list[[method]] <- rctd@results$weights
 
-  metrics_list[[method]] <- compute_rctd_metrics(rctd, method)
+  metrics_list[[method]] <- compute_rctd_metrics(res_df, rctd@results$weights, method)
 }
 
 # -----------------------------------------------------------------------------
-# 4. Save combined results and comparison table
+# 4. Compute shared-cell metrics against RAW
 # -----------------------------------------------------------------------------
-message("[4/4] Saving results ...")
+message("[4/5] Computing shared-cell metrics against RAW ...")
+raw_barcodes <- results_list[["RAW"]]$cell_barcode
+shared_metrics_list <- list()
+
+for (method in METHOD_NAMES) {
+  method_barcodes <- results_list[[method]]$cell_barcode
+  shared_barcodes <- intersect(raw_barcodes, method_barcodes)
+
+  raw_res <- results_list[["RAW"]][cell_barcode %in% shared_barcodes]
+  method_res <- results_list[[method]][cell_barcode %in% shared_barcodes]
+  rownames(raw_res) <- raw_res$cell_barcode
+  rownames(method_res) <- method_res$cell_barcode
+
+  raw_weights <- weights_list[["RAW"]]
+  method_weights <- weights_list[[method]]
+
+  shared_metrics_list[[paste0("RAW_vs_", method)]] <- rbind(
+    compute_rctd_metrics(raw_res, raw_weights, "RAW_shared")[, compared_to := method],
+    compute_rctd_metrics(method_res, method_weights, method)[, compared_to := method]
+  )
+}
+
+# -----------------------------------------------------------------------------
+# 5. Save combined results and comparison tables
+# -----------------------------------------------------------------------------
+message("[5/5] Saving results ...")
 
 all_results <- rbindlist(results_list, use.names = TRUE, fill = TRUE)
 fwrite(all_results, file.path(OUT_DIR, "rctd_doublet_results.csv"))
@@ -299,7 +331,14 @@ summary_metrics <- rbindlist(metrics_list, use.names = TRUE, fill = TRUE)
 fwrite(summary_metrics, file.path(OUT_DIR, "rctd_summary_metrics.csv"))
 message(sprintf("  Summary metrics: %s", file.path(OUT_DIR, "rctd_summary_metrics.csv")))
 
-message("\nRCTD doublet-mode comparison:")
+shared_metrics <- rbindlist(shared_metrics_list, use.names = TRUE, fill = TRUE)
+fwrite(shared_metrics, file.path(OUT_DIR, "rctd_shared_metrics.csv"))
+message(sprintf("  Shared-cell metrics: %s", file.path(OUT_DIR, "rctd_shared_metrics.csv")))
+
+message("\nRCTD doublet-mode comparison (all retained cells):")
 print(summary_metrics)
+
+message("\nRCTD doublet-mode comparison (shared cells with RAW):")
+print(shared_metrics)
 
 message("\nDone.")
