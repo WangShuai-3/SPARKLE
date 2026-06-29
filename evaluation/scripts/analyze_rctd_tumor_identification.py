@@ -41,11 +41,18 @@ METHOD_FILES = {
 
 RESULTS_CSV = RCTD_DIR / "rctd_doublet_results.csv"
 
-# Colon cancer / epithelial markers available in the 2000-HVG set
-TUMOR_MARKERS = ["EPCAM", "KRT8", "KRT18", "KRT19", "CEACAM5", "CEACAM6",
-                 "CDH1", "LGALS4", "FABP1", "TFF3"]
-STROMAL_MARKERS = ["VIM", "COL1A1", "ACTA2"]
-ALL_MARKERS = TUMOR_MARKERS + STROMAL_MARKERS
+MARKER_CSV = RCTD_DIR / "tumor_markers_from_scRNA.csv"
+
+
+def load_learned_markers(adata, top_n=50):
+    """Load scRNA-derived tumor markers and return those present in the h5ad."""
+    df = pd.read_csv(MARKER_CSV)
+    de = df[df["comparison"] == "Tumor_vs_NonTumor"].sort_values("logFC", ascending=False)
+    tumor_markers = de.head(top_n)["gene"].tolist()
+    nontumor_markers = de.tail(top_n)["gene"].tolist()
+    present_tumor = [g for g in tumor_markers if g in adata.var_names]
+    present_nontumor = [g for g in nontumor_markers if g in adata.var_names]
+    return present_tumor, present_nontumor
 
 
 def load_results():
@@ -212,7 +219,7 @@ def tumor_ie_margin(obs, method, subset_label="all"):
 def marker_expression_by_class(adata, method):
     """Mean marker expression in RCTD-predicted classes."""
     obs = classify_calls(adata.obs)
-    available = [g for g in ALL_MARKERS if g in adata.var_names]
+    available = [g for g in (TUMOR_MARKERS + STROMAL_MARKERS) if g in adata.var_names]
     records = []
     for label, mask in [
         ("pred_tumor_singlet", obs["pred_tumor_singlet"] & obs["has_rctd"]),
@@ -251,19 +258,27 @@ def marker_ratios(marker_df, methods):
 
 
 def contamination_signal_table(adata, method):
-    """Signal (epithelial marker mean) vs contamination (stromal marker mean) in pred tumor."""
+    """Signal (tumor marker mean) vs contamination (non-tumor marker mean) in pred tumor."""
     obs = classify_calls(adata.obs)
-    mask = obs["pred_tumor_singlet"] & obs["has_rctd"]
-    epi_genes = [g for g in TUMOR_MARKERS if g in adata.var_names]
-    stro_genes = [g for g in STROMAL_MARKERS if g in adata.var_names]
-    epi_mean = float(np.nanmean(sparse_mean(adata, epi_genes, mask)))
-    stro_mean = float(np.nanmean(sparse_mean(adata, stro_genes, mask)))
+    tumor_mask = obs["pred_tumor_singlet"] & obs["has_rctd"]
+    other_mask = (obs["rctd_spot_class"] == "singlet") & ~obs["pred_tumor_dominant"] & obs["has_rctd"]
+    tumor_genes = [g for g in TUMOR_MARKERS if g in adata.var_names]
+    nontumor_genes = [g for g in STROMAL_MARKERS if g in adata.var_names]
+
+    tumor_mean_in_tumor = float(np.nanmean(sparse_mean(adata, tumor_genes, tumor_mask)))
+    tumor_mean_in_other = float(np.nanmean(sparse_mean(adata, tumor_genes, other_mask)))
+    nontumor_mean_in_tumor = float(np.nanmean(sparse_mean(adata, nontumor_genes, tumor_mask)))
+    nontumor_mean_in_other = float(np.nanmean(sparse_mean(adata, nontumor_genes, other_mask)))
+
     return pd.DataFrame([{
         "method": method,
-        "n_pred_tumor_singlet": int(mask.sum()),
-        "epithelial_marker_mean": epi_mean,
-        "stromal_marker_mean": stro_mean,
-        "signal_to_contamination": epi_mean / stro_mean if stro_mean > 0 else np.nan,
+        "n_pred_tumor_singlet": int(tumor_mask.sum()),
+        "tumor_marker_mean_in_tumor": tumor_mean_in_tumor,
+        "tumor_marker_mean_in_other": tumor_mean_in_other,
+        "tumor_marker_enrichment": tumor_mean_in_tumor / tumor_mean_in_other if tumor_mean_in_other > 0 else np.nan,
+        "nontumor_marker_mean_in_tumor": nontumor_mean_in_tumor,
+        "nontumor_marker_mean_in_other": nontumor_mean_in_other,
+        "nontumor_marker_depletion": nontumor_mean_in_tumor / nontumor_mean_in_other if nontumor_mean_in_other > 0 else np.nan,
     }])
 
 
@@ -334,22 +349,31 @@ def make_plots(call_df, score_df, margin_df, marker_df, ratio_df, contam_df, out
         fig.savefig(out_dir / "tumor_ie_marker_ratio.png", dpi=200)
         plt.close(fig)
 
-    # 5. Contamination/signal ratio
+    # 5. Tumor vs non-tumor marker enrichment in predicted tumor singlets
     if not contam_df.empty:
-        fig, ax = plt.subplots(figsize=(6, 4.5))
-        sub = contam_df[[c for c in ["method", "epithelial_marker_mean", "stromal_marker_mean"] if c in contam_df.columns]].set_index("method")
+        fig, ax = plt.subplots(figsize=(7, 4.5))
+        sub = contam_df[["method", "tumor_marker_enrichment", "nontumor_marker_depletion"]].set_index("method")
         sub.plot(kind="bar", ax=ax)
-        ax.set_ylabel("Mean expression")
-        ax.set_title("Epithelial vs stromal markers in predicted Tumor singlets")
+        ax.axhline(1.0, color="gray", linestyle="--", linewidth=1)
+        ax.set_ylabel("Fold change vs predicted non-tumor singlets")
+        ax.set_title("Learned marker enrichment/depletion in predicted Tumor singlets")
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=0)
         fig.tight_layout()
-        fig.savefig(out_dir / "contamination_signal_ratio.png", dpi=200)
+        fig.savefig(out_dir / "marker_enrichment_in_tumor_calls.png", dpi=200)
         plt.close(fig)
 
 
 def main():
+    global TUMOR_MARKERS, STROMAL_MARKERS
     print("Loading RCTD results ...")
     rctd_df = load_results()
+
+    # Load scRNA-derived tumor markers, using RAW h5ad gene set as reference
+    print("Loading scRNA-derived tumor markers ...")
+    raw_adata = load_h5ad("RAW")
+    TUMOR_MARKERS, STROMAL_MARKERS = load_learned_markers(raw_adata, top_n=50)
+    print(f"  Learned tumor markers present: {len(TUMOR_MARKERS)}")
+    print(f"  Learned non-tumor markers present: {len(STROMAL_MARKERS)}")
 
     call_records = []
     score_records = []
@@ -422,10 +446,10 @@ def main():
     sel = ratio_df[ratio_df["gene"].isin(["EPCAM", "KRT8", "KRT18", "CEACAM5", "CEACAM6", "CDH1"])]
     print(sel.pivot(index="gene", columns="method", values="tumor_ie_ratio").to_string())
 
-    print("\n=== Contamination/signal in predicted tumor singlets ===")
+    print("\n=== Marker enrichment in predicted tumor singlets (learned scRNA markers) ===")
     print(contam_df[contam_df["method"].isin(METHOD_FILES.keys())]
-          [["method", "n_pred_tumor_singlet", "epithelial_marker_mean",
-            "stromal_marker_mean", "signal_to_contamination"]].to_string(index=False))
+          [["method", "n_pred_tumor_singlet", "tumor_marker_enrichment",
+            "nontumor_marker_depletion"]].to_string(index=False))
 
     print(f"\nOutputs written to {OUT_DIR}")
 

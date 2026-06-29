@@ -49,8 +49,20 @@ FEATURE_SLICE_H5 = DATA_DIR / "Visium_HD_6p5mm_Human_Colon_Cancer_feature_slice.
 # A small radius captures nearest neighbours; a larger radius captures broader domains.
 RADII = [50, 100, 200]
 
-# Markers to profile across the tumor boundary
-MARKERS = ["EPCAM", "KRT8", "KRT18", "CEACAM5", "CEACAM6", "CDH1", "VIM", "COL1A1"]
+MARKER_CSV = RCTD_DIR / "tumor_markers_from_scRNA.csv"
+# Placeholder; populated in main() from scRNA-derived markers
+MARKERS = []
+
+
+def load_learned_markers(adata, top_n=30):
+    """Load scRNA-derived tumor markers and return those present in the h5ad."""
+    df = pd.read_csv(MARKER_CSV)
+    de = df[df["comparison"] == "Tumor_vs_NonTumor"].sort_values("logFC", ascending=False)
+    tumor_markers = de.head(top_n)["gene"].tolist()
+    nontumor_markers = de.tail(top_n)["gene"].tolist()
+    present_tumor = [g for g in tumor_markers if g in adata.var_names]
+    present_nontumor = [g for g in nontumor_markers if g in adata.var_names]
+    return present_tumor + present_nontumor
 
 
 def load_results():
@@ -346,8 +358,14 @@ def make_plots(spatial_df, boundary_df, out_dir):
 
 
 def main():
+    global MARKERS
     print("Loading RCTD results ...")
     rctd_df = load_results()
+
+    print("Loading scRNA-derived tumor markers ...")
+    raw_adata = load_h5ad("RAW")
+    MARKERS = load_learned_markers(raw_adata, top_n=30)
+    print(f"  Learned markers present in Visium HD: {len(MARKERS)}")
 
     print("Loading h5ad cell ids for coordinate computation ...")
     all_cell_ids = set()
