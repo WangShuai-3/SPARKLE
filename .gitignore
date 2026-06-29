@@ -1,3 +1,6 @@
+# Manuscript (local only, removed from remote)
+Manuscript/
+
 # Data files
 *.h5ad
 *.h5
