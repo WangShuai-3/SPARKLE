@@ -1088,6 +1088,13 @@ def run_decontx_method(sub, verbose=True):
     cell_ids = np.array(sub['cell_ids'])
     n_cells = len(cell_ids)
 
+    # Ensure dnb_labels are 0-based cell indices. Axolotl loader returns
+    # original cell IDs, while MOSTA/VisiumHD/synthetic already use 0-based.
+    if dnb_labels.max() >= n_cells:
+        label_to_idx = {int(cid): i for i, cid in enumerate(cell_ids)}
+        dnb_labels = np.array([label_to_idx.get(int(l), -1) for l in dnb_labels],
+                              dtype=np.int32)
+
     raw_cell = compute_cell_expr(dnb_expr, dnb_labels, n_cells)
 
     adata = ad.AnnData(X=raw_cell.T, dtype=np.float64)
