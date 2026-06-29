@@ -60,9 +60,21 @@ python evaluation/scripts/final_comparison.py --dataset synthetic --scenario S1
 python evaluation/scripts/final_comparison.py --dataset synthetic --all-scenarios \
     --methods sparkle,spatial_soupx,soupx,decontx
 
-# Axolotl 真实数据
-python evaluation/scripts/test_axolotl.py
+# Axoltol
+python evaluation/scripts/final_comparison.py --dataset axolotl \
+    --x-range 10500 12500 --y-range 6000 11100 \
+    --n-genes 2000 --n-high-genes 2000 \
+    --methods sparkle,spatial_soupx,soupx,decontx
 
-# 最终方法对比（真实数据）
-python evaluation/scripts/final_comparison.py --dataset axolotl
+# Mosta
+python evaluation/scripts/final_comparison.py --dataset mosta \
+    --x-range 10000 14000 --y-range 8000 17000 \
+    --n-genes 2000 --n-high-genes 2000 \
+    --methods sparkle,spatial_soupx,soupx,decontx
+
+# Visium HD
+python evaluation/scripts/final_comparison.py --dataset mosta \
+    --x-range 45000 60000 --y-range 10000 20000 \
+    --n-genes 2000 --n-high-genes 2000 \
+    --methods sparkle,spatial_soupx,soupx,decontx
 ```
