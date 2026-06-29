@@ -48,7 +48,7 @@ evaluation/
 | max_radius | 300 μm | 邻居搜索半径 |
 | lambda_grid | [10,20,30,50,70,100,150,200,300] | λ 候选值 |
 | cell_based | True | Cell 级架构 |
-| self_confidence_penalty | False | 合成 benchmark 中关闭以优化 RMSE |
+| self_confidence_penalty | True | |
 
 ## 使用
 
