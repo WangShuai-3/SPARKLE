@@ -1480,7 +1480,7 @@ def load_visiumhd_data(x_range=None, y_range=None, n_genes=None, verbose=True):
         for i in range(n_pixels_total):
             r, c = int(pixel_rows[i]), int(pixel_cols[i])
             pixel_to_idx[r, c] = i
-            dnb_coords_list.append((c * 8 + 4, r * 8 + 4))
+            dnb_coords_list.append((c * 2.0 + 1.0, r * 2.0 + 1.0))
     else:
         kept_indices = []
         for i in range(n_pixels_total):
@@ -1492,7 +1492,7 @@ def load_visiumhd_data(x_range=None, y_range=None, n_genes=None, verbose=True):
             new_idx = len(kept_indices)
             pixel_to_idx[r, c] = new_idx
             kept_indices.append(i)
-            dnb_coords_list.append((c * 8 + 4, r * 8 + 4))
+            dnb_coords_list.append((c * 2.0 + 1.0, r * 2.0 + 1.0))
 
     n_pixels = len(kept_indices)
     dnb_coords = np.array(dnb_coords_list, dtype=np.float64)
