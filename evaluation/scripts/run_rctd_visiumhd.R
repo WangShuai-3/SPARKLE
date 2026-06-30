@@ -166,6 +166,21 @@ compute_rctd_metrics <- function(res, weights, method_name) {
   )
 }
 
+compute_entropy_from_weights <- function(weights, barcodes) {
+  # Compute mean Shannon entropy over a subset of barcodes using RCTD weights.
+  if (is.null(weights) || length(barcodes) == 0) {
+    return(NA_real_)
+  }
+  available <- intersect(barcodes, rownames(weights))
+  if (length(available) == 0) {
+    return(NA_real_)
+  }
+  w <- as.matrix(weights[available, , drop = FALSE])
+  w <- w / rowSums(w)
+  entropy <- -rowSums(w * log2(w + 1e-12), na.rm = TRUE)
+  mean(entropy, na.rm = TRUE)
+}
+
 # -----------------------------------------------------------------------------
 # 1. Build scRNA reference (class1 / Level1 annotations)
 # -----------------------------------------------------------------------------
@@ -294,8 +309,24 @@ for (i in seq_along(H5AD_FILES)) {
 }
 
 # -----------------------------------------------------------------------------
-# 4. Compute shared-cell metrics against RAW
+# 4. Compute shared-cell metrics against RAW (only % doublet and mean entropy)
 # -----------------------------------------------------------------------------
+compute_shared_metrics <- function(res, method_name, compared_to) {
+  spot_class <- as.character(res$spot_class)
+  pct_doublet <- mean(spot_class != "singlet") * 100
+  n_cells <- nrow(res)
+
+  # Entropy from first-type weights (approximate via normalized first/second weights)
+  # Use the RCTD weights matrix if available; otherwise skip entropy
+  data.table(
+    method = method_name,
+    compared_to = compared_to,
+    n_cells = n_cells,
+    pct_doublet = pct_doublet,
+    mean_entropy = NA_real_
+  )
+}
+
 message("[4/5] Computing shared-cell metrics against RAW ...")
 raw_barcodes <- results_list[["RAW"]]$cell_barcode
 shared_metrics_list <- list()
@@ -312,9 +343,25 @@ for (method in METHOD_NAMES) {
   raw_weights <- weights_list[["RAW"]]
   method_weights <- weights_list[[method]]
 
+  # Entropy needs the weights matrix
+  raw_entropy <- compute_entropy_from_weights(raw_weights, raw_res$cell_barcode)
+  method_entropy <- compute_entropy_from_weights(method_weights, method_res$cell_barcode)
+
   shared_metrics_list[[paste0("RAW_vs_", method)]] <- rbind(
-    compute_rctd_metrics(raw_res, raw_weights, "RAW_shared")[, compared_to := method],
-    compute_rctd_metrics(method_res, method_weights, method)[, compared_to := method]
+    data.table(
+      method = "RAW_shared",
+      compared_to = method,
+      n_cells = nrow(raw_res),
+      pct_doublet = mean(raw_res$spot_class != "singlet") * 100,
+      mean_entropy = raw_entropy
+    ),
+    data.table(
+      method = method,
+      compared_to = method,
+      n_cells = nrow(method_res),
+      pct_doublet = mean(method_res$spot_class != "singlet") * 100,
+      mean_entropy = method_entropy
+    )
   )
 }
 
