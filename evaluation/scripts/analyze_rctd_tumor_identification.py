@@ -37,13 +37,36 @@ RCTD_DIR = REPORTS_DIR / "rctd_visiumhd"
 OUT_DIR = RCTD_DIR / "tumor_analysis"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-METHOD_FILES = {
-    "RAW": "raw.h5ad",
-    "SPARKLE": "sparkle.h5ad",
-    "SpatialSoupX": "spatial_soupx.h5ad",
+RESULTS_CSV = RCTD_DIR / "rctd_doublet_results.csv"
+
+
+METHOD_NAME_MAP = {
+    "raw": "RAW",
+    "sparkle": "SPARKLE",
+    "spatial_soupx": "SpatialSoupX",
 }
 
-RESULTS_CSV = RCTD_DIR / "rctd_doublet_results.csv"
+
+def method_name_from_stem(stem: str) -> str:
+    """Map a filename stem to a method display name.
+
+    Known stems are mapped explicitly so existing result labels stay stable.
+    Unknown stems fall back to a simple heuristic (e.g. my_method -> MyMethod).
+    Add new explicit mappings as needed.
+    """
+    if stem in METHOD_NAME_MAP:
+        return METHOD_NAME_MAP[stem]
+    parts = stem.split("_")
+    return "".join(part.capitalize() for part in parts)
+
+
+def discover_methods():
+    """Auto-discover h5ad files and return {method_name: filename}."""
+    methods = {}
+    for path in sorted(H5AD_DIR.glob("*.h5ad")):
+        stem = path.stem
+        methods[method_name_from_stem(stem)] = path.name
+    return methods
 MARKER_CSV = RCTD_DIR / "tumor_markers_from_scRNA.csv"
 
 N_MARKERS = 100  # use top-N scRNA-derived tumor markers
@@ -55,8 +78,8 @@ def load_results():
     return df
 
 
-def load_h5ad(method):
-    path = H5AD_DIR / METHOD_FILES[method]
+def load_h5ad(method, method_files):
+    path = H5AD_DIR / method_files[method]
     adata = ad.read_h5ad(path)
     adata.obs_names = adata.obs_names.astype(str)
     return adata
@@ -164,15 +187,18 @@ def main():
     print("Loading RCTD results ...")
     rctd_df = load_results()
 
+    method_files = discover_methods()
+    print(f"Discovered methods: {list(method_files.keys())}")
+
     print("Loading scRNA-derived tumor markers ...")
-    raw_adata = load_h5ad("RAW")
+    raw_adata = load_h5ad("RAW", method_files)
     marker_df = load_scRNA_markers(raw_adata)
     print(f"  {len(marker_df)} learned markers present in Visium HD")
 
     all_records = []
-    for method in METHOD_FILES.keys():
+    for method in method_files.keys():
         print(f"Processing {method} ...")
-        adata = load_h5ad(method)
+        adata = load_h5ad(method, method_files)
         adata = attach_predictions(adata, rctd_df, method)
         de = per_marker_de(adata, marker_df)
         de["method"] = method
@@ -189,7 +215,7 @@ def main():
     # Summary: how many markers have positive logFC in Visium, and correlation with scRNA
     print("\n=== Marker discrimination summary ===")
     summary = []
-    for method in METHOD_FILES.keys():
+    for method in method_files.keys():
         d = combined[combined["method"] == method]
         n_pos = int((d["visium_logFC"] > 0).sum())
         n_sig = int((d["visium_pval"] < 0.05).sum())

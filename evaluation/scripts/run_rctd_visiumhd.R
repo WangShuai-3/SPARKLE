@@ -61,9 +61,32 @@ H5AD_DIR <- file.path(PROJECT_ROOT, "evaluation", "reports", "h5ad_visiumhd")
 MTX_DIR <- file.path(PROJECT_ROOT, "evaluation", "reports", "rctd_visiumhd", "mtx")
 OUT_DIR <- file.path(PROJECT_ROOT, "evaluation", "reports", "rctd_visiumhd")
 
-H5AD_FILES <- c("raw.h5ad", "sparkle.h5ad", "spatial_soupx.h5ad")
-MTX_PREFIXES <- c("raw", "sparkle", "spatial_soupx")
-METHOD_NAMES <- c("RAW", "SPARKLE", "SpatialSoupX")
+# Auto-discover h5ad files in H5AD_DIR and derive method display names.
+# Known stems are mapped explicitly so existing result labels stay stable.
+# Unknown stems fall back to a simple heuristic (e.g. my_method -> MyMethod).
+method_name_map <- list(
+  raw = "RAW",
+  sparkle = "SPARKLE",
+  spatial_soupx = "SpatialSoupX"
+)
+
+method_name_from_stem <- function(stem) {
+  if (stem %in% names(method_name_map)) {
+    return(method_name_map[[stem]])
+  }
+  if (!grepl("_", stem)) {
+    return(toupper(stem))
+  }
+  parts <- strsplit(stem, "_")[[1]]
+  paste0(toupper(substring(parts, 1, 1)), substring(parts, 2), collapse = "")
+}
+
+H5AD_FILES <- sort(list.files(H5AD_DIR, pattern = "\\.h5ad$"))
+MTX_PREFIXES <- tools::file_path_sans_ext(H5AD_FILES)
+METHOD_NAMES <- sapply(MTX_PREFIXES, method_name_from_stem)
+
+message(sprintf("Discovered %d methods: %s", length(METHOD_NAMES),
+                paste(METHOD_NAMES, collapse = ", ")))
 
 MAX_CORES <- as.integer(Sys.getenv("RCTD_MAX_CORES", "16"))
 
@@ -311,22 +334,6 @@ for (i in seq_along(H5AD_FILES)) {
 # -----------------------------------------------------------------------------
 # 4. Compute shared-cell metrics against RAW (only % doublet and mean entropy)
 # -----------------------------------------------------------------------------
-compute_shared_metrics <- function(res, method_name, compared_to) {
-  spot_class <- as.character(res$spot_class)
-  pct_doublet <- mean(spot_class != "singlet") * 100
-  n_cells <- nrow(res)
-
-  # Entropy from first-type weights (approximate via normalized first/second weights)
-  # Use the RCTD weights matrix if available; otherwise skip entropy
-  data.table(
-    method = method_name,
-    compared_to = compared_to,
-    n_cells = n_cells,
-    pct_doublet = pct_doublet,
-    mean_entropy = NA_real_
-  )
-}
-
 message("[4/5] Computing shared-cell metrics against RAW ...")
 raw_barcodes <- results_list[["RAW"]]$cell_barcode
 shared_metrics_list <- list()

@@ -34,12 +34,28 @@ RCTD_DIR = REPORTS_DIR / "rctd_visiumhd"
 OUT_DIR = RCTD_DIR / "spatial_boundary"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-METHOD_FILES = {
-    "RAW": "raw.h5ad",
-    "SPARKLE": "sparkle.h5ad",
-    "SpatialSoupX": "spatial_soupx.h5ad",
-}
 RESULTS_CSV = RCTD_DIR / "rctd_doublet_results.csv"
+
+
+METHOD_NAME_MAP = {
+    "raw": "RAW",
+    "sparkle": "SPARKLE",
+    "spatial_soupx": "SpatialSoupX",
+}
+
+
+def method_name_from_stem(stem: str) -> str:
+    if stem in METHOD_NAME_MAP:
+        return METHOD_NAME_MAP[stem]
+    parts = stem.split("_")
+    return "".join(part.capitalize() for part in parts)
+
+
+def discover_methods():
+    methods = {}
+    for path in sorted(H5AD_DIR.glob("*.h5ad")):
+        methods[method_name_from_stem(path.stem)] = path.name
+    return methods
 FEATURE_SLICE_H5 = DATA_DIR / "Visium_HD_6p5mm_Human_Colon_Cancer_feature_slice.h5"
 
 RADII = [50, 100, 200]
@@ -67,8 +83,8 @@ def compute_cell_coordinates(feature_slice_h5, cell_ids_needed):
     return coords
 
 
-def load_h5ad(method):
-    path = H5AD_DIR / METHOD_FILES[method]
+def load_h5ad(method, method_files):
+    path = H5AD_DIR / method_files[method]
     adata = ad.read_h5ad(path)
     adata.obs_names = adata.obs_names.astype(str)
     return adata
@@ -99,9 +115,9 @@ def local_entropy(labels, neighbors):
     return out
 
 
-def analyze_method(method, rctd_df, coords_all, raw_barcodes=None):
+def analyze_method(method, rctd_df, coords_all, raw_barcodes=None, method_files=None):
     print(f"\nProcessing {method} ...")
-    adata = load_h5ad(method)
+    adata = load_h5ad(method, method_files)
     adata = attach_predictions(adata, rctd_df, method)
 
     obs = adata.obs.copy()
@@ -146,12 +162,12 @@ def analyze_method(method, rctd_df, coords_all, raw_barcodes=None):
     return pd.DataFrame(records)
 
 
-def make_plots(entropy_df, out_dir):
+def make_plots(entropy_df, method_files, out_dir):
     if entropy_df.empty:
         return
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
-    for method in entropy_df["method"].unique():
+    for method in method_files.keys():
         d = entropy_df[(entropy_df["method"] == method) & (entropy_df["subset"] == "all")]
         ax.plot(d["radius"], d["mean_local_entropy"], marker="o", label=method)
     ax.set_xlabel("Radius")
@@ -167,10 +183,13 @@ def main():
     print("Loading RCTD results ...")
     rctd_df = load_results()
 
+    method_files = discover_methods()
+    print(f"Discovered methods: {list(method_files.keys())}")
+
     print("Loading h5ad cell ids for coordinate computation ...")
     all_cell_ids = set()
-    for method in METHOD_FILES.keys():
-        adata = load_h5ad(method)
+    for method in method_files.keys():
+        adata = load_h5ad(method, method_files)
         all_cell_ids.update(adata.obs["cell_id"].astype(int).tolist())
     print(f"  {len(all_cell_ids)} unique cell ids to look up")
 
@@ -178,16 +197,16 @@ def main():
     coords_all = compute_cell_coordinates(FEATURE_SLICE_H5, all_cell_ids)
     print(f"  coordinates for {len(coords_all)} cells")
 
-    raw_adata = load_h5ad("RAW")
+    raw_adata = load_h5ad("RAW", method_files)
     raw_adata = attach_predictions(raw_adata, rctd_df, "RAW")
     raw_barcodes = set(raw_adata.obs.loc[raw_adata.obs["rctd_first_type"].notna()].index)
 
     records = []
-    for method in METHOD_FILES.keys():
-        res = analyze_method(method, rctd_df, coords_all, raw_barcodes=None)
+    for method in method_files.keys():
+        res = analyze_method(method, rctd_df, coords_all, raw_barcodes=None, method_files=method_files)
         if res is not None:
             records.append(res)
-        res_shared = analyze_method(method, rctd_df, coords_all, raw_barcodes=raw_barcodes)
+        res_shared = analyze_method(method, rctd_df, coords_all, raw_barcodes=raw_barcodes, method_files=method_files)
         if res_shared is not None:
             records.append(res_shared)
 
@@ -195,7 +214,7 @@ def main():
     entropy_df.to_csv(OUT_DIR / "local_entropy_metrics.csv", index=False)
 
     print("Saving plot ...")
-    make_plots(entropy_df, OUT_DIR)
+    make_plots(entropy_df, method_files, OUT_DIR)
 
     print("\n=== Local entropy (lower = purer neighborhoods) ===")
     print(entropy_df[entropy_df["subset"] == "all"]
