@@ -17,10 +17,36 @@ import anndata as ad
 from stambient import SPARKLE
 from evaluation.baselines.spatial_soupx import run_spatial_soupx
 from evaluation.baselines.soupx import run_soupx
-from evaluation.scripts.test_axolotl import compute_neighbor_stats
 from evaluation.synthetic import generate_synthetic_data, SCENARIOS
 import scanpy as sc
 from pysctransform import SCTransform
+from scipy.spatial import cKDTree
+
+
+def compute_neighbor_stats(cell_centroids, sstin_mask, radius=50.0):
+    """Find non-sstIN neighbors within radius of any sstIN cell.
+
+    Originally from evaluation/scripts/test_axolotl.py; inlined here after
+    that file was removed as unused standalone data script.
+    """
+    sstin_indices = np.where(sstin_mask)[0]
+    non_sstin_indices = np.where(~sstin_mask)[0]
+
+    if len(sstin_indices) == 0:
+        return np.zeros(len(sstin_mask), dtype=bool), np.zeros(len(sstin_mask), dtype=bool)
+
+    tree = cKDTree(cell_centroids[non_sstin_indices])
+    neighbor_set = set()
+    for si in sstin_indices:
+        nbrs = tree.query_ball_point(cell_centroids[si], radius)
+        for n in nbrs:
+            neighbor_set.add(non_sstin_indices[n])
+
+    neighbor_mask = np.zeros(len(sstin_mask), dtype=bool)
+    if neighbor_set:
+        neighbor_mask[list(neighbor_set)] = True
+    other_mask = ~sstin_mask & ~neighbor_mask
+    return neighbor_mask, other_mask
 
 
 def load_synthetic_scenario_data(scenario_id="S1", seed=42):

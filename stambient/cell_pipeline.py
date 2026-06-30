@@ -11,10 +11,11 @@ Key advantage over pure bin-level:
 """
 
 import numpy as np
-from scipy.sparse import csr_matrix, lil_matrix, coo_matrix
+from scipy.sparse import csr_matrix
 from typing import Dict, Tuple, Optional, List
 
-from .spatial import build_spatial_graph, DistanceMetric
+from .spatial import build_spatial_graph, build_spatial_graph_between, DistanceMetric
+from .estimation import _expression_weight as _ewap_source
 
 
 def _self_confidence_weight(source_c: np.ndarray, mode: str = "1/(1+s/p90)") -> np.ndarray:
@@ -24,7 +25,12 @@ def _self_confidence_weight(source_c: np.ndarray, mode: str = "1/(1+s/p90)") -> 
     - '1/(1+(s/p90)²)': quadratic sigmoid (sharp cutoff)
     - 'exp(-s/p90)': exponential decay
     - 'p50/s': linear ramp above median, 1 below
+
+    Supports both 1D (single gene) and 2D (batch of genes, last axis = cells).
     """
+    if source_c.ndim == 2:
+        return np.array([_self_confidence_weight(row, mode=mode) for row in source_c])
+
     positive = source_c[source_c > 0]
     if len(positive) == 0:
         return np.ones_like(source_c)
@@ -198,12 +204,10 @@ def cell_pipeline_fit(
     if verbose:
         print(f"Selected {len(gene_indices)} high-expression genes")
 
-    # ── 4. Build spatial graph (cells → empty bins) ────────────
-    # We need distances from empty bins to cells (for λ estimation)
+    # ── 4. Prepare spatial graphs (cells → empty bins) ─────────
+    # We need distances from empty bins to cells (for λ/α estimation)
     # and from cells to cells (for correction).
-    # Build a combined coordinate set: [cells, empty_bins]
-    all_coords = np.vstack([cell_centroids, empty_bin_coords]) if n_empty_bins > 0 else cell_centroids
-    n_total = n_cells + n_empty_bins
+    # Build them as separate cross-graphs to avoid the full combined matrix.
 
     # ── 5. Estimate λ ──────────────────────────────────────────
     if verbose:
@@ -222,27 +226,33 @@ def cell_pipeline_fit(
 
     best_lam = lambda_grid[0]
     best_rss = np.inf
+    W_empty_cache = {}
+    w = empty_bin_areas.astype(np.float64)
+    y_obs_lambda = empty_bin_expr[lambda_gene_indices].T  # [n_empty_bins × n_lambda_use]
 
     for lam in lambda_grid:
         # Build graph: distances from empty bins to cells
-        W = build_spatial_graph(all_coords, max_radius, lam, distance_metric)
-        # Extract empty-bin → cell submatrix
-        W_empty_to_cell = W[n_cells:, :n_cells]  # [n_empty_bins × n_cells]
+        W_empty_to_cell = build_spatial_graph_between(
+            empty_bin_coords, cell_centroids, max_radius, lam, distance_metric
+        )
+        W_empty_cache[lam] = W_empty_to_cell
 
-        total_rss = 0.0
-        for i, g_idx in enumerate(lambda_gene_indices):
-            source = cell_source[i]
-            weighted_sum = W_empty_to_cell.dot(source)  # Σ_c w(d) × source_c
-            N_gb = empty_bin_areas * weighted_sum
-            y_obs = empty_bin_expr[g_idx]
-            w = empty_bin_areas.astype(np.float64)
+        # Batched weighted sums for all lambda genes at once
+        weighted_sums = W_empty_to_cell.dot(cell_source.T)  # [n_empty_bins × n_lambda_use]
+        N_gb_all = empty_bin_areas[:, None] * weighted_sums
 
-            denom = (w * N_gb ** 2).sum()
-            if denom == 0:
-                continue
-            alpha_g = max((w * y_obs * N_gb).sum() / denom, 0.0)
-            residuals = y_obs - alpha_g * N_gb
-            total_rss += (w * residuals ** 2).sum()
+        denom = (w[:, None] * N_gb_all ** 2).sum(axis=0)
+        alpha_g = np.divide(
+            (w[:, None] * y_obs_lambda * N_gb_all).sum(axis=0),
+            denom,
+            out=np.zeros(n_lambda_use, dtype=np.float64),
+            where=denom > 0,
+        )
+        alpha_g = np.maximum(alpha_g, 0.0)
+
+        residuals = y_obs_lambda - alpha_g[None, :] * N_gb_all
+        rss_per_gene = (w[:, None] * residuals ** 2).sum(axis=0)
+        total_rss = rss_per_gene.sum()
 
         if total_rss < best_rss:
             best_rss = total_rss
@@ -255,41 +265,46 @@ def cell_pipeline_fit(
     if verbose:
         print("Estimating gene-specific leakage rates α...")
 
-    W = build_spatial_graph(all_coords, max_radius, best_lam, distance_metric)
-    W_empty_to_cell = W[n_cells:, :n_cells]
+    W_empty_to_cell = W_empty_cache[best_lam]
 
     n_genes_use = len(gene_indices)
     alphas = np.zeros(n_genes_use, dtype=np.float64)
     r2_scores = np.zeros(n_genes_use, dtype=np.float64)
     w_empty = empty_bin_areas.astype(np.float64)
 
-    for i, g_idx in enumerate(gene_indices):
-        source = np.divide(cell_expr[g_idx], cell_areas,
-                           out=np.zeros(n_cells), where=cell_areas > 0)
-        if use_expr_weight:
-            source = _ewap_source(source)
-        weighted_sum = W_empty_to_cell.dot(source)
-        N_gb = empty_bin_areas * weighted_sum
-        y_obs = empty_bin_expr[g_idx]
+    # Precompute source strengths for all high-expression genes in one matrix
+    sources = np.divide(
+        cell_expr[gene_indices], cell_areas[None, :],
+        out=np.zeros((n_genes_use, n_cells), dtype=np.float64),
+        where=cell_areas[None, :] > 0,
+    )
+    if use_expr_weight:
+        sources = np.array([_ewap_source(s) for s in sources])
 
-        denom = (w_empty * N_gb ** 2).sum()
-        if denom == 0:
-            alphas[i] = 0.0
-            r2_scores[i] = 0.0
-            continue
+    # Batched weighted sums and OLS for all genes
+    weighted_sums = W_empty_to_cell.dot(sources.T)  # [n_empty_bins × n_genes_use]
+    N_gb_all = empty_bin_areas[:, None] * weighted_sums
+    y_obs_all = empty_bin_expr[gene_indices].T  # [n_empty_bins × n_genes_use]
 
-        alpha_g = max((w_empty * y_obs * N_gb).sum() / denom, 0.0)
-        alphas[i] = alpha_g
+    denom = (w_empty[:, None] * N_gb_all ** 2).sum(axis=0)
+    alphas = np.divide(
+        (w_empty[:, None] * y_obs_all * N_gb_all).sum(axis=0),
+        denom,
+        out=np.zeros(n_genes_use, dtype=np.float64),
+        where=denom > 0,
+    )
+    alphas = np.maximum(alphas, 0.0)
+    alphas[denom == 0] = 0.0
 
-        ss_res = (w_empty * (y_obs - alpha_g * N_gb) ** 2).sum()
-        y_mean = (w_empty * y_obs).sum() / w_empty.sum() if w_empty.sum() > 0 else 0
-        ss_tot = (w_empty * (y_obs - y_mean) ** 2).sum()
-        if ss_tot > 1e-15:
-            r2_scores[i] = 1.0 - ss_res / ss_tot
-        elif ss_res <= 1e-15:
-            r2_scores[i] = 1.0
-        else:
-            r2_scores[i] = 0.0
+    ss_res = (w_empty[:, None] * (y_obs_all - alphas[None, :] * N_gb_all) ** 2).sum(axis=0)
+    y_mean = (w_empty[:, None] * y_obs_all).sum(axis=0) / w_empty.sum() if w_empty.sum() > 0 else 0.0
+    ss_tot = (w_empty[:, None] * (y_obs_all - y_mean[None, :]) ** 2).sum(axis=0)
+    eps = 1e-15
+    r2_scores = np.where(
+        ss_tot > eps,
+        1.0 - ss_res / ss_tot,
+        np.where(ss_res > eps, 0.0, 1.0),
+    )
 
     n_corrected = int((r2_scores >= r2_threshold).sum())
     if verbose:
@@ -300,37 +315,51 @@ def cell_pipeline_fit(
         print("Applying cell-level ambient correction...")
 
     # Build cell-to-cell distance matrix (excluding self)
-    W_cell_to_cell = W[:n_cells, :n_cells]  # [n_cells × n_cells]
-    # Zero out self-connections (diagonal)
-    W_cell_to_cell = W_cell_to_cell.tolil()
-    W_cell_to_cell.setdiag(0)
-    W_cell_to_cell = W_cell_to_cell.tocsr()
+    W_cell_to_cell = build_spatial_graph(
+        cell_centroids, max_radius, best_lam, distance_metric
+    )
+    # Zero out self-connections (diagonal) efficiently in CSR format
+    W_cell_to_cell.setdiag(0.0)
+    W_cell_to_cell.eliminate_zeros()
 
     corrected_expr = np.zeros((n_genes, n_cells), dtype=np.float64)
 
+    gene_idx_set = set(gene_indices)
+    gene_idx_to_pos = {int(g_idx): i for i, g_idx in enumerate(gene_indices)}
+
+    # Identify genes to correct
+    corrected_gene_indices = []
+    corrected_positions = []
     for g_idx in range(n_genes):
-        if g_idx not in set(gene_indices):
+        if g_idx not in gene_idx_set:
             corrected_expr[g_idx] = cell_expr[g_idx]
             continue
-
-        pos = list(gene_indices).index(g_idx)
+        pos = gene_idx_to_pos[g_idx]
         if r2_scores[pos] < r2_threshold:
             corrected_expr[g_idx] = cell_expr[g_idx]
             continue
+        corrected_gene_indices.append(g_idx)
+        corrected_positions.append(pos)
 
-        alpha_g = alphas[pos]
-        source = np.divide(cell_expr[g_idx], cell_areas,
-                           out=np.zeros(n_cells), where=cell_areas > 0)
+    if corrected_gene_indices:
+        cg_idx = np.array(corrected_gene_indices, dtype=np.int64)
+        cpos = np.array(corrected_positions, dtype=np.int64)
+
+        corr_sources = np.divide(
+            cell_expr[cg_idx], cell_areas[None, :],
+            out=np.zeros((len(cg_idx), n_cells), dtype=np.float64),
+            where=cell_areas[None, :] > 0,
+        )
         if use_expr_weight:
-            source = _ewap_source(source)
-        # Ambient at each cell from OTHER cells, optionally with self-confidence penalty
-        neighbor_contrib = W_cell_to_cell.dot(source)
+            corr_sources = np.array([_ewap_source(s) for s in corr_sources])
+
+        # Single sparse-dense matrix multiply for all corrected genes
+        neighbor_contribs = W_cell_to_cell.dot(corr_sources.T)  # [n_cells × n_corrected]
+        ambient = alphas[cpos][None, :] * cell_areas[:, None] * neighbor_contribs
         if self_confidence_penalty:
-            penalty = _self_confidence_weight(source, mode=penalty_mode)
-            ambient = alpha_g * cell_areas * neighbor_contrib * penalty
-        else:
-            ambient = alpha_g * cell_areas * neighbor_contrib
-        corrected_expr[g_idx] = np.maximum(cell_expr[g_idx] - ambient, 0.0)
+            penalties = _self_confidence_weight(corr_sources, mode=penalty_mode)
+            ambient *= penalties.T
+        corrected_expr[cg_idx] = np.maximum(cell_expr[cg_idx] - ambient.T, 0.0)
 
     diagnostics = {
         "lambda_estimated": best_lam,

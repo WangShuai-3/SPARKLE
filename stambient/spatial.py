@@ -2,7 +2,7 @@
 
 import numpy as np
 from scipy.spatial import cKDTree
-from scipy.sparse import csr_matrix, lil_matrix
+from scipy.sparse import csr_matrix
 from typing import Optional, Tuple, Literal
 
 DistanceMetric = Literal["exponential", "gaussian", "inverse"]
@@ -69,25 +69,27 @@ def build_spatial_graph(
         Sparse [N × N] CSR matrix of distance weights. Diagonal is 0.
     """
     tree = cKDTree(coords)
-    # Query all pairs within max_radius; returns indices as list-of-arrays
-    pairs = tree.query_ball_tree(tree, max_radius)
-
     n = len(coords)
-    W = lil_matrix((n, n), dtype=np.float64)
 
-    for i, neighbors in enumerate(pairs):
-        if len(neighbors) == 0:
-            continue
-        # Remove self
-        neighbors_arr = np.array(neighbors)
-        neighbors_arr = neighbors_arr[neighbors_arr != i]
-        if len(neighbors_arr) == 0:
-            continue
-        dists = np.linalg.norm(coords[neighbors_arr] - coords[i], axis=1)
-        weights = compute_distance_weights(dists, lam, metric)
-        W[i, neighbors_arr] = weights
+    # Use sparse_distance_matrix for a fully vectorized construction.
+    # It returns a COO matrix with distances as data for all pairs within radius.
+    dist_coo = tree.sparse_distance_matrix(tree, max_radius, output_type="coo_matrix")
 
-    return W.tocsr()
+    # Exclude self-connections
+    row = dist_coo.row
+    col = dist_coo.col
+    data = dist_coo.data
+    mask = row != col
+    if not mask.all():
+        row = row[mask]
+        col = col[mask]
+        data = data[mask]
+
+    # Apply weight function vectorized
+    weights = compute_distance_weights(data, lam, metric)
+
+    W = csr_matrix((weights, (row, col)), shape=(n, n), dtype=np.float64)
+    return W
 
 
 def compute_neighbor_weighted_sum(
@@ -104,6 +106,42 @@ def compute_neighbor_weighted_sum(
         [N] array of weighted sums.
     """
     return W.dot(source_values)
+
+
+def build_spatial_graph_between(
+    coords_a: np.ndarray,
+    coords_b: np.ndarray,
+    max_radius: float,
+    lam: float,
+    metric: DistanceMetric = "exponential",
+) -> csr_matrix:
+    """Build a sparse spatial weight matrix from coords_a to coords_b.
+
+    For each pair (i in A, j in B) within max_radius, stores w(d(i, j)).
+    This avoids building the full (|A|+|B|)^2 matrix when only the
+    cross-block is needed.
+
+    Args:
+        coords_a: [M × 2] source coordinates.
+        coords_b: [N × 2] target coordinates.
+        max_radius: Maximum neighbor distance (μm).
+        lam: Distance decay parameter.
+        metric: Weight function type.
+
+    Returns:
+        Sparse [M × N] CSR matrix of distance weights.
+    """
+    tree_a = cKDTree(coords_a)
+    tree_b = cKDTree(coords_b)
+    dist_coo = tree_a.sparse_distance_matrix(
+        tree_b, max_radius, output_type="coo_matrix"
+    )
+    weights = compute_distance_weights(dist_coo.data, lam, metric)
+    return csr_matrix(
+        (weights, (dist_coo.row, dist_coo.col)),
+        shape=(len(coords_a), len(coords_b)),
+        dtype=np.float64,
+    )
 
 
 def compute_local_density(
@@ -126,15 +164,13 @@ def compute_local_density(
         [N] array of local density β values.
     """
     tree = cKDTree(coords)
-    neighborhood = tree.query_ball_tree(tree, local_radius)
+    # Vectorized neighborhood aggregation via a binary adjacency matrix.
+    adj = tree.sparse_distance_matrix(tree, local_radius, output_type="coo_matrix")
+    # Include self in the local window (the legacy loop included i itself).
+    adj.data = np.ones_like(adj.data)
+    adj = adj.tocsr()
 
-    beta = np.zeros(len(coords), dtype=np.float64)
-    for i, neighbors in enumerate(neighborhood):
-        if len(neighbors) == 0:
-            beta[i] = 0.0
-            continue
-        idx = np.array(neighbors)
-        sum_cell = n_cell[idx].sum()
-        sum_total = n_total[idx].sum()
-        beta[i] = sum_cell / max(sum_total, 1)
+    sum_cell = adj.dot(n_cell.astype(np.float64))
+    sum_total = adj.dot(n_total.astype(np.float64))
+    beta = sum_cell / np.maximum(sum_total, 1.0)
     return beta
