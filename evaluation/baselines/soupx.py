@@ -142,4 +142,7 @@ def run_soupx(
             print(f"  adjustCounts failed ({e}), using simple global subtraction")
         corrected_dense = np.maximum(toc_dense * (1.0 - rho), 0.0)
 
+    # Clip negative values that can arise from soupx cluster expansion numerical errors.
+    corrected_dense = np.maximum(corrected_dense, 0.0)
+
     return corrected_dense, rho
