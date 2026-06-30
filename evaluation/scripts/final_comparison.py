@@ -1445,16 +1445,13 @@ def load_visiumhd_data(x_range=None, y_range=None, n_genes=None, verbose=True):
     Returns:
         dict with dnb_expr, dnb_coords, dnb_labels, gene_names, cell_ids, ann_map.
     """
-    import h5py, csv
+    import h5py
 
     data_dir = Path(__file__).resolve().parent.parent / "data" / "visiumhd"
     h5_path = data_dir / "Visium_HD_6p5mm_Human_Colon_Cancer_feature_slice.h5"
-    rctd_csv = data_dir / "rctd_first_type.csv"
 
     if not h5_path.exists():
         raise FileNotFoundError(f"{h5_path} not found.")
-    if not rctd_csv.exists():
-        raise FileNotFoundError(f"{rctd_csv} not found. Run R conversion first.")
 
     load_all = False  # will be set in pass 1
     f = h5py.File(h5_path, 'r')
@@ -1654,30 +1651,9 @@ def load_visiumhd_data(x_range=None, y_range=None, n_genes=None, verbose=True):
 
     f.close()
 
-    # ── Step 5: Load RCTD annotations ─────────────────────────────
-    if verbose:
-        print("Loading RCTD cell type annotations...")
-    ann_map = {}
-    with open(rctd_csv, 'r') as cf:
-        reader = csv.reader(cf)
-        header = next(reader)
-        for row in reader:
-            barcode, first_type = row[0], row[1]
-            try:
-                cell_id = int(barcode.split('_')[1].split('-')[0])
-                ann_map[cell_id] = first_type
-            except (IndexError, ValueError):
-                continue
-
-    cell_anns = np.array([ann_map.get(cid, 'Unknown') for cid in cell_ids_list], dtype=object)
-    n_annotated = int((cell_anns != 'Unknown').sum())
-    if verbose:
-        print(f"  {n_annotated}/{n_cells} cells have RCTD annotations")
-        unique_types = sorted(set(cell_anns[cell_anns != 'Unknown']))
-        print(f"  Cell types: {unique_types}")
-
+    # RCTD annotations are no longer loaded; leave ann_map empty.
     cell_ids_arr = np.array(cell_ids_list)
-    ann_map_out = {cid: ann_map.get(cid, 'Unknown') for cid in cell_ids_list}
+    ann_map_out = {}
 
     if verbose:
         print(f"\n{'='*60}")
@@ -1830,53 +1806,14 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
         if corrected is not None:
             results['DecontX'] = {'corrected': corrected, 'diag': diag}
 
-    # Evaluation: scIB metrics
-    print(f"\n{'='*60}")
-    print("scIB EVALUATION (Cell-type ASW ↑, cLISI ↓)")
-    print(f"{'='*60}")
-
-    ann_map = data.get('ann_map', {})
-    cell_ids = data.get('cell_ids', np.array([]))
-    cell_anns = np.array([ann_map.get(cid, 'Unknown') for cid in cell_ids])
-    n_annotated = int((cell_anns != 'Unknown').sum())
-    print(f"  {n_annotated}/{len(cell_ids)} cells have cell type annotations")
-
-    if n_annotated < 10:
-        print("  Too few annotated cells, skipping scIB evaluation.")
-        return
-
-    if len(cell_ids) == 0:
-        print("  No cells in data (empty spatial window?), skipping.")
-        return
-
-    # Compute raw cell expression
-    n_cells = len(cell_ids)
-    raw_cell = compute_cell_expr(sub['dnb_expr'], sub['dnb_labels'], n_cells)
-    raw_metrics = _compute_scib_metrics(raw_cell, cell_anns, "RAW")
-
-    for method_name, r in results.items():
-        corrected = r.get('corrected')
-        if corrected is None:
-            continue
-        # Align: SPARKLE may drop cells with no bins after subsampling
-        n_cells_corr = corrected.shape[1]
-        if n_cells_corr != len(cell_anns):
-            print(f"  Warning: aligning cell annotations ({n_cells_corr} vs {len(cell_anns)})")
-            cell_anns_use = cell_anns[:n_cells_corr]
-        else:
-            cell_anns_use = cell_anns
-        metrics = _compute_scib_metrics(corrected, cell_anns_use, method_name)
-        r['scib_asw'] = metrics.get('asw')
-        r['scib_clisi'] = metrics.get('clisi')
-        r['scib_silhouette'] = metrics.get('silhouette')
-        r['scib_pca_var_top5'] = metrics.get('pca_var_top5')
-        r['scib_avg_clust_coef'] = metrics.get('avg_clust_coef')
-
-    # ── Doublet score evaluation ───────────────────────────────
+    # ── Doublet score evaluation (no cell-type annotations required) ──
     print(f"\n  {'='*60}")
     print(f"  Doublet Score Evaluation (median score ↓)")
     print(f"  {'='*60}")
 
+    cell_ids = data.get('cell_ids', np.array([]))
+    n_cells = len(cell_ids)
+    raw_cell = compute_cell_expr(sub['dnb_expr'], sub['dnb_labels'], n_cells)
     raw_doublet = compute_doublet_scores(raw_cell)
     raw_doublet_median = float(np.nanmedian(raw_doublet))
     print(f"  {'Method':<16} {'Median score':>14} {'Reduction':>12}")
@@ -1888,8 +1825,8 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
         if corrected is None:
             continue
         n_cells_corr = corrected.shape[1]
-        if n_cells_corr != len(cell_anns):
-            corrected = corrected[:, :len(cell_anns)]
+        if n_cells_corr != n_cells:
+            corrected = corrected[:, :n_cells]
         scores = compute_doublet_scores(corrected)
         median_score = float(np.nanmedian(scores))
         r['visiumhd_doublet_median'] = median_score
@@ -1912,6 +1849,7 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
     else:
         tag = "visiumhd_full"
 
+    ann_map = data.get('ann_map', {})
     save_result_h5ad(raw_cell, sub['gene_names'], cell_ids, ann_map,
                      reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW")
     metrics = {
@@ -1920,11 +1858,6 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
         "n_genes": int(raw_cell.shape[0]),
         "raw": {
             "doublet_median": raw_doublet_median,
-            "asw": raw_metrics.get('asw'),
-            "clisi": raw_metrics.get('clisi'),
-            "silhouette": raw_metrics.get('silhouette'),
-            "pca_var_top5": raw_metrics.get('pca_var_top5'),
-            "avg_clust_coef": raw_metrics.get('avg_clust_coef'),
         },
         "methods": {},
     }
@@ -1936,11 +1869,6 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
                              method_name)
             metrics["methods"][method_name] = {
                 "runtime": r['diag'].get('runtime', 0),
-                "asw": r.get('scib_asw'),
-                "clisi": r.get('scib_clisi'),
-                "silhouette": r.get('scib_silhouette'),
-                "pca_var_top5": r.get('scib_pca_var_top5'),
-                "avg_clust_coef": r.get('scib_avg_clust_coef'),
                 "doublet_median": r.get('visiumhd_doublet_median'),
                 "doublet_reduction_pct": r.get('visiumhd_doublet_reduction'),
             }
@@ -1950,33 +1878,18 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
     print(f"\n{'='*60}")
     print("SUMMARY")
     print(f"{'='*60}")
-    print(f"  {'Method':<16} {'Runtime':>8} {'ASW↑':>8} {'cLISI↓':>8} {'Sil↑':>8} {'PCA5↑':>8} {'ClustCoef↑':>10} {'Dblt↓':>8}")
-    print(f"  {'─'*16} {'─'*8} {'─'*8} {'─'*8} {'─'*8} {'─'*8} {'─'*10} {'─'*8}")
+    print(f"  {'Method':<16} {'Runtime':>8} {'Dblt↓':>8}")
+    print(f"  {'─'*16} {'─'*8} {'─'*8}")
 
-    raw_asw_str = f"{raw_metrics['asw']:.4f}" if raw_metrics['asw'] is not None else "N/A"
-    raw_clisi_str = f"{raw_metrics['clisi']:.4f}" if raw_metrics['clisi'] is not None else "N/A"
-    raw_sil_str = f"{raw_metrics['silhouette']:.4f}" if raw_metrics.get('silhouette') is not None else "N/A"
-    raw_pca5_str = f"{raw_metrics['pca_var_top5']:.4f}" if raw_metrics.get('pca_var_top5') is not None else "N/A"
-    raw_clust_str = f"{raw_metrics['avg_clust_coef']:.4f}" if raw_metrics.get('avg_clust_coef') is not None else "N/A"
     raw_dblt_str = f"{raw_doublet_median:.4f}" if isinstance(raw_doublet_median, float) else "N/A"
-    print(f"  {'RAW':<16} {'':>8} {raw_asw_str:>8} {raw_clisi_str:>8} {raw_sil_str:>8} {raw_pca5_str:>8} {raw_clust_str:>10} {raw_dblt_str:>8}")
+    print(f"  {'RAW':<16} {'':>8} {raw_dblt_str:>8}")
 
     for method_name, r in results.items():
         d = r['diag']
         runtime = d.get('runtime', 0)
-        asw = r.get('scib_asw')
-        clisi = r.get('scib_clisi')
-        sil = r.get('scib_silhouette')
-        pca5 = r.get('scib_pca_var_top5')
-        clust = r.get('scib_avg_clust_coef')
         dblt = r.get('visiumhd_doublet_median')
-        asw_str = f"{asw:.4f}" if asw is not None else "N/A"
-        clisi_str = f"{clisi:.4f}" if clisi is not None else "N/A"
-        sil_str = f"{sil:.4f}" if sil is not None else "N/A"
-        pca5_str = f"{pca5:.4f}" if pca5 is not None else "N/A"
-        clust_str = f"{clust:.4f}" if clust is not None else "N/A"
         dblt_str = f"{dblt:.4f}" if dblt is not None else "N/A"
-        print(f"  {method_name:<16} {runtime:7.1f}s {asw_str:>8} {clisi_str:>8} {sil_str:>8} {pca5_str:>8} {clust_str:>10} {dblt_str:>8}")
+        print(f"  {method_name:<16} {runtime:7.1f}s {dblt_str:>8}")
 
 
 def main():
