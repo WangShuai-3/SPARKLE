@@ -45,3 +45,6 @@ Thumbs.db
 # pytest cache
 .pytest_cache/
 evaluation/reports
+
+# Evaluation datasets (large raw data)
+evaluation/data/
