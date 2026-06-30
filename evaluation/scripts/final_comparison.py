@@ -1139,11 +1139,34 @@ def run_decontx_method(sub, verbose=True):
     n_nbrs = min(15, adata.n_obs - 1)
     sc.pp.neighbors(adata, n_neighbors=n_nbrs)
     sc.tl.leiden(adata, resolution=0.5)
+    n_clusters = adata.obs['leiden'].nunique()
     if verbose:
-        print(f"    Clusters: {adata.obs['leiden'].nunique()}")
+        print(f"    Clusters: {n_clusters}")
+
+    # DecontX requires >=2 clusters. On tiny windows Leiden can collapse to
+    # one cluster; try progressively higher resolutions before giving up.
+    for res in [1.0, 2.0, 5.0]:
+        if n_clusters >= 2:
+            break
+        if verbose:
+            print(f"    Only 1 cluster at resolution 0.5; retrying Leiden at resolution {res}...")
+        sc.tl.leiden(adata, resolution=res)
+        n_clusters = adata.obs['leiden'].nunique()
+        if verbose:
+            print(f"    Clusters: {n_clusters}")
+
     adata.X = raw_counts
+    if n_clusters < 2:
+        print("    DecontX skipped: need at least 2 clusters (tiny window or homogeneous cells).")
+        return None, {'runtime': 0.0, 'contamination': None}
+
     t0 = time.time()
-    run_dx(adata, cluster_key='leiden', max_iter=200, seed=12345, verbose=False)
+    try:
+        run_dx(adata, cluster_key='leiden', max_iter=200, seed=12345, verbose=False)
+    except Exception as e:
+        elapsed = time.time() - t0
+        print(f"    DecontX failed: {e}")
+        return None, {'runtime': elapsed, 'contamination': None}
     elapsed = time.time() - t0
     corrected = adata.layers['decontX_counts']
     if hasattr(corrected, 'toarray'):
@@ -1301,13 +1324,13 @@ def evaluate_mosta(results, data, sub, gene_names, raw=None):
     cell_anns = np.array([ann_map.get(cid, 'Unknown') for cid in cell_ids])
     layer_mask = np.array([a in layer_annotations for a in cell_anns])
 
-    if layer_mask.sum() < 10:
-        print(f"  Too few cortical layer cells ({layer_mask.sum()}), skipping MOSTA evaluation")
-        return
-
     n_cells = len(cell_ids)
     if raw is None:
         raw = compute_cell_expr(sub['dnb_expr'], sub['dnb_labels'], n_cells)
+
+    run_layer_eval = layer_mask.sum() >= 10
+    if not run_layer_eval:
+        print(f"  Too few cortical layer cells ({layer_mask.sum()}), skipping layer evaluation")
 
     # Helper: layer-aggregated Spearman (mean per layer, then pairwise)
     def compute_layer_spearman(expr):
@@ -1352,36 +1375,37 @@ def evaluate_mosta(results, data, sub, gene_names, raw=None):
                         pass
         return de_total
 
-    layer_anns_sub = cell_anns[layer_mask]
+    if run_layer_eval:
+        layer_anns_sub = cell_anns[layer_mask]
 
-    # RAW evaluation
-    raw_layer = raw[:, layer_mask]
-    raw_de = compute_de_genes(raw_layer)
-    raw_s = compute_layer_spearman(raw_layer)
+        # RAW evaluation
+        raw_layer = raw[:, layer_mask]
+        raw_de = compute_de_genes(raw_layer)
+        raw_s = compute_layer_spearman(raw_layer)
 
-    print(f"\n  {'='*60}")
-    print(f"  MOSTA Cortical Layer Evaluation ({layer_mask.sum()} layer cells, {sub['dnb_expr'].shape[0]} genes)")
-    print(f"  {'='*60}")
-    print(f"  {'Method':<16} {'DE genes':>10} {'Spearman':>10}")
-    print(f"  {'─'*16} {'─'*10} {'─'*10}")
-    raw_s_str = f"{raw_s:.4f}" if not np.isnan(raw_s) else "nan"
-    print(f"  {'RAW':<16} {raw_de:>10} {raw_s_str:>10}")
+        print(f"\n  {'='*60}")
+        print(f"  MOSTA Cortical Layer Evaluation ({layer_mask.sum()} layer cells, {sub['dnb_expr'].shape[0]} genes)")
+        print(f"  {'='*60}")
+        print(f"  {'Method':<16} {'DE genes':>10} {'Spearman':>10}")
+        print(f"  {'─'*16} {'─'*10} {'─'*10}")
+        raw_s_str = f"{raw_s:.4f}" if not np.isnan(raw_s) else "nan"
+        print(f"  {'RAW':<16} {raw_de:>10} {raw_s_str:>10}")
 
-    for method_name, r in results.items():
-        corrected = r.get('corrected')
-        if corrected is None:
-            continue
+        for method_name, r in results.items():
+            corrected = r.get('corrected')
+            if corrected is None:
+                continue
 
-        layer_expr = corrected[:, layer_mask]
-        de_total = compute_de_genes(layer_expr)
-        s_mean = compute_layer_spearman(layer_expr)
+            layer_expr = corrected[:, layer_mask]
+            de_total = compute_de_genes(layer_expr)
+            s_mean = compute_layer_spearman(layer_expr)
 
-        r['mosta_de_genes'] = de_total
-        r['mosta_layer_spearman'] = s_mean
-        r['mosta_between_corr'] = s_mean  # keep compat
+            r['mosta_de_genes'] = de_total
+            r['mosta_layer_spearman'] = s_mean
+            r['mosta_between_corr'] = s_mean  # keep compat
 
-        s_str = f"{s_mean:.4f}" if not np.isnan(s_mean) else "nan"
-        print(f"  {method_name:<16} {de_total:>10} {s_str:>10}")
+            s_str = f"{s_mean:.4f}" if not np.isnan(s_mean) else "nan"
+            print(f"  {method_name:<16} {de_total:>10} {s_str:>10}")
 
     # ── scIB evaluation (ASW + cLISI) ──────────────────────────
     print(f"\n  {'='*60}")
