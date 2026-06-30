@@ -13,11 +13,16 @@ method improves marker-based tumor/non-tumor discrimination.
 Inputs:
   - evaluation/reports/rctd_visiumhd/rctd_doublet_results.csv
   - evaluation/reports/rctd_visiumhd/tumor_markers_from_scRNA.csv
-  - evaluation/reports/h5ad_visiumhd/{raw,sparkle,spatial_soupx}.h5ad
+  - evaluation/reports/h5ad/{tag}_{method}.h5ad (matches final_comparison.py)
+
+The dataset tag defaults to "visiumhd_full" and can be overridden via the
+RCTD_DATASET_TAG environment variable. If no tag-prefixed files are found,
+scripts fall back to the legacy directory evaluation/reports/h5ad_{tag}/.
 
 Outputs under evaluation/reports/rctd_visiumhd/tumor_analysis/
 """
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -32,13 +37,14 @@ import matplotlib.pyplot as plt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORTS_DIR = PROJECT_ROOT / "evaluation" / "reports"
-H5AD_DIR = REPORTS_DIR / "h5ad_visiumhd"
 RCTD_DIR = REPORTS_DIR / "rctd_visiumhd"
 OUT_DIR = RCTD_DIR / "tumor_analysis"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 RESULTS_CSV = RCTD_DIR / "rctd_doublet_results.csv"
+MARKER_CSV = RCTD_DIR / "tumor_markers_from_scRNA.csv"
 
+N_MARKERS = 100  # use top-N scRNA-derived tumor markers
 
 METHOD_NAME_MAP = {
     "raw": "RAW",
@@ -60,16 +66,39 @@ def method_name_from_stem(stem: str) -> str:
     return "".join(part.capitalize() for part in parts)
 
 
-def discover_methods():
-    """Auto-discover h5ad files and return {method_name: filename}."""
-    methods = {}
-    for path in sorted(H5AD_DIR.glob("*.h5ad")):
-        stem = path.stem
-        methods[method_name_from_stem(stem)] = path.name
-    return methods
-MARKER_CSV = RCTD_DIR / "tumor_markers_from_scRNA.csv"
+def discover_h5ad_paths(tag: str = None):
+    """Discover h5ad files matching final_comparison.py naming.
 
-N_MARKERS = 100  # use top-N scRNA-derived tumor markers
+    Primary:   evaluation/reports/h5ad/{tag}_{method}.h5ad
+    Fallback:  evaluation/reports/h5ad_{tag}/{method}.h5ad
+
+    Returns {method_name: Path}.
+    """
+    if tag is None:
+        tag = os.environ.get("RCTD_DATASET_TAG", "visiumhd_full")
+
+    primary_dir = REPORTS_DIR / "h5ad"
+    fallback_dir = REPORTS_DIR / "h5ad_visiumhd"  # legacy location
+
+    methods = {}
+    prefix = f"{tag}_"
+    if primary_dir.exists():
+        for path in sorted(primary_dir.glob(f"{prefix}*.h5ad")):
+            method_stem = path.stem[len(prefix):]
+            methods[method_name_from_stem(method_stem)] = path
+
+    if not methods and fallback_dir.exists():
+        for path in sorted(fallback_dir.glob("*.h5ad")):
+            methods[method_name_from_stem(path.stem)] = path
+
+    if not methods:
+        raise FileNotFoundError(
+            f"No h5ad files found for tag '{tag}' in {primary_dir} "
+            f"or {fallback_dir}"
+        )
+
+    print(f"Using dataset tag '{tag}'. Discovered methods: {list(methods.keys())}")
+    return methods
 
 
 def load_results():
@@ -78,8 +107,8 @@ def load_results():
     return df
 
 
-def load_h5ad(method, method_files):
-    path = H5AD_DIR / method_files[method]
+def load_h5ad(method, method_paths):
+    path = method_paths[method]
     adata = ad.read_h5ad(path)
     adata.obs_names = adata.obs_names.astype(str)
     return adata
@@ -112,6 +141,14 @@ def safe_log_mean(values):
     return np.log2(np.mean(values) + 1.0)
 
 
+def _get_dense_values(adata, gene):
+    """Return a dense 1-D numpy array of expression values for a single gene."""
+    x = adata[:, gene].X
+    if hasattr(x, "toarray"):
+        x = x.toarray()
+    return np.asarray(x).ravel()
+
+
 def per_marker_de(adata, marker_df):
     """Compute logFC and Wilcoxon p-value per marker: pred_tumor vs pred_other singlet."""
     obs = adata.obs.copy()
@@ -122,7 +159,7 @@ def per_marker_de(adata, marker_df):
     for gene in marker_df["gene"]:
         if gene not in adata.var_names:
             continue
-        vals = np.asarray(adata[:, gene].X).ravel()
+        vals = _get_dense_values(adata, gene)
         t_vals = vals[is_tumor.values]
         o_vals = vals[is_other.values]
         if len(t_vals) == 0 or len(o_vals) == 0:
@@ -187,18 +224,17 @@ def main():
     print("Loading RCTD results ...")
     rctd_df = load_results()
 
-    method_files = discover_methods()
-    print(f"Discovered methods: {list(method_files.keys())}")
+    method_paths = discover_h5ad_paths()
 
     print("Loading scRNA-derived tumor markers ...")
-    raw_adata = load_h5ad("RAW", method_files)
+    raw_adata = load_h5ad("RAW", method_paths)
     marker_df = load_scRNA_markers(raw_adata)
     print(f"  {len(marker_df)} learned markers present in Visium HD")
 
     all_records = []
-    for method in method_files.keys():
+    for method in method_paths.keys():
         print(f"Processing {method} ...")
-        adata = load_h5ad(method, method_files)
+        adata = load_h5ad(method, method_paths)
         adata = attach_predictions(adata, rctd_df, method)
         de = per_marker_de(adata, marker_df)
         de["method"] = method
@@ -215,7 +251,7 @@ def main():
     # Summary: how many markers have positive logFC in Visium, and correlation with scRNA
     print("\n=== Marker discrimination summary ===")
     summary = []
-    for method in method_files.keys():
+    for method in method_paths.keys():
         d = combined[combined["method"] == method]
         n_pos = int((d["visium_logFC"] > 0).sum())
         n_sig = int((d["visium_pval"] < 0.05).sum())

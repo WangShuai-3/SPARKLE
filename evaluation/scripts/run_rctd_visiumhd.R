@@ -57,12 +57,15 @@ FEATURE_SLICE_H5 <- file.path(
   PROJECT_ROOT, "evaluation", "data", "visiumhd",
   "Visium_HD_6p5mm_Human_Colon_Cancer_feature_slice.h5"
 )
-H5AD_DIR <- file.path(PROJECT_ROOT, "evaluation", "reports", "h5ad_visiumhd")
+H5AD_DIR_PRIMARY <- file.path(PROJECT_ROOT, "evaluation", "reports", "h5ad")
+H5AD_DIR_FALLBACK <- file.path(PROJECT_ROOT, "evaluation", "reports", "h5ad_visiumhd")  # legacy
 MTX_DIR <- file.path(PROJECT_ROOT, "evaluation", "reports", "rctd_visiumhd", "mtx")
 OUT_DIR <- file.path(PROJECT_ROOT, "evaluation", "reports", "rctd_visiumhd")
 
-# Auto-discover h5ad files in H5AD_DIR and derive method display names.
-# Known stems are mapped explicitly so existing result labels stay stable.
+# Dataset tag must match final_comparison.py naming: evaluation/reports/h5ad/{tag}_{method}.h5ad
+DATASET_TAG <- Sys.getenv("RCTD_DATASET_TAG", "visiumhd_full")
+
+# Known method stems are mapped explicitly so existing result labels stay stable.
 # Unknown stems fall back to a simple heuristic (e.g. my_method -> MyMethod).
 method_name_map <- list(
   raw = "RAW",
@@ -81,11 +84,46 @@ method_name_from_stem <- function(stem) {
   paste0(toupper(substring(parts, 1, 1)), substring(parts, 2), collapse = "")
 }
 
-H5AD_FILES <- sort(list.files(H5AD_DIR, pattern = "\\.h5ad$"))
-MTX_PREFIXES <- tools::file_path_sans_ext(H5AD_FILES)
-METHOD_NAMES <- sapply(MTX_PREFIXES, method_name_from_stem)
+# Discover h5ad files: primary path evaluation/reports/h5ad/{tag}_*.h5ad,
+# fallback to legacy evaluation/reports/h5ad_visiumhd/*.h5ad.
+discover_h5ad_files <- function(tag) {
+  primary_dir <- H5AD_DIR_PRIMARY
+  fallback_dir <- H5AD_DIR_FALLBACK
+  prefix <- paste0(tag, "_")
 
-message(sprintf("Discovered %d methods: %s", length(METHOD_NAMES),
+  if (dir.exists(primary_dir)) {
+    files <- sort(list.files(primary_dir, pattern = paste0("^", prefix, ".*\\.h5ad$")))
+    if (length(files) > 0) {
+      return(list(dir = primary_dir, files = files))
+    }
+  }
+
+  if (dir.exists(fallback_dir)) {
+    files <- sort(list.files(fallback_dir, pattern = "\\.h5ad$"))
+    if (length(files) > 0) {
+      return(list(dir = fallback_dir, files = files))
+    }
+  }
+
+  stop(sprintf("No h5ad files found for tag '%s' in %s or %s",
+               tag, primary_dir, fallback_dir))
+}
+
+discovery <- discover_h5ad_files(DATASET_TAG)
+H5AD_DIR <- discovery$dir
+H5AD_FILES <- discovery$files
+
+# Strip the "{tag}_" prefix from filenames to get method stems.
+method_stems <- tools::file_path_sans_ext(H5AD_FILES)
+prefix <- paste0(DATASET_TAG, "_")
+method_stems <- ifelse(startsWith(method_stems, prefix),
+                       substring(method_stems, nchar(prefix) + 1),
+                       method_stems)
+MTX_PREFIXES <- tools::file_path_sans_ext(H5AD_FILES)
+METHOD_NAMES <- sapply(method_stems, method_name_from_stem)
+
+message(sprintf("Using dataset tag '%s'. Discovered %d methods: %s",
+                DATASET_TAG, length(METHOD_NAMES),
                 paste(METHOD_NAMES, collapse = ", ")))
 
 MAX_CORES <- as.integer(Sys.getenv("RCTD_MAX_CORES", "16"))
