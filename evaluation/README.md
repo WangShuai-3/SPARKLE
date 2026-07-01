@@ -86,4 +86,14 @@ python evaluation/scripts/final_comparison.py --dataset mousebrain \
     --x-range 12500 17500 --y-range 2000 5000 \
     --n-genes 2000 --n-high-genes 2000 \
     --methods sparkle,spatial_soupx,soupx,decontx
+
+# resource
+python3 evaluation/scripts/benchmark_resource.py \
+--scenario S2 \
+--grid-sizes 100 200 300 400 500 800 1000\
+--n-genes 500 \
+--methods sparkle,spatial_soupx,soupx,decontx \
+--output evaluation/reports/resource_benchmark.csv \
+--n-jobs 2 \
+--plot
 ```
