@@ -181,14 +181,40 @@ Spatial SoupX (bin-level, global ρ, spatial kernel) achieves 89.9% RMSE↓ on s
 ### Unified Entry Point
 
 ```bash
+# Axolotl
 python evaluation/scripts/final_comparison.py \
-    --dataset {axolotl,mosta} --x-range X1 X2 --y-range Y1 Y2 \
+    --dataset axolotl --x-range 10500 12500 --y-range 6000 11100 \
     --n-genes 200 --methods sparkle,spatial_soupx,soupx,decontx
+
+# MOSTA
+python evaluation/scripts/final_comparison.py \
+    --dataset mosta --x-range 10000 14000 --y-range 8000 17000 \
+    --n-genes 2000 --n-high-genes 2000 \
+    --methods sparkle,spatial_soupx,soupx,decontx
+
+# MouseBrain (T304, cell_subclass annotations)
+python evaluation/scripts/final_comparison.py \
+    --dataset mousebrain --x-range 12500 17500 --y-range 2000 5000 \
+    --n-genes 2000 --n-high-genes 2000 \
+    --methods sparkle,spatial_soupx,soupx,decontx
+
+# Synthetic
+python evaluation/scripts/final_comparison.py \
+    --dataset synthetic --scenario S2 --all-scenarios \
+    --methods sparkle,spatial_soupx,soupx,decontx
 ```
 
 > **CellBender** and **CellClear** are excluded from `final_comparison.py` due to fundamental incompatibility with spatial DNB data. CellBender's VAE requires ≥50 UMI per background barcode (spatial: 1-2). CellClear's NMF-based gene detection fails because background expression profiles are too sparse to match foreground clusters. See "Excluded Methods" above for details.
 
 > **DecontX** is cell-level only (no spatial information, gene-specific α). It runs directly in the base environment via `pip install decontx-python`. On MOSTA, uniform contamination estimates produce NaN correlations for between-type analysis.
+
+## Additional Evaluation Scripts
+
+- **`evaluation/scripts/evaluate_mousebrain_h5ad.py`** — post-hoc evaluation of corrected MouseBrain h5ad files: cell-subclass correlation heatmaps, silhouette score, and comparison against an snRNA-seq reference.
+- **`evaluation/scripts/prepare_mousebrain_snrna_reference.R`** — extract `cell_subclass` pseudobulk profiles from the provided Seurat RDS reference for the script above.
+- **`evaluation/scripts/benchmark_resource.py`** — benchmark runtime and peak RSS memory of all methods across synthetic data sizes while keeping gene count constant.
+
+Run any script with `--help` for detailed options.
 
 ## Installation
 
