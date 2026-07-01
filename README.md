@@ -200,7 +200,7 @@ python evaluation/scripts/final_comparison.py \
 
 # Synthetic
 python evaluation/scripts/final_comparison.py \
-    --dataset synthetic --scenario S2 --all-scenarios \
+    --dataset synthetic --all-scenarios \
     --methods sparkle,spatial_soupx,soupx,decontx
 ```
 
