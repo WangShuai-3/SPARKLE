@@ -458,11 +458,12 @@ def load_axolotl_data_windowed(x_range=None, y_range=None):
         'dnb_expr': dnb_expr, 'dnb_coords': dnb_coords, 'dnb_labels': dnb_labels,
         'gene_names': gene_names, 'cell_ids': cell_ids,
         'ann_map': ann_map, 'sstin_set': sstin_set,
+        'x_range': x_range, 'y_range': y_range,
     }
 
 
 def run_axolotl_comparison(data, n_genes=200, methods=None):
-    """Run 3-way comparison for Axolotl."""
+    """Run multi-method comparison for Axolotl."""
     if methods is None:
         methods = ['sparkle', 'spatial_soupx', 'soupx', 'decontx']
     methods = [m.lower().strip() for m in methods]
@@ -520,10 +521,13 @@ def run_axolotl_comparison(data, n_genes=200, methods=None):
     sst_summary(sst_raw, "Raw SST")
 
     results = {}
+    n_method_steps = sum(1 for m in methods if m in ('sparkle', 'spatial_soupx', 'soupx', 'decontx'))
+    step = 0
 
     # 1. Cell SPARKLE
     if 'sparkle' in methods:
-        print(f"\n[3/3] Cell SPARKLE (cell_based + penalty)...")
+        step += 1
+        print(f"\n[{step}/{n_method_steps}] Cell SPARKLE (cell_based + penalty)...")
         t0 = time.time()
         sub_all = dnb_expr  # use all genes
         n_high = min(n_genes, sub_all.shape[0])
@@ -542,7 +546,8 @@ def run_axolotl_comparison(data, n_genes=200, methods=None):
 
     # 2. Spatial SoupX
     if 'spatial_soupx' in methods:
-        print(f"\n[4/3] Spatial SoupX...")
+        step += 1
+        print(f"\n[{step}/{n_method_steps}] Spatial SoupX...")
         t0 = time.time()
         sub_n_d = dnb_expr[top_n, :]
         ss_corr, ss_rho, ss_lam = run_spatial_soupx(
@@ -556,7 +561,8 @@ def run_axolotl_comparison(data, n_genes=200, methods=None):
 
     # 3. SoupX
     if 'soupx' in methods:
-        print(f"\n[5/3] SoupX (top {n_genes} genes)...")
+        step += 1
+        print(f"\n[{step}/{n_method_steps}] SoupX (top {n_genes} genes)...")
         t0 = time.time()
         sx_corr, sx_rho = run_soupx(dnb_expr[top_n, :], labels_0based, verbose=False)
         sx_t = time.time() - t0
@@ -577,7 +583,8 @@ def run_axolotl_comparison(data, n_genes=200, methods=None):
 
     # 4. DecontX
     if 'decontx' in methods:
-        print(f"\n[6/3] DecontX...")
+        step += 1
+        print(f"\n[{step}/{n_method_steps}] DecontX...")
         t0 = time.time()
         dx_corr, dx_diag = run_decontx_method({
             "dnb_expr": dnb_expr,
