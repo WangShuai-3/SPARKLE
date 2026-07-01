@@ -22,7 +22,10 @@ evaluation/
 │   ├── spatial_soupx.py   # Spatial SoupX (bin 级空间核)
 │   └── standalone_decontx.py / decontx.py  # DecontX (per-gene contamination)
 ├── data/                  # 数据
-│   └── axolotl/           # Axolotl 真实数据
+│   ├── axolotl/           # Axolotl 真实数据
+│   ├── mosta/             # MOSTA 成年小鼠脑 Stereo-seq
+│   ├── mousebrain/        # 新加入：Stereo-seq 小鼠脑 T304 + snRNA-seq 308 clusters
+│   └── visiumhd/          # Visium HD 人结肠癌
 └── reports/               # 评测报告输出
 ```
 
@@ -75,6 +78,12 @@ python evaluation/scripts/final_comparison.py --dataset mosta \
 # Visium HD
 python evaluation/scripts/final_comparison.py --dataset mosta \
     --x-range 45000 60000 --y-range 10000 20000 \
+    --n-genes 2000 --n-high-genes 2000 \
+    --methods sparkle,spatial_soupx,soupx,decontx
+
+# MouseBrain (T304)
+python evaluation/scripts/final_comparison.py --dataset mousebrain \
+    --x-range 12500 17500 --y-range 2000 5000 \
     --n-genes 2000 --n-high-genes 2000 \
     --methods sparkle,spatial_soupx,soupx,decontx
 ```

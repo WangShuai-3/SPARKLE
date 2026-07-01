@@ -720,7 +720,12 @@ def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None
     # Evaluation
     n_cells = len(data.get('cell_ids', []))
     raw = compute_cell_expr(sub['dnb_expr'], sub['dnb_labels'], n_cells)
-    raw_doublet_median, raw = evaluate_mosta(results, data, sub, sub['gene_names'], raw=raw)
+    eval_ret = evaluate_mosta(results, data, sub, sub['gene_names'], raw=raw)
+    if eval_ret is None or eval_ret[0] is None:
+        raw_doublet_median = float('nan')
+        raw_summary = {}
+    else:
+        raw_doublet_median, raw, raw_summary = eval_ret
 
     # Save cell-based h5ad and metrics
     print(f"\n  {'='*60}")
@@ -773,9 +778,23 @@ def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None
     print(f"{'='*60}")
     print(f"  {'Method':<16} {'Runtime':>8} {'DE':>8} {'Sprmn':>8} {'ASW↑':>6} {'cLISI↓':>6} {'Sil↑':>6} {'PCA5↑':>6} {'ClustCoef↑':>8} {'Dblt↓':>8}")
     print(f"  {'─'*16} {'─'*8} {'─'*8} {'─'*8} {'─'*6} {'─'*6} {'─'*6} {'─'*6} {'─'*8} {'─'*8}")
-    # RAW row (metrics from evaluate_mosta scIB section are on raw_cell_expr)
-    raw_dblt_str = f"{raw_doublet_median:.4f}" if isinstance(raw_doublet_median, float) else str(raw_doublet_median)
-    print(f"  {'RAW':<16} {'─':>8} {'─':>8} {'─':>8} {'─':>6} {'─':>6} {'─':>6} {'─':>6} {'─':>8} {raw_dblt_str:>8}")
+    # RAW row
+    raw_de = raw_summary.get('mosta_de_genes', raw_summary.get('de_genes', '─'))
+    raw_s = raw_summary.get('mosta_layer_spearman', raw_summary.get('layer_spearman', '─'))
+    raw_asw = raw_summary.get('asw')
+    raw_clisi = raw_summary.get('clisi')
+    raw_sil = raw_summary.get('silhouette')
+    raw_pca5 = raw_summary.get('pca_var_top5')
+    raw_clust = raw_summary.get('avg_clust_coef')
+    raw_dblt = raw_summary.get('doublet_median', raw_doublet_median)
+    raw_s_str = f"{raw_s:.4f}" if isinstance(raw_s, float) and not np.isnan(raw_s) else str(raw_s)
+    raw_asw_str = f"{raw_asw:.4f}" if raw_asw is not None else "─"
+    raw_clisi_str = f"{raw_clisi:.4f}" if raw_clisi is not None else "─"
+    raw_sil_str = f"{raw_sil:.4f}" if raw_sil is not None else "─"
+    raw_pca5_str = f"{raw_pca5:.4f}" if raw_pca5 is not None else "─"
+    raw_clust_str = f"{raw_clust:.4f}" if raw_clust is not None else "─"
+    raw_dblt_str = f"{raw_dblt:.4f}" if isinstance(raw_dblt, float) else str(raw_dblt)
+    print(f"  {'RAW':<16} {'─':>8} {str(raw_de):>8} {raw_s_str:>8} {raw_asw_str:>6} {raw_clisi_str:>6} {raw_sil_str:>6} {raw_pca5_str:>6} {raw_clust_str:>8} {raw_dblt_str:>8}")
     for method_name, r in results.items():
         d = r['diag']
         runtime = d.get('runtime', 0)
@@ -795,6 +814,138 @@ def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None
         clust_str = f"{clust:.4f}" if clust is not None else "N/A"
         dblt_str = f"{dblt:.4f}" if dblt is not None else "N/A"
         print(f"  {method_name:<16} {runtime:7.1f}s  {str(de):>8} {s_str:>8} {asw_str:>6} {clisi_str:>6} {sil_str:>6} {pca5_str:>6} {clust_str:>8} {dblt_str:>8}")
+
+
+def run_mousebrain_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None):
+    """Run comparison for MouseBrain (T304), using cell_subclass annotations."""
+    if methods is None:
+        methods = ['sparkle', 'spatial_soupx', 'soupx', 'decontx']
+    methods = [m.lower().strip() for m in methods]
+    if n_high_genes is None:
+        n_high_genes = min(n_genes, 500)
+
+    print(f"\n{'='*60}")
+    print("RUNNING METHODS")
+    print(f"{'='*60}")
+
+    results = {}
+
+    if 'sparkle' in methods:
+        corrected, diag = run_sparkle_method(sub, n_high_genes=n_high_genes)
+        if corrected is not None:
+            results['SPARKLE'] = {'corrected': corrected, 'diag': diag}
+
+    if 'spatial_soupx' in methods:
+        corrected, diag = run_spatial_soupx_method(sub)
+        results['SpatialSoupX'] = {'corrected': corrected, 'diag': diag}
+
+    if 'soupx' in methods:
+        corrected, diag = run_soupx_method(sub)
+        if corrected is not None:
+            results['SoupX'] = {'corrected': corrected, 'diag': diag}
+
+    if 'decontx' in methods:
+        corrected, diag = run_decontx_method(sub)
+        if corrected is not None:
+            results['DecontX'] = {'corrected': corrected, 'diag': diag}
+
+    # Evaluation
+    n_cells = len(data.get('cell_ids', []))
+    raw = compute_cell_expr(sub['dnb_expr'], sub['dnb_labels'], n_cells)
+    eval_ret = evaluate_mousebrain(results, data, sub, sub['gene_names'], raw=raw)
+    if eval_ret is None or eval_ret[0] is None:
+        raw_doublet_median = float('nan')
+        raw_summary = {}
+    else:
+        raw_doublet_median, raw, raw_summary = eval_ret
+
+    # Save cell-based h5ad and metrics
+    print(f"\n  {'='*60}")
+    print(f"  Saving results")
+    print(f"  {'='*60}")
+    reports_root = _reports_root()
+    x_range = data.get('x_range')
+    y_range = data.get('y_range')
+    if x_range is not None and y_range is not None:
+        tag = f"mousebrain_x{x_range[0]}-{x_range[1]}_y{y_range[0]}-{y_range[1]}"
+    else:
+        tag = "mousebrain_full"
+    ann_map = data.get('ann_map', {})
+    cell_ids = data.get('cell_ids', np.arange(raw.shape[1]))
+
+    save_result_h5ad(raw, sub['gene_names'], cell_ids, ann_map,
+                     reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW")
+    metrics = {
+        "dataset": tag,
+        "n_cells": int(raw.shape[1]),
+        "n_genes": int(raw.shape[0]),
+        "raw": {
+            "doublet_median": raw_doublet_median,
+        },
+        "methods": {},
+    }
+    for method_name, r in results.items():
+        corrected = r.get('corrected')
+        if corrected is not None:
+            save_result_h5ad(corrected, sub['gene_names'], cell_ids, ann_map,
+                             reports_root / "h5ad" / f"{tag}_{method_name}.h5ad",
+                             method_name)
+            metrics["methods"][method_name] = {
+                "runtime": r['diag'].get('runtime', 0),
+                "de_genes": r.get('mousebrain_de_genes'),
+                "class_spearman": r.get('mousebrain_class_spearman'),
+                "asw": r.get('mousebrain_asw'),
+                "clisi": r.get('mousebrain_clisi'),
+                "silhouette": r.get('mousebrain_silhouette'),
+                "pca_var_top5": r.get('mousebrain_pca_var_top5'),
+                "avg_clust_coef": r.get('mousebrain_avg_clust_coef'),
+                "doublet_median": r.get('mousebrain_doublet_median'),
+                "doublet_reduction_pct": r.get('mousebrain_doublet_reduction'),
+            }
+    save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
+
+    # Summary
+    print(f"\n{'='*60}")
+    print("SUMMARY")
+    print(f"{'='*60}")
+    print(f"  {'Method':<16} {'Runtime':>8} {'DE':>8} {'Sprmn':>8} {'ASW↑':>6} {'cLISI↓':>6} {'Sil↑':>6} {'PCA5↑':>6} {'ClustCoef↑':>8} {'Dblt↓':>8}")
+    print(f"  {'─'*16} {'─'*8} {'─'*8} {'─'*8} {'─'*6} {'─'*6} {'─'*6} {'─'*6} {'─'*8} {'─'*8}")
+    raw_de = raw_summary.get('mousebrain_de_genes', raw_summary.get('de_genes', '─'))
+    raw_s = raw_summary.get('mousebrain_class_spearman', raw_summary.get('class_spearman', '─'))
+    raw_asw = raw_summary.get('asw')
+    raw_clisi = raw_summary.get('clisi')
+    raw_sil = raw_summary.get('silhouette')
+    raw_pca5 = raw_summary.get('pca_var_top5')
+    raw_clust = raw_summary.get('avg_clust_coef')
+    raw_dblt = raw_summary.get('doublet_median', raw_doublet_median)
+    raw_s_str = f"{raw_s:.4f}" if isinstance(raw_s, float) and not np.isnan(raw_s) else str(raw_s)
+    raw_asw_str = f"{raw_asw:.4f}" if raw_asw is not None else "─"
+    raw_clisi_str = f"{raw_clisi:.4f}" if raw_clisi is not None else "─"
+    raw_sil_str = f"{raw_sil:.4f}" if raw_sil is not None else "─"
+    raw_pca5_str = f"{raw_pca5:.4f}" if raw_pca5 is not None else "─"
+    raw_clust_str = f"{raw_clust:.4f}" if raw_clust is not None else "─"
+    raw_dblt_str = f"{raw_dblt:.4f}" if isinstance(raw_dblt, float) else str(raw_dblt)
+    print(f"  {'RAW':<16} {'─':>8} {str(raw_de):>8} {raw_s_str:>8} {raw_asw_str:>6} {raw_clisi_str:>6} {raw_sil_str:>6} {raw_pca5_str:>6} {raw_clust_str:>8} {raw_dblt_str:>8}")
+    for method_name, r in results.items():
+        d = r['diag']
+        runtime = d.get('runtime', 0)
+        de = r.get('mousebrain_de_genes', 'N/A')
+        s = r.get('mousebrain_class_spearman', 'N/A')
+        asw = r.get('mousebrain_asw')
+        clisi = r.get('mousebrain_clisi')
+        sil = r.get('mousebrain_silhouette')
+        pca5 = r.get('mousebrain_pca_var_top5')
+        clust = r.get('mousebrain_avg_clust_coef')
+        dblt = r.get('mousebrain_doublet_median')
+        s_str = f"{s:.4f}" if isinstance(s, float) and not np.isnan(s) else str(s)
+        asw_str = f"{asw:.4f}" if asw is not None else "N/A"
+        clisi_str = f"{clisi:.4f}" if clisi is not None else "N/A"
+        sil_str = f"{sil:.4f}" if sil is not None else "N/A"
+        pca5_str = f"{pca5:.4f}" if pca5 is not None else "N/A"
+        clust_str = f"{clust:.4f}" if clust is not None else "N/A"
+        dblt_str = f"{dblt:.4f}" if dblt is not None else "N/A"
+        print(f"  {method_name:<16} {runtime:7.1f}s  {str(de):>8} {s_str:>8} {asw_str:>6} {clisi_str:>6} {sil_str:>6} {pca5_str:>6} {clust_str:>8} {dblt_str:>8}")
+
 
 def load_mosta_data(x_range=None, y_range=None):
     """加载 MOSTA 成年鼠脑 Stereo-seq 数据。
@@ -934,6 +1085,134 @@ def load_mosta_data(x_range=None, y_range=None):
     return {
         'dnb_expr': dnb_expr, 'dnb_coords': dnb_coords, 'dnb_labels': dnb_labels,
         'gene_names': gene_names, 'cell_ids': cell_ids, 'ann_map': ann_map, 'adata': adata,
+        'x_range': x_range, 'y_range': y_range,
+    }
+
+
+def load_mousebrain_data(x_range=None, y_range=None, annotation_level='cell_subclass'):
+    """加载新加入的 Mouse Brain Stereo-seq (T304) 数据。
+
+    文件：
+      total_gene_T304_mouse_f001_2D_mouse1-20230119.txt.gz — DNB 级 GEM
+      stereoseq.celltypeTransfer.2mice.all.tsv.gz          — cell_id → cluster/subclass/class 映射
+      mouseBrain.snRNAseq.308ClustersAnnotation.20230607.tsv — cluster 注释（可选参考）
+
+    处理流程：
+      1. 从 celltypeTransfer 中过滤 section_id == 'T304'，构建 cell_id → cell_subclass 的 ann_map
+      2. 流式读取 GEM，按 x_range/y_range 过滤
+      3. cell_label == 0 或不在 ann_map 中的 DNB 标记为 -1（empty/背景）
+      4. 对同一个 (gene, DNB) 的多个记录按 umi_count 求和
+      5. 构建 [genes × DNBs] CSR 稀疏矩阵，并把原始 cell_label 映射为 0-based 索引
+    """
+    from collections import defaultdict
+
+    data_dir = Path(__file__).resolve().parent.parent / "data" / "mousebrain"
+    gem_path = data_dir / "total_gene_T304_mouse_f001_2D_mouse1-20230119.txt.gz"
+    transfer_path = data_dir / "stereoseq.celltypeTransfer.2mice.all.tsv.gz"
+
+    if not gem_path.exists():
+        raise FileNotFoundError(f"{gem_path} not found.")
+    if not transfer_path.exists():
+        raise FileNotFoundError(f"{transfer_path} not found.")
+
+    # ── 加载 T304 的细胞注释 ─────────────────────────────────────
+    print("Loading MouseBrain cell-type transfer (section T304)...")
+    ann_map = {}
+    valid_cell_ids = set()
+    with gzip.open(transfer_path, 'rt') as f:
+        header = f.readline().strip().split('\t')
+        try:
+            idx_id = header.index('cell_id')
+            idx_section = header.index('section_id')
+            idx_ann = header.index(annotation_level)
+        except ValueError:
+            raise ValueError(f"Transfer file missing required columns; header={header}")
+        n = 0
+        for line in f:
+            parts = line.rstrip('\n').split('\t')
+            if parts[idx_section] != 'T304':
+                continue
+            cid = int(parts[idx_id])
+            ann_map[cid] = parts[idx_ann]
+            valid_cell_ids.add(cid)
+            n += 1
+    print(f"  {n} cells with annotations in section T304")
+
+    # ── 流式读取 GEM 并构建稀疏矩阵 ─────────────────────────────
+    print("Loading MouseBrain GEM (section T304)...")
+    gene_to_idx = {}
+    dnb_to_idx = {}
+    dnb_coords_list = []
+    dnb_orig_label = {}
+    counts = defaultdict(float)
+
+    n_rows = 0
+    with gzip.open(gem_path, 'rt') as f:
+        f.readline()  # header: gene x y umi_count cell_label gene_area rx ry
+        for line in f:
+            parts = line.rstrip('\n').split('\t')
+            gene = parts[0]
+            x = int(parts[1])
+            y = int(parts[2])
+            if x_range and not (x_range[0] <= x <= x_range[1]):
+                continue
+            if y_range and not (y_range[0] <= y <= y_range[1]):
+                continue
+
+            umi_count = float(parts[3])
+            cell_label = int(parts[4])
+
+            if gene not in gene_to_idx:
+                gene_to_idx[gene] = len(gene_to_idx)
+            gidx = gene_to_idx[gene]
+
+            d = (x, y)
+            didx = dnb_to_idx.get(d)
+            if didx is None:
+                didx = len(dnb_to_idx)
+                dnb_to_idx[d] = didx
+                dnb_coords_list.append((x, y))
+                if cell_label != 0 and cell_label in valid_cell_ids:
+                    dnb_orig_label[didx] = cell_label
+                else:
+                    dnb_orig_label[didx] = -1
+            else:
+                if dnb_orig_label[didx] == -1 and cell_label != 0 and cell_label in valid_cell_ids:
+                    dnb_orig_label[didx] = cell_label
+
+            counts[(gidx, didx)] += umi_count
+            n_rows += 1
+            if n_rows % 5000000 == 0:
+                print(f"  {n_rows/1e6:.1f}M rows, {len(gene_to_idx)} genes, {len(dnb_to_idx)} DNBs...")
+
+    n_genes = len(gene_to_idx)
+    n_dnbs = len(dnb_to_idx)
+    if n_dnbs == 0:
+        raise ValueError("No DNBs found in the specified spatial window.")
+
+    gene_names = [None] * n_genes
+    for g, idx in gene_to_idx.items():
+        gene_names[idx] = g
+    gene_names = np.array(gene_names)
+    dnb_coords = np.array(dnb_coords_list, dtype=np.float64)
+
+    # Remap original cell labels to 0..n_cells-1
+    orig_labels = sorted({lbl for lbl in dnb_orig_label.values() if lbl >= 0})
+    label_to_idx = {lbl: i for i, lbl in enumerate(orig_labels)}
+    dnb_labels = np.array([label_to_idx.get(dnb_orig_label[i], -1) for i in range(n_dnbs)], dtype=np.int32)
+    cell_ids = np.array(orig_labels)
+
+    n_counts = len(counts)
+    rows = np.fromiter((k[0] for k in counts.keys()), dtype=np.int32, count=n_counts)
+    cols = np.fromiter((k[1] for k in counts.keys()), dtype=np.int32, count=n_counts)
+    data = np.fromiter(counts.values(), dtype=np.float64, count=n_counts)
+    dnb_expr = csr_matrix((data, (rows, cols)), shape=(n_genes, n_dnbs))
+
+    n_empty = int((dnb_labels < 0).sum())
+    print(f"  Loaded: {n_genes} genes, {n_dnbs} DNBs ({n_dnbs - n_empty} cell + {n_empty} empty), {len(cell_ids)} cells")
+    return {
+        'dnb_expr': dnb_expr, 'dnb_coords': dnb_coords, 'dnb_labels': dnb_labels,
+        'gene_names': gene_names, 'cell_ids': cell_ids, 'ann_map': ann_map,
         'x_range': x_range, 'y_range': y_range,
     }
 
@@ -1425,7 +1704,155 @@ def evaluate_mosta(results, data, sub, gene_names, raw=None):
         r['mosta_doublet_reduction'] = reduction
         print(f"  {method_name:<16} {median_score:>14.4f} {reduction:>11.1f}%")
 
-    return raw_doublet_median, raw
+    raw_summary = {
+        "de_genes": raw_de,
+        "layer_spearman": raw_s,
+        "asw": raw_metrics.get("asw"),
+        "clisi": raw_metrics.get("clisi"),
+        "silhouette": raw_metrics.get("silhouette"),
+        "pca_var_top5": raw_metrics.get("pca_var_top5"),
+        "avg_clust_coef": raw_metrics.get("avg_clust_coef"),
+        "doublet_median": raw_doublet_median,
+    }
+    return raw_doublet_median, raw, raw_summary
+
+
+def evaluate_mousebrain(results, data, sub, gene_names, raw=None):
+    """MouseBrain 评估：以 snRNA-seq transfer 的 cell_subclass 为基准，
+
+    计算类间 DE 基因数、类间 Spearman、scIB 指标和 Scrublet doublet score。
+    """
+    from scipy.stats import ttest_ind, spearmanr
+
+    ann_map = data.get('ann_map', {})
+    cell_ids = data.get('cell_ids', np.array([]))
+
+    cell_anns = np.array([ann_map.get(int(cid), 'Unknown') for cid in cell_ids])
+    known_mask = cell_anns != 'Unknown'
+    if known_mask.sum() < 10:
+        print(f"  Too few annotated cells ({known_mask.sum()}), skipping MouseBrain evaluation")
+        return None, None
+
+    n_cells = len(cell_ids)
+    if raw is None:
+        raw = compute_cell_expr(sub['dnb_expr'], sub['dnb_labels'], n_cells)
+
+    class_anns = cell_anns[known_mask]
+    unique_classes = sorted(set(class_anns))
+
+    def compute_class_spearman(expr):
+        """Aggregate cells by class, compute mean pairwise Spearman."""
+        if len(unique_classes) < 2:
+            return float('nan')
+        class_means = np.zeros((len(unique_classes), expr.shape[0]))
+        for li, cls in enumerate(unique_classes):
+            mask = class_anns == cls
+            class_means[li] = expr[:, mask].mean(axis=1)
+        corrs = []
+        for i in range(len(unique_classes)):
+            for j in range(i + 1, len(unique_classes)):
+                try:
+                    s, _ = spearmanr(class_means[i], class_means[j])
+                    corrs.append(s if not np.isnan(s) else 0)
+                except Exception:
+                    pass
+        return float(np.mean(corrs)) if corrs else float('nan')
+
+    def compute_de_genes(expr):
+        top_var_genes = np.argsort(np.var(expr, axis=1))[-200:]
+        de_total = 0
+        for i in range(len(unique_classes)):
+            for j in range(i + 1, len(unique_classes)):
+                mi = class_anns == unique_classes[i]
+                mj = class_anns == unique_classes[j]
+                if mi.sum() < 3 or mj.sum() < 3:
+                    continue
+                for g in top_var_genes:
+                    try:
+                        _, p = ttest_ind(expr[g, mi], expr[g, mj])
+                        if p < 0.05:
+                            de_total += 1
+                    except Exception:
+                        pass
+        return de_total
+
+    raw_known = raw[:, known_mask]
+    raw_de = compute_de_genes(raw_known)
+    raw_s = compute_class_spearman(raw_known)
+
+    print(f"\n  {'='*60}")
+    print(f"  MouseBrain Cell-class Evaluation ({known_mask.sum()} annotated cells, {len(unique_classes)} classes, {sub['dnb_expr'].shape[0]} genes)")
+    print(f"  {'='*60}")
+    print(f"  {'Method':<16} {'DE genes':>10} {'Spearman':>10}")
+    print(f"  {'─'*16} {'─'*10} {'─'*10}")
+    raw_s_str = f"{raw_s:.4f}" if not np.isnan(raw_s) else "nan"
+    print(f"  {'RAW':<16} {raw_de:>10} {raw_s_str:>10}")
+
+    for method_name, r in results.items():
+        corrected = r.get('corrected')
+        if corrected is None:
+            continue
+        class_expr = corrected[:, known_mask]
+        de_total = compute_de_genes(class_expr)
+        s_mean = compute_class_spearman(class_expr)
+        r['mousebrain_de_genes'] = de_total
+        r['mousebrain_class_spearman'] = s_mean
+        s_str = f"{s_mean:.4f}" if not np.isnan(s_mean) else "nan"
+        print(f"  {method_name:<16} {de_total:>10} {s_str:>10}")
+
+    # scIB metrics (cell_subclass)
+    print(f"\n  {'='*60}")
+    print(f"  scIB Evaluation (Cell-type ASW ↑, cLISI ↓)")
+    print(f"  {'='*60}")
+
+    raw_metrics = _compute_scib_metrics(raw, cell_anns, "RAW")
+    for method_name, r in results.items():
+        corrected = r.get('corrected')
+        if corrected is None:
+            continue
+        metrics = _compute_scib_metrics(corrected, cell_anns, method_name)
+        r['mousebrain_asw'] = metrics.get('asw')
+        r['mousebrain_clisi'] = metrics.get('clisi')
+        r['mousebrain_silhouette'] = metrics.get('silhouette')
+        r['mousebrain_pca_var_top5'] = metrics.get('pca_var_top5')
+        r['mousebrain_avg_clust_coef'] = metrics.get('avg_clust_coef')
+
+    # Doublet scores
+    print(f"\n  {'='*60}")
+    print(f"  Doublet Score Evaluation (median score ↓)")
+    print(f"  {'='*60}")
+
+    raw_doublet = compute_doublet_scores(raw)
+    raw_doublet_median = float(np.nanmedian(raw_doublet))
+    print(f"  {'Method':<16} {'Median score':>14} {'Reduction':>12}")
+    print(f"  {'─'*16} {'─'*14} {'─'*12}")
+    print(f"  {'RAW':<16} {raw_doublet_median:>14.4f} {'—':>12}")
+
+    for method_name, r in results.items():
+        corrected = r.get('corrected')
+        if corrected is None:
+            continue
+        scores = compute_doublet_scores(corrected)
+        median_score = float(np.nanmedian(scores))
+        r['mousebrain_doublet_median'] = median_score
+        if not np.isnan(raw_doublet_median) and raw_doublet_median > 0:
+            reduction = (raw_doublet_median - median_score) / raw_doublet_median * 100.0
+        else:
+            reduction = float('nan')
+        r['mousebrain_doublet_reduction'] = reduction
+        print(f"  {method_name:<16} {median_score:>14.4f} {reduction:>11.1f}%")
+
+    raw_summary = {
+        "de_genes": raw_de,
+        "class_spearman": raw_s,
+        "asw": raw_metrics.get("asw"),
+        "clisi": raw_metrics.get("clisi"),
+        "silhouette": raw_metrics.get("silhouette"),
+        "pca_var_top5": raw_metrics.get("pca_var_top5"),
+        "avg_clust_coef": raw_metrics.get("avg_clust_coef"),
+        "doublet_median": raw_doublet_median,
+    }
+    return raw_doublet_median, raw, raw_summary
 
 
 def load_visiumhd_data(x_range=None, y_range=None, n_genes=None, verbose=True):
@@ -1896,7 +2323,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Final comparison: Cell SPARKLE vs Spatial SoupX vs SoupX")
     parser.add_argument("--dataset", type=str, default="axolotl",
-                        choices=["axolotl", "mosta", "visiumhd", "synthetic"],
+                        choices=["axolotl", "mosta", "mousebrain", "visiumhd", "synthetic"],
                         help="Dataset (default: axolotl)")
     parser.add_argument("--scenario", type=str, default="S1",
                         choices=sorted(SCENARIOS.keys()),
@@ -1937,6 +2364,10 @@ def main():
         data = load_mosta_data(x_range=x_range, y_range=y_range)
         sub = subsample_data(data, args.n_genes, cut_genes=False)
         run_mosta_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes)
+    elif args.dataset == "mousebrain":
+        data = load_mousebrain_data(x_range=x_range, y_range=y_range)
+        sub = subsample_data(data, args.n_genes, cut_genes=False)
+        run_mousebrain_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes)
     elif args.dataset == "visiumhd":
         data = load_visiumhd_data(x_range=x_range, y_range=y_range, n_genes=args.n_genes)
         if data is None:
