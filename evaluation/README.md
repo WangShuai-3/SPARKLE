@@ -97,3 +97,13 @@ python3 evaluation/scripts/benchmark_resource.py \
 --n-jobs 2 \
 --plot
 ```
+
+## 控制是否保存 h5ad
+
+默认会保存每个方法的 corrected h5ad 到 `evaluation/reports/h5ad/`。若只需要指标而
+不需要大文件，可加上 `--no-save-h5ad`：
+
+```bash
+python evaluation/scripts/final_comparison.py --dataset synthetic --scenario S1 \
+    --methods sparkle --no-save-h5ad
+```

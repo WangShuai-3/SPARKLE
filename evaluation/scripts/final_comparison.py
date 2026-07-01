@@ -111,7 +111,7 @@ def _rmse(pred, true):
     return float(np.sqrt(np.mean((pred - true) ** 2)))
 
 
-def run_synthetic_comparison(data, n_genes=500, methods=None, lambda_grid=None, r2_threshold=None):
+def run_synthetic_comparison(data, n_genes=500, methods=None, lambda_grid=None, r2_threshold=None, save_h5ad=True):
     """Run methods on a synthetic scenario and report RMSE reduction vs raw."""
     if methods is None:
         methods = ["sparkle", "spatial_soupx", "soupx", "decontx"]
@@ -242,7 +242,8 @@ def run_synthetic_comparison(data, n_genes=500, methods=None, lambda_grid=None, 
     reports_root = _reports_root()
     tag = f"synthetic_{data['scenario_id']}"
     save_result_h5ad(raw_cell, data['gene_names'], data['cell_ids'], None,
-                     reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW")
+                     reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW",
+                     save_h5ad=save_h5ad)
     metrics = {
         "dataset": tag,
         "scenario": data.get("scenario_name", ""),
@@ -266,7 +267,8 @@ def run_synthetic_comparison(data, n_genes=500, methods=None, lambda_grid=None, 
         if corrected is not None:
             save_result_h5ad(corrected, data['gene_names'], data['cell_ids'], None,
                              reports_root / "h5ad" / f"{tag}_{method_name}.h5ad",
-                             method_name)
+                             method_name,
+                             save_h5ad=save_h5ad)
         metrics["methods"][method_name] = {
             "rmse": r['rmse'],
             "reduction_pct": r['reduction'],
@@ -287,7 +289,7 @@ def run_synthetic_comparison(data, n_genes=500, methods=None, lambda_grid=None, 
     return {"rmse_raw": rmse_raw, "results": results}
 
 
-def run_all_synthetic_scenarios(methods=None, lambda_grid=None, r2_threshold=None):
+def run_all_synthetic_scenarios(methods=None, lambda_grid=None, r2_threshold=None, save_h5ad=True):
     """Run all S1–S10 scenarios and print a consolidated benchmark table."""
     from evaluation.synthetic.scenarios import list_scenarios
 
@@ -301,7 +303,7 @@ def run_all_synthetic_scenarios(methods=None, lambda_grid=None, r2_threshold=Non
 
     for sid in scenario_ids:
         data = load_synthetic_scenario_data(sid, seed=42)
-        summary = run_synthetic_comparison(data, n_genes=500, methods=methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold)
+        summary = run_synthetic_comparison(data, n_genes=500, methods=methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad)
         all_results[sid] = summary
         if not method_names:
             method_names = list(summary["results"].keys())
@@ -470,7 +472,7 @@ def load_axolotl_data_windowed(x_range=None, y_range=None):
     }
 
 
-def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2_threshold=None):
+def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2_threshold=None, save_h5ad=True):
     """Run multi-method comparison for Axolotl."""
     if methods is None:
         methods = ['sparkle', 'spatial_soupx', 'soupx', 'decontx']
@@ -677,7 +679,8 @@ def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2
 
     sub_gene_names = [gene_names[i] for i in top_n]
     save_result_h5ad(raw_cell, gene_names, cell_ids, ann_map,
-                     reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW")
+                     reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW",
+                     save_h5ad=save_h5ad)
     metrics = {
         "dataset": tag,
         "n_cells": int(raw_cell.shape[1]),
@@ -702,7 +705,8 @@ def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2
             sst_vals = full[sst_loc_n]
         save_result_h5ad(full, gnames_save, cell_ids, ann_map,
                          reports_root / "h5ad" / f"{tag}_{method_name}.h5ad",
-                         method_name)
+                         method_name,
+                         save_h5ad=save_h5ad)
         metrics["methods"][method_name] = {
             "sstIN": float(sst_vals[sstin_mask].mean()) if sstin_mask.any() else None,
             "sstNbr": float(sst_vals[neighbor_mask].mean()) if neighbor_mask.any() else None,
@@ -711,7 +715,7 @@ def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2
     save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
 
 
-def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None):
+def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None, save_h5ad=True):
     """Run 3-way comparison for MOSTA with cortical layer evaluation."""
     if methods is None:
         methods = ['sparkle', 'spatial_soupx', 'soupx']
@@ -769,7 +773,8 @@ def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None
     cell_ids = data.get('cell_ids', np.arange(raw.shape[1]))
 
     save_result_h5ad(raw, sub['gene_names'], cell_ids, ann_map,
-                     reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW")
+                     reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW",
+                     save_h5ad=save_h5ad)
     metrics = {
         "dataset": tag,
         "n_cells": int(raw.shape[1]),
@@ -784,7 +789,8 @@ def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None
         if corrected is not None:
             save_result_h5ad(corrected, sub['gene_names'], cell_ids, ann_map,
                              reports_root / "h5ad" / f"{tag}_{method_name}.h5ad",
-                             method_name)
+                             method_name,
+                             save_h5ad=save_h5ad)
             metrics["methods"][method_name] = {
                 "runtime": r['diag'].get('runtime', 0),
                 "de_genes": r.get('mosta_de_genes'),
@@ -843,7 +849,7 @@ def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None
         print(f"  {method_name:<16} {runtime:7.1f}s  {str(de):>8} {s_str:>8} {asw_str:>6} {clisi_str:>6} {sil_str:>6} {pca5_str:>6} {clust_str:>8} {dblt_str:>8}")
 
 
-def run_mousebrain_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None):
+def run_mousebrain_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None, save_h5ad=True):
     """Run comparison for MouseBrain (T304), using cell_subclass annotations."""
     if methods is None:
         methods = ['sparkle', 'spatial_soupx', 'soupx', 'decontx']
@@ -901,7 +907,8 @@ def run_mousebrain_comparison(data, sub, n_genes=200, methods=None, n_high_genes
     cell_ids = data.get('cell_ids', np.arange(raw.shape[1]))
 
     save_result_h5ad(raw, sub['gene_names'], cell_ids, ann_map,
-                     reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW")
+                     reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW",
+                     save_h5ad=save_h5ad)
     metrics = {
         "dataset": tag,
         "n_cells": int(raw.shape[1]),
@@ -916,7 +923,8 @@ def run_mousebrain_comparison(data, sub, n_genes=200, methods=None, n_high_genes
         if corrected is not None:
             save_result_h5ad(corrected, sub['gene_names'], cell_ids, ann_map,
                              reports_root / "h5ad" / f"{tag}_{method_name}.h5ad",
-                             method_name)
+                             method_name,
+                             save_h5ad=save_h5ad)
             metrics["methods"][method_name] = {
                 "runtime": r['diag'].get('runtime', 0),
                 "de_genes": r.get('mousebrain_de_genes'),
@@ -1550,7 +1558,7 @@ def _convert_for_json(obj):
 
 
 def save_result_h5ad(expr, gene_names, cell_ids, ann_map, out_path,
-                     method_name=""):
+                     method_name="", save_h5ad=True):
     """Save a [genes x cells] expression matrix as cell-based h5ad.
 
     Args:
@@ -1561,8 +1569,11 @@ def save_result_h5ad(expr, gene_names, cell_ids, ann_map, out_path,
         ann_map: dict cell_id -> annotation, may be None.
         out_path: Path to write.
         method_name: optional method tag stored in .uns.
+        save_h5ad: if False, skip writing h5ad file.
     """
-    n_cells_expr = expr.shape[1]
+    if not save_h5ad:
+        print(f"    Skipping h5ad save: {out_path}")
+        return
     cell_ids_use = np.asarray(cell_ids)[:n_cells_expr]
     X = expr.T
     if hasattr(X, "toarray"):
@@ -2229,7 +2240,7 @@ def _compute_scib_metrics(cell_expr, cell_anns, method_name, n_top_genes=2000):
                 'pca_var_top5': None, 'avg_clust_coef': None}
 
 
-def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None):
+def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None, save_h5ad=True):
     """Run comparison for Visium HD with scIB metrics evaluation.
 
     Evaluates: Cell-type ASW (higher=better separation) and
@@ -2311,7 +2322,8 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
 
     ann_map = data.get('ann_map', {})
     save_result_h5ad(raw_cell, sub['gene_names'], cell_ids, ann_map,
-                     reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW")
+                     reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW",
+                     save_h5ad=save_h5ad)
     metrics = {
         "dataset": tag,
         "n_cells": int(raw_cell.shape[1]),
@@ -2326,7 +2338,8 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
         if corrected is not None:
             save_result_h5ad(corrected, sub['gene_names'], cell_ids, ann_map,
                              reports_root / "h5ad" / f"{tag}_{method_name}.h5ad",
-                             method_name)
+                             method_name,
+                             save_h5ad=save_h5ad)
             metrics["methods"][method_name] = {
                 "runtime": r['diag'].get('runtime', 0),
                 "doublet_median": r.get('visiumhd_doublet_median'),
@@ -2376,6 +2389,8 @@ def main():
                         help="Lambda candidates in um for SPARKLE and SpatialSoupX (default: 10 20 30 50 70 100 150 200 300)")
     parser.add_argument("--r2-threshold", type=float, default=0.01,
                         help="Minimum weighted R^2 for SPARKLE gene correction (default: 0.01)")
+    parser.add_argument("--save-h5ad", action=argparse.BooleanOptionalAction, default=True,
+                        help="Save corrected h5ad files (default: True)")
     parser.add_argument("--methods", type=str,
                         default="sparkle,spatial_soupx,soupx,decontx",
                         help="Comma-separated methods to run")
@@ -2386,6 +2401,7 @@ def main():
     methods = [m.strip().lower() for m in args.methods.split(',')]
     lambda_grid = args.lambda_grid
     r2_threshold = args.r2_threshold
+    save_h5ad = args.save_h5ad
 
     print("=" * 60)
     print(f"FINAL COMPARISON: {args.dataset.upper()}")
@@ -2399,27 +2415,27 @@ def main():
 
     if args.dataset == "axolotl":
         data = load_axolotl_data_windowed(x_range, y_range)
-        run_axolotl_comparison(data, args.n_genes, methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold)
+        run_axolotl_comparison(data, args.n_genes, methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad)
     elif args.dataset == "mosta":
         data = load_mosta_data(x_range=x_range, y_range=y_range)
         sub = subsample_data(data, args.n_genes, cut_genes=False)
-        run_mosta_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold)
+        run_mosta_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad)
     elif args.dataset == "mousebrain":
         data = load_mousebrain_data(x_range=x_range, y_range=y_range)
         sub = subsample_data(data, args.n_genes, cut_genes=False)
-        run_mousebrain_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold)
+        run_mousebrain_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad)
     elif args.dataset == "visiumhd":
         data = load_visiumhd_data(x_range=x_range, y_range=y_range, n_genes=args.n_genes)
         if data is None:
             sys.exit(1)
         sub = subsample_data(data, args.n_genes)
-        run_visiumhd_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold)
+        run_visiumhd_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad)
     else:  # synthetic
         if args.all_scenarios:
-            run_all_synthetic_scenarios(methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold)
+            run_all_synthetic_scenarios(methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad)
         else:
             data = load_synthetic_scenario_data(args.scenario, seed=42)
-            run_synthetic_comparison(data, args.n_genes, methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold)
+            run_synthetic_comparison(data, args.n_genes, methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad)
 
 
 if __name__ == "__main__":
