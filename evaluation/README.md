@@ -107,3 +107,21 @@ python3 evaluation/scripts/benchmark_resource.py \
 python evaluation/scripts/final_comparison.py --dataset synthetic --scenario S1 \
     --methods sparkle --no-save-h5ad
 ```
+
+## 额外可调参数
+
+| 参数 | 说明 | 默认 |
+|------|------|------|
+| `--max-radius` | 空间邻域搜索半径（µm）。Axolotl 默认 200，其他数据集 300。 | 数据集相关 |
+| `--cut-genes` / `--no-cut-genes` | `subsample_data` 是否只保留 top N 基因。默认 `--no-cut-genes`（保留全部基因用于评估）。 | False |
+
+例如，在 Axolotl 上测试更大的 `lambda`（需要同时扩大 `max_radius`）：
+
+```bash
+python evaluation/scripts/final_comparison.py --dataset axolotl \
+    --x-range 10500 12500 --y-range 6000 11100 \
+    --n-genes 2000 --n-high-genes 2000 \
+    --methods sparkle --no-save-h5ad \
+    --max-radius 500 \
+    --lambda-grid 200 300 500 700 1000
+```
