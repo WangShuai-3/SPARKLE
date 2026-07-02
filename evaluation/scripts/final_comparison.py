@@ -1432,6 +1432,8 @@ def run_spatial_soupx_method(sub, verbose=True, bin_size_um=25.0, spot_pitch_um=
     """
     if lambda_grid is None:
         lambda_grid = [10, 20, 30, 50, 70, 100, 150, 200]
+    if max_radius is None:
+        max_radius = 300.0
     bin_size = max(1, int(bin_size_um / spot_pitch_um + 0.5))  # rounds 25/2=12.5→13
     print(f"\n  Spatial SoupX (bin={bin_size} DNBs ≈ {bin_size*spot_pitch_um:.0f}µm)...")
     dnb_expr = sub['dnb_expr']
@@ -2470,7 +2472,11 @@ def main():
     lambda_grid = args.lambda_grid
     r2_threshold = args.r2_threshold
     save_h5ad = args.save_h5ad
-    max_radius = args.max_radius
+    if args.max_radius is None:
+        # Match help text defaults: 200 for axolotl, 300 for others
+        max_radius = 200.0 if args.dataset == "axolotl" else 300.0
+    else:
+        max_radius = args.max_radius
     cut_genes = args.cut_genes
 
     print("=" * 60)
