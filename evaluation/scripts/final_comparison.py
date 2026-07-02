@@ -172,7 +172,9 @@ def run_synthetic_comparison(data, n_genes=500, methods=None, lambda_grid=None, 
         reduc_sp = (rmse_raw - rmse_sp) / rmse_raw * 100.0
         print(f"  RMSE={rmse_sp:.4f}, reduction={reduc_sp:.1f}%, "
               f"λ={model.lambda_:.0f}µm, time={sp_t:.1f}s")
-        results["SPARKLE"] = {"rmse": rmse_sp, "reduction": reduc_sp, "runtime": sp_t}
+        sp_var_data = _build_sparkle_var_data(dnb_expr.shape[0], diag, r2_threshold_sp)
+        results["SPARKLE"] = {"rmse": rmse_sp, "reduction": reduc_sp, "runtime": sp_t,
+                               "diag": {"var_data": sp_var_data}}
 
     # 2. Spatial SoupX
     if "spatial_soupx" in methods:
@@ -270,10 +272,12 @@ def run_synthetic_comparison(data, n_genes=500, methods=None, lambda_grid=None, 
         elif method_name == "DecontX" and 'dx_corr' in locals():
             corrected = dx_corr
         if corrected is not None:
+            var_data = r.get('diag', {}).get('var_data') if method_name == 'SPARKLE' else None
             save_result_h5ad(corrected, data['gene_names'], data['cell_ids'], None,
                              reports_root / "h5ad" / f"{tag}_{method_name}.h5ad",
                              method_name,
-                             save_h5ad=save_h5ad)
+                             save_h5ad=save_h5ad,
+                             var_data=var_data)
         metrics["methods"][method_name] = {
             "rmse": r['rmse'],
             "reduction_pct": r['reduction'],
@@ -563,13 +567,14 @@ def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2
             r2_threshold=r2_threshold_sp, lambda_grid=lambda_grid_sp,
             use_local_density=False, cell_based=True, verbose=True,
         )
-        sp_corr, _ = model.fit_transform_from_dnb(sub_all, dnb_coords, dnb_labels)
+        sp_corr, sp_diag = model.fit_transform_from_dnb(sub_all, dnb_coords, dnb_labels)
         sp_t = time.time() - t0
         if hasattr(sp_corr, 'toarray'):
             sp_corr = sp_corr.toarray()
         sst_summary(sp_corr[sst_idx_all], f"Cell SPARKLE ({sp_t:.0f}s)")
         results['SPARKLE'] = sp_corr[sst_idx_all]
         results['sp_full'] = sp_corr
+        results['sp_var_data'] = _build_sparkle_var_data(sub_all.shape[0], sp_diag, r2_threshold_sp)
 
     # 2. Spatial SoupX
     if 'spatial_soupx' in methods:
@@ -716,10 +721,12 @@ def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2
         else:
             gnames_save = sub_gene_names
             sst_vals = full[sst_loc_n]
+        var_data = results.get('sp_var_data') if method_name == 'SPARKLE' else None
         save_result_h5ad(full, gnames_save, cell_ids, ann_map,
                          reports_root / "h5ad" / f"{tag}_{method_name}.h5ad",
                          method_name,
-                         save_h5ad=save_h5ad)
+                         save_h5ad=save_h5ad,
+                         var_data=var_data)
         metrics["methods"][method_name] = {
             "sstIN": float(sst_vals[sstin_mask].mean()) if sstin_mask.any() else None,
             "sstNbr": float(sst_vals[neighbor_mask].mean()) if neighbor_mask.any() else None,
@@ -800,10 +807,12 @@ def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None
     for method_name, r in results.items():
         corrected = r.get('corrected')
         if corrected is not None:
+            var_data = r.get('diag', {}).get('var_data') if method_name == 'SPARKLE' else None
             save_result_h5ad(corrected, sub['gene_names'], cell_ids, ann_map,
                              reports_root / "h5ad" / f"{tag}_{method_name}.h5ad",
                              method_name,
-                             save_h5ad=save_h5ad)
+                             save_h5ad=save_h5ad,
+                             var_data=var_data)
             metrics["methods"][method_name] = {
                 "runtime": r['diag'].get('runtime', 0),
                 "de_genes": r.get('mosta_de_genes'),
@@ -934,10 +943,12 @@ def run_mousebrain_comparison(data, sub, n_genes=200, methods=None, n_high_genes
     for method_name, r in results.items():
         corrected = r.get('corrected')
         if corrected is not None:
+            var_data = r.get('diag', {}).get('var_data') if method_name == 'SPARKLE' else None
             save_result_h5ad(corrected, sub['gene_names'], cell_ids, ann_map,
                              reports_root / "h5ad" / f"{tag}_{method_name}.h5ad",
                              method_name,
-                             save_h5ad=save_h5ad)
+                             save_h5ad=save_h5ad,
+                             var_data=var_data)
             metrics["methods"][method_name] = {
                 "runtime": r['diag'].get('runtime', 0),
                 "de_genes": r.get('mousebrain_de_genes'),
@@ -1322,6 +1333,33 @@ def subsample_data(data, n_genes, cut_genes=True):
     return result
 
 
+def _build_sparkle_var_data(n_total_genes: int, diag: dict, r2_threshold: float) -> dict:
+    """Build per-gene R² annotation arrays for h5ad adata.var.
+
+    Returns a dict with:
+      - sparkle_selected: bool, selected as high-expression gene.
+      - sparkle_corrected: bool, selected AND passed R² threshold.
+      - sparkle_r2: float, R² score (NaN for genes not selected).
+    """
+    gene_indices = diag.get("gene_indices")
+    r2_scores = diag.get("r2_scores")
+    r2_thresh = diag.get("r2_threshold", r2_threshold)
+    sparkle_r2 = np.full(n_total_genes, np.nan, dtype=np.float64)
+    sparkle_selected = np.zeros(n_total_genes, dtype=bool)
+    sparkle_corrected = np.zeros(n_total_genes, dtype=bool)
+    if gene_indices is not None and r2_scores is not None:
+        gene_indices = np.asarray(gene_indices, dtype=int)
+        r2_scores = np.asarray(r2_scores)
+        sparkle_r2[gene_indices] = r2_scores
+        sparkle_selected[gene_indices] = True
+        sparkle_corrected[gene_indices] = r2_scores >= r2_thresh
+    return {
+        "sparkle_selected": sparkle_selected,
+        "sparkle_corrected": sparkle_corrected,
+        "sparkle_r2": sparkle_r2,
+    }
+
+
 def run_sparkle_method(sub, verbose=True, bin_size_um=25.0, spot_pitch_um=0.5, n_high_genes=500, lambda_grid=None, r2_threshold=None, max_radius=None):
     """运行 SPARKLE（本方法）。
 
@@ -1378,7 +1416,8 @@ def run_sparkle_method(sub, verbose=True, bin_size_um=25.0, spot_pitch_um=0.5, n
         corrected = corrected.toarray()
     print(f"    Done in {elapsed:.1f}s, λ={model.lambda_:.0f}μm, "
           f"{diag.get('n_genes_corrected','?')} genes corrected")
-    return corrected, {'lambda': float(model.lambda_), 'runtime': elapsed, **diag}
+    var_data = _build_sparkle_var_data(dnb_expr.shape[0], diag, r2_threshold)
+    return corrected, {'lambda': float(model.lambda_), 'runtime': elapsed, 'var_data': var_data, **diag}
 
 
 def run_spatial_soupx_method(sub, verbose=True, bin_size_um=25.0, spot_pitch_um=0.5, lambda_grid=None, max_radius=None):
@@ -1575,7 +1614,7 @@ def _convert_for_json(obj):
 
 
 def save_result_h5ad(expr, gene_names, cell_ids, ann_map, out_path,
-                     method_name="", save_h5ad=True):
+                     method_name="", save_h5ad=True, var_data=None):
     """Save a [genes x cells] expression matrix as cell-based h5ad.
 
     Args:
@@ -1587,6 +1626,8 @@ def save_result_h5ad(expr, gene_names, cell_ids, ann_map, out_path,
         out_path: Path to write.
         method_name: optional method tag stored in .uns.
         save_h5ad: if False, skip writing h5ad file.
+        var_data: optional dict of per-gene annotations (e.g. R² scores)
+            to add to adata.var.
     """
     if not save_h5ad:
         print(f"    Skipping h5ad save: {out_path}")
@@ -1601,6 +1642,9 @@ def save_result_h5ad(expr, gene_names, cell_ids, ann_map, out_path,
 
     adata = ad.AnnData(X=X)
     adata.var_names = [str(g) for g in gene_names]
+    if var_data is not None:
+        for key, vals in var_data.items():
+            adata.var[key] = vals
     adata.obs_names = [f"Cell_{cid}" for cid in cell_ids_use]
     adata.obs["cell_id"] = cell_ids_use
     if ann_map is not None:
@@ -2354,10 +2398,12 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
     for method_name, r in results.items():
         corrected = r.get('corrected')
         if corrected is not None:
+            var_data = r.get('diag', {}).get('var_data') if method_name == 'SPARKLE' else None
             save_result_h5ad(corrected, sub['gene_names'], cell_ids, ann_map,
                              reports_root / "h5ad" / f"{tag}_{method_name}.h5ad",
                              method_name,
-                             save_h5ad=save_h5ad)
+                             save_h5ad=save_h5ad,
+                             var_data=var_data)
             metrics["methods"][method_name] = {
                 "runtime": r['diag'].get('runtime', 0),
                 "doublet_median": r.get('visiumhd_doublet_median'),

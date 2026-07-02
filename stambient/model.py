@@ -315,8 +315,9 @@ class SPARKLE:
             verbose=self.verbose,
         )
         self.lambda_ = diag["lambda_estimated"]
-        self.alpha_ = None  # per-gene α not stored in diag in this version
-        self.r2_scores_ = None
+        self.alpha_ = diag.get("alphas", None)
+        self.r2_scores_ = diag.get("r2_scores", None)
+        self._gene_indices_ = diag.get("gene_indices", None)
         self.diagnostics_ = diag
         return corrected, diag
 
