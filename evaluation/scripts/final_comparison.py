@@ -1591,6 +1591,7 @@ def save_result_h5ad(expr, gene_names, cell_ids, ann_map, out_path,
     if not save_h5ad:
         print(f"    Skipping h5ad save: {out_path}")
         return
+    n_cells_expr = expr.shape[1]
     cell_ids_use = np.asarray(cell_ids)[:n_cells_expr]
     X = expr.T
     if hasattr(X, "toarray"):

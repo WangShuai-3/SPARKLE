@@ -48,3 +48,7 @@ evaluation/reports
 
 # Evaluation datasets (large raw data)
 evaluation/data/
+
+# Log files
+evaluation/logs/
+*.log
