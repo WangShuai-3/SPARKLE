@@ -872,7 +872,7 @@ def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None
 
 
 def run_mousebrain_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None):
-    """Run comparison for MouseBrain (T304), using cell_subclass annotations."""
+    """Run comparison for MouseBrain (T304), using cell_group annotations."""
     if methods is None:
         methods = ['sparkle', 'spatial_soupx', 'soupx', 'decontx']
     methods = [m.lower().strip() for m in methods]
@@ -1148,7 +1148,7 @@ def load_mosta_data(x_range=None, y_range=None):
     }
 
 
-def load_mousebrain_data(x_range=None, y_range=None, annotation_level='cell_subclass'):
+def load_mousebrain_data(x_range=None, y_range=None, annotation_level='cell_group'):
     """加载新加入的 Mouse Brain Stereo-seq (T304) 数据。
 
     文件：
@@ -1157,7 +1157,9 @@ def load_mousebrain_data(x_range=None, y_range=None, annotation_level='cell_subc
       mouseBrain.snRNAseq.308ClustersAnnotation.20230607.tsv — cluster 注释（可选参考）
 
     处理流程：
-      1. 从 celltypeTransfer 中过滤 section_id == 'T304'，构建 cell_id → cell_subclass 的 ann_map
+      1. 从 celltypeTransfer 中过滤 section_id == 'T304'，构建 cell_id → annotation 的 ann_map
+         annotation_level 可以是 cell_class / cell_subclass / cell_group。
+         cell_group 从 cell_cluster 列取最后一个下划线前的 prefix，并把下划线替换为 dash。
       2. 流式读取 GEM，按 x_range/y_range 过滤
       3. cell_label == 0 或不在 ann_map 中的 DNB 标记为 -1（empty/背景）
       4. 对同一个 (gene, DNB) 的多个记录按 umi_count 求和
@@ -1175,7 +1177,7 @@ def load_mousebrain_data(x_range=None, y_range=None, annotation_level='cell_subc
         raise FileNotFoundError(f"{transfer_path} not found.")
 
     # ── 加载 T304 的细胞注释 ─────────────────────────────────────
-    print("Loading MouseBrain cell-type transfer (section T304)...")
+    print(f"Loading MouseBrain cell-type transfer (section T304, level={annotation_level})...")
     ann_map = {}
     valid_cell_ids = set()
     with gzip.open(transfer_path, 'rt') as f:
@@ -1183,7 +1185,10 @@ def load_mousebrain_data(x_range=None, y_range=None, annotation_level='cell_subc
         try:
             idx_id = header.index('cell_id')
             idx_section = header.index('section_id')
-            idx_ann = header.index(annotation_level)
+            if annotation_level == 'cell_group':
+                idx_cluster = header.index('cell_cluster')
+            else:
+                idx_ann = header.index(annotation_level)
         except ValueError:
             raise ValueError(f"Transfer file missing required columns; header={header}")
         n = 0
@@ -1192,10 +1197,21 @@ def load_mousebrain_data(x_range=None, y_range=None, annotation_level='cell_subc
             if parts[idx_section] != 'T304':
                 continue
             cid = int(parts[idx_id])
-            ann_map[cid] = parts[idx_ann]
+            if annotation_level == 'cell_group':
+                # cell_cluster looks like "CA1_N_GLU_78"; cell_group is everything before the last underscore.
+                # Replace underscores with dashes to match snRNA reference naming.
+                cluster = parts[idx_cluster]
+                prefix = cluster.rsplit('_', 1)[0] if '_' in cluster else cluster
+                ann = prefix.replace('_', '-')
+            else:
+                ann = parts[idx_ann]
+            ann_map[cid] = ann
             valid_cell_ids.add(cid)
             n += 1
     print(f"  {n} cells with annotations in section T304")
+    if n > 0:
+        unique_anns = sorted(set(ann_map.values()))
+        print(f"  {len(unique_anns)} unique {annotation_level} annotations: {unique_anns}")
 
     # ── 流式读取 GEM 并构建稀疏矩阵 ─────────────────────────────
     print("Loading MouseBrain GEM (section T304)...")
@@ -2464,6 +2480,9 @@ def main():
     parser.add_argument("--methods", type=str,
                         default="sparkle,spatial_soupx,soupx,decontx",
                         help="Comma-separated methods to run")
+    parser.add_argument("--annotation-level", type=str, default="cell_group",
+                        choices=["cell_class", "cell_subclass", "cell_group"],
+                        help="MouseBrain annotation level to use (default: cell_group)")
     args = parser.parse_args()
 
     x_range = tuple(args.x_range) if args.x_range else None
@@ -2497,7 +2516,7 @@ def main():
         sub = subsample_data(data, args.n_genes, cut_genes=cut_genes)
         run_mosta_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius)
     elif args.dataset == "mousebrain":
-        data = load_mousebrain_data(x_range=x_range, y_range=y_range)
+        data = load_mousebrain_data(x_range=x_range, y_range=y_range, annotation_level=args.annotation_level)
         sub = subsample_data(data, args.n_genes, cut_genes=cut_genes)
         run_mousebrain_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius)
     elif args.dataset == "visiumhd":

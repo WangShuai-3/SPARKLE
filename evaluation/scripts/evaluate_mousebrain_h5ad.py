@@ -4,15 +4,15 @@
 Inputs:
     - Per-method cell-based h5ad files saved by final_comparison.py
       (e.g. mousebrain_x..._y..._RAW.h5ad, ..._SPARKLE.h5ad, ..._DecontX.h5ad)
-    - Optional snRNA-seq reference pseudobulk (genes x cell_subclass)
-      e.g. evaluation/data/mousebrain/snrna_cell_subclass_pseudobulk.csv
+    - Optional snRNA-seq reference pseudobulk (genes x cell_group)
+      e.g. evaluation/data/mousebrain/snrna_cell_group_pseudobulk.csv
 
 Outputs (under evaluation/reports/mousebrain_eval/):
     - {tag}_{method}_celltype_corr_heatmap.png : Pearson correlation heatmap
-      between cell-subclass pseudobulk profiles.
+      between cell-group pseudobulk profiles.
     - {tag}_snrna_corr_barplot.png : mean Pearson/Spearman correlation of each
-      method's cell-subclass profiles to the snRNA reference.
-    - {tag}_snrna_corr_per_celltype.csv : per-cell-subclass correlation table.
+      method's cell-group profiles to the snRNA reference.
+    - {tag}_snrna_corr_per_celltype.csv : per-cell-group correlation table.
     - {tag}_metrics.json : silhouette, snRNA mean correlation, etc.
     - {tag}_summary.csv : numeric summary table across methods.
 
@@ -76,10 +76,10 @@ def normalize_adata(adata, use_sctransform=False):
 
 
 def compute_pseudobulk(adata, group_key="annotation", min_cells=3):
-    """Compute mean normalized expression per cell subclass.
+    """Compute mean normalized expression per cell group.
 
     Returns:
-        DataFrame [genes x cell_subclass]
+        DataFrame [genes x cell_group]
     """
     groups = adata.obs[group_key].astype(str)
     valid = groups != "Unknown"
@@ -105,7 +105,7 @@ def compute_pseudobulk(adata, group_key="annotation", min_cells=3):
 
 
 def plot_celltype_correlation_heatmap(pb_df, title, out_path):
-    """Pearson correlation heatmap between cell-subclass pseudobulk profiles."""
+    """Pearson correlation heatmap between cell-group pseudobulk profiles."""
     corr = pb_df.corr(method="pearson")
     n = len(corr)
     fig, ax = plt.subplots(figsize=(max(6, n * 0.55), max(5, n * 0.5)))
@@ -122,16 +122,16 @@ def plot_celltype_correlation_heatmap(pb_df, title, out_path):
 
 
 def load_snrna_reference(ref_path):
-    """Load snRNA reference pseudobulk as DataFrame [genes x cell_subclass]."""
+    """Load snRNA reference pseudobulk as DataFrame [genes x cell_group]."""
     df = pd.read_csv(ref_path, index_col=0)
     return df
 
 
 def compute_snrna_correlations(pb_df, snrna_ref, method="pearson"):
-    """For each shared cell subclass, correlate spatial and snRNA profiles.
+    """For each shared cell group, correlate spatial and snRNA profiles.
 
     Returns:
-        dict cell_subclass -> correlation, and a pandas Series.
+        dict cell_group -> correlation, and a pandas Series.
     """
     shared_genes = pb_df.index.intersection(snrna_ref.index)
     if len(shared_genes) < 10:
@@ -142,7 +142,7 @@ def compute_snrna_correlations(pb_df, snrna_ref, method="pearson"):
     ref = snrna_ref.loc[shared_genes]
     shared_types = pb.columns.intersection(ref.columns)
     if len(shared_types) == 0:
-        raise ValueError("No shared cell subclasses between spatial and snRNA.")
+        raise ValueError("No shared cell groups between spatial and snRNA.")
 
     corrs = {}
     for ct in shared_types:
@@ -168,7 +168,7 @@ def plot_snrna_comparison(summary, out_path):
     fig, ax = plt.subplots(figsize=(max(7, len(methods) * 0.8), 5))
     bars = ax.bar(methods, vals, color=colors)
     ax.set_ylabel("Mean correlation with snRNA reference")
-    ax.set_title("Spatial cell-subclass profiles vs snRNA reference")
+    ax.set_title("Spatial cell-group profiles vs snRNA reference")
     y_min = min(0, np.nanmin(vals) - 0.05)
     y_max = np.nanmax(vals) + 0.05
     ax.set_ylim(y_min, y_max)
@@ -188,7 +188,7 @@ def plot_snrna_comparison(summary, out_path):
 
 
 def compute_silhouette(adata, group_key="annotation", n_pcs=30):
-    """Compute cell-subclass silhouette score on log-normalized PCA."""
+    """Compute cell-group silhouette score on log-normalized PCA."""
     adata = adata.copy()
     n_pcs = min(n_pcs, adata.n_obs - 1, adata.n_vars - 1)
     if n_pcs < 2:
@@ -203,7 +203,7 @@ def compute_silhouette(adata, group_key="annotation", n_pcs=30):
 
 
 def compute_mean_between_corr(pb_df):
-    """Return mean off-diagonal (between cell-subclass) Pearson correlation."""
+    """Return mean off-diagonal (between cell-group) Pearson correlation."""
     corr = pb_df.corr(method="pearson").values
     if corr.shape[0] < 2:
         return float("nan")
@@ -230,8 +230,9 @@ def main():
         help="Output directory (default: evaluation/reports/mousebrain_eval)",
     )
     parser.add_argument(
-        "--snrna-ref", type=str, default=None,
-        help="Path to snRNA reference pseudobulk CSV (genes x cell_subclass). "
+        "--snrna-ref", type=str,
+        default="evaluation/data/mousebrain/snrna_cell_group_pseudobulk.csv",
+        help="Path to snRNA reference pseudobulk CSV (genes x cell_group). "
              "If omitted, snRNA comparison is skipped.",
     )
     parser.add_argument(
@@ -282,23 +283,23 @@ def main():
         corr_path = output_dir / f"{args.tag}_{method}_celltype_corr_heatmap.png"
         corr = plot_celltype_correlation_heatmap(
             pb_df,
-            title=f"{method}: cell-subclass pseudobulk correlation",
+            title=f"{method}: cell-group pseudobulk correlation",
             out_path=corr_path,
         )
         per_method_corr[method] = corr
         print(f"  Saved heatmap: {corr_path}")
-        print(f"  Cell subclasses: {list(pb_df.columns)}")
+        print(f"  Cell groups: {list(pb_df.columns)}")
 
         # Silhouette
         sil = compute_silhouette(adata, group_key="annotation")
-        print(f"  Silhouette (cell_subclass): {sil:.4f}")
+        print(f"  Silhouette (cell_group): {sil:.4f}")
 
         mean_between = compute_mean_between_corr(pb_df)
 
         method_metrics = {
             "n_cells": int(adata.n_obs),
             "n_genes": int(adata.n_vars),
-            "n_subclasses": int(pb_df.shape[1]),
+            "n_groups": int(pb_df.shape[1]),
             "silhouette": sil,
             "mean_between_corr": mean_between,
         }
@@ -311,7 +312,7 @@ def main():
                 )
                 mean_corr = float(series.mean(skipna=True))
                 method_metrics["mean_snrna_corr"] = mean_corr
-                method_metrics["snrna_corr_per_subclass"] = {
+                method_metrics["snrna_corr_per_group"] = {
                     k: (float(v) if not np.isnan(v) else None)
                     for k, v in corrs.items()
                 }
@@ -323,7 +324,7 @@ def main():
         summary_rows.append({
             "method": method,
             "n_cells": method_metrics["n_cells"],
-            "n_subclasses": method_metrics["n_subclasses"],
+            "n_groups": method_metrics["n_groups"],
             "silhouette": method_metrics["silhouette"],
             "mean_between_corr": method_metrics["mean_between_corr"],
             "mean_snrna_corr": method_metrics.get("mean_snrna_corr", np.nan),
@@ -342,9 +343,9 @@ def main():
         # per-celltype CSV
         per_ct_rows = []
         for method in metrics["methods"]:
-            per_sub = metrics["methods"][method].get("snrna_corr_per_subclass", {})
+            per_sub = metrics["methods"][method].get("snrna_corr_per_group", {})
             for ct, val in per_sub.items():
-                per_ct_rows.append({"method": method, "cell_subclass": ct, "corr": val})
+                per_ct_rows.append({"method": method, "cell_group": ct, "corr": val})
         per_ct_df = pd.DataFrame(per_ct_rows)
         per_ct_path = output_dir / f"{args.tag}_snrna_corr_per_celltype.csv"
         per_ct_df.to_csv(per_ct_path, index=False)

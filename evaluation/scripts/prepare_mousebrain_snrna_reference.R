@@ -1,10 +1,15 @@
 #!/usr/bin/env Rscript
-# Extract cell-subclass pseudobulk profiles from the MouseBrain snRNA-seq Seurat object.
+# Extract cell-group pseudobulk profiles from the MouseBrain snRNA-seq Seurat object.
 #
 # Usage:
 #   Rscript evaluation/scripts/prepare_mousebrain_snrna_reference.R \
 #       [path/to/mouseBrain.snRNAseq.308Clusters.seurat.20230607.rds] \
-#       [output.csv]
+#       [output.csv] \
+#       [group_column]
+#
+#   group_column: metadata column to average by. Default is "Cell_group" (50 groups),
+#   which is finer than "Cell_subclass" (18 groups) but coarser than "Cell_cluster"
+#   (308 clusters).
 #
 # Requires the Seurat package and enough memory to load the ~23 GB RDS file.
 
@@ -12,7 +17,8 @@ library(Seurat)
 
 args <- commandArgs(trailingOnly = TRUE)
 rds_path <- ifelse(length(args) >= 1, args[1], "evaluation/data/mousebrain/mouseBrain.snRNAseq.308Clusters.seurat.20230607.rds")
-out_path <- ifelse(length(args) >= 2, args[2], "evaluation/data/mousebrain/snrna_cell_subclass_pseudobulk.csv")
+out_path <- ifelse(length(args) >= 2, args[2], "evaluation/data/mousebrain/snrna_cell_group_pseudobulk.csv")
+group_col <- ifelse(length(args) >= 3, args[3], "Cell_group")
 
 message("Loading RDS: ", rds_path)
 obj <- readRDS(rds_path)
@@ -31,27 +37,24 @@ if (!norm_present) {
   obj <- NormalizeData(obj)
 }
 
-# Try to locate a cell-subclass metadata column.
+# Validate requested grouping column.
 meta_cols <- colnames(obj@meta.data)
-subclass_col <- grep("subclass", meta_cols, ignore.case = TRUE, value = TRUE)[1]
-if (is.na(subclass_col)) {
-  subclass_col <- "cell_subclass"
+if (!(group_col %in% meta_cols)) {
+  stop("Cannot find metadata column: ", group_col,
+       ". Available columns: ", paste(meta_cols, collapse = ", "))
 }
-if (!(subclass_col %in% meta_cols)) {
-  stop("Cannot find a cell_subclass metadata column. Available columns: ", paste(meta_cols, collapse = ", "))
-}
-message("Using grouping column: ", subclass_col)
+message("Using grouping column: ", group_col)
 
-# AverageExpression by subclass.
+# AverageExpression by group.
 # Try Seurat v5 'layer' argument first, fall back to v4 'slot'.
 avg <- tryCatch(
-  AverageExpression(obj, group.by = subclass_col, layer = "data")[[assay]],
+  AverageExpression(obj, group.by = group_col, layer = "data")[[assay]],
   error = function(e) {
-    AverageExpression(obj, group.by = subclass_col, slot = "data")[[assay]]
+    AverageExpression(obj, group.by = group_col, slot = "data")[[assay]]
   }
 )
 
 avg_df <- as.data.frame(avg)
-message("Reference shape: ", nrow(avg_df), " genes x ", ncol(avg_df), " subclasses")
+message("Reference shape: ", nrow(avg_df), " genes x ", ncol(avg_df), " groups")
 write.csv(avg_df, out_path)
 message("Saved: ", out_path)
