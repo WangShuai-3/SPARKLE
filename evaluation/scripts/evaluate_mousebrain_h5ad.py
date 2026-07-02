@@ -127,13 +127,35 @@ def load_snrna_reference(ref_path):
     return df
 
 
-def compute_snrna_correlations(pb_df, snrna_ref, method="pearson"):
+def load_sparkle_corrected_genes(input_dir, tag):
+    """Load gene names marked sparkle_corrected from the SPARKLE h5ad.
+
+    Returns:
+        list of gene names, or None if SPARKLE h5ad / column not found.
+    """
+    sp_path = Path(input_dir) / f"{tag}_SPARKLE.h5ad"
+    if not sp_path.exists():
+        return None
+    adata = sc.read_h5ad(sp_path)
+    if "sparkle_corrected" not in adata.var.columns:
+        return None
+    genes = adata.var_names[adata.var["sparkle_corrected"].values].tolist()
+    return genes
+
+
+def compute_snrna_correlations(pb_df, snrna_ref, method="pearson", gene_mask=None):
     """For each shared cell group, correlate spatial and snRNA profiles.
+
+    Args:
+        gene_mask: optional list of gene names to restrict the comparison to
+            (e.g. genes that SPARKLE actually corrected).
 
     Returns:
         dict cell_group -> correlation, and a pandas Series.
     """
     shared_genes = pb_df.index.intersection(snrna_ref.index)
+    if gene_mask is not None:
+        shared_genes = shared_genes.intersection(pd.Index(gene_mask))
     if len(shared_genes) < 10:
         raise ValueError(
             f"Only {len(shared_genes)} shared genes between spatial and snRNA."
@@ -249,6 +271,12 @@ def main():
         choices=["pearson", "spearman"],
         help="Correlation method for snRNA comparison",
     )
+    parser.add_argument(
+        "--use-sparkle-corrected-genes", action=argparse.BooleanOptionalAction, default=True,
+        help="Restrict snRNA correlation to genes that SPARKLE actually corrected "
+             "(sparkle_corrected == True in the SPARKLE h5ad var). "
+             "Disable with --no-use-sparkle-corrected-genes to use all shared genes.",
+    )
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
@@ -264,6 +292,18 @@ def main():
     if args.snrna_ref:
         snrna_ref = load_snrna_reference(args.snrna_ref)
         print(f"Loaded snRNA reference: {snrna_ref.shape}")
+
+    sparkle_corrected_genes = None
+    if args.use_sparkle_corrected_genes:
+        sparkle_corrected_genes = load_sparkle_corrected_genes(input_dir, args.tag)
+        if sparkle_corrected_genes is None:
+            warnings.warn(
+                "--sparkle-corrected-only requested but could not find "
+                f"{args.tag}_SPARKLE.h5ad or sparkle_corrected column. "
+                "Falling back to all shared genes."
+            )
+        else:
+            print(f"Restricting snRNA comparison to {len(sparkle_corrected_genes)} SPARKLE-corrected genes")
 
     metrics = {
         "tag": args.tag,
@@ -308,15 +348,24 @@ def main():
         if snrna_ref is not None:
             try:
                 corrs, series = compute_snrna_correlations(
-                    pb_df, snrna_ref, method=args.corr_method
+                    pb_df, snrna_ref, method=args.corr_method,
+                    gene_mask=sparkle_corrected_genes,
                 )
                 mean_corr = float(series.mean(skipna=True))
+                method_metrics["n_snrna_genes"] = len(
+                    pb_df.index.intersection(snrna_ref.index).intersection(
+                        pd.Index(sparkle_corrected_genes)
+                    )
+                ) if sparkle_corrected_genes is not None else len(
+                    pb_df.index.intersection(snrna_ref.index)
+                )
                 method_metrics["mean_snrna_corr"] = mean_corr
                 method_metrics["snrna_corr_per_group"] = {
                     k: (float(v) if not np.isnan(v) else None)
                     for k, v in corrs.items()
                 }
-                print(f"  Mean {args.corr_method} corr with snRNA: {mean_corr:.4f}")
+                scope = " (SPARKLE-corrected genes only)" if sparkle_corrected_genes is not None else ""
+                print(f"  Mean {args.corr_method} corr with snRNA{scope}: {mean_corr:.4f} ({method_metrics['n_snrna_genes']} genes)")
             except Exception as e:
                 warnings.warn(f"snRNA comparison failed for {method}: {e}")
 
