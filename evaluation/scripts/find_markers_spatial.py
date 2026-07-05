@@ -50,6 +50,10 @@ def main():
     parser.add_argument("--top-n", type=int, default=100)
     parser.add_argument("--use-sctransform", action="store_true",
                         help="Use pysctransform instead of log1p-CPM normalization")
+    parser.add_argument("--n-hvgs", type=int, default=None,
+                        help="If set, restrict analysis to the top n_hvgs highly "
+                             "variable genes computed from RAW data. Ignored under "
+                             "--use-sctransform.")
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
@@ -59,6 +63,16 @@ def main():
     suffix = "raw" if args.method == "RAW" else "SPARKLE"
     adata = sc.read_h5ad(input_dir / f"{args.tag}_{suffix}.h5ad")
     adata = normalize_adata(adata, use_sctransform=args.use_sctransform)
+
+    # Optionally restrict to top HVGs computed from RAW data
+    if args.n_hvgs is not None and args.n_hvgs > 0 and not args.use_sctransform:
+        raw_path = input_dir / f"{args.tag}_raw.h5ad"
+        raw_adata = normalize_adata(sc.read_h5ad(raw_path), use_sctransform=False)
+        sc.pp.highly_variable_genes(raw_adata, n_top_genes=args.n_hvgs, flavor="seurat")
+        hvgs = raw_adata.var_names[raw_adata.var["highly_variable"].values].tolist()
+        shared_hvgs = adata.var_names.intersection(hvgs)
+        adata = adata[:, shared_hvgs].copy()
+        print(f"Using {len(shared_hvgs)} HVGs for {args.method}")
 
     # Filter groups by min_cells
     groups = adata.obs["annotation"].astype(str)
@@ -100,7 +114,12 @@ def main():
             })
 
     df = pd.DataFrame(rows)
-    suffix = "_sct" if args.use_sctransform else ""
+    if args.use_sctransform:
+        suffix = "_sct"
+    elif args.n_hvgs is not None:
+        suffix = f"_hvg{args.n_hvgs}"
+    else:
+        suffix = ""
     out_path = out_dir / f"{args.tag}_{args.method}_wilcox_markers_min{args.min_cells}_sparkle_genes{suffix}.csv"
     df.to_csv(out_path, index=False)
     print(f"Saved: {out_path}")

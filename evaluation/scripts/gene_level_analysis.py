@@ -217,10 +217,21 @@ def main():
                         default=False)
     parser.add_argument("--use-sctransform", action="store_true",
                         help="Use pysctransform instead of log1p-CPM normalization")
+    parser.add_argument("--n-hvgs", type=int, default=None,
+                        help="If set, restrict analysis to the top n_hvgs highly "
+                             "variable genes computed from RAW data, intersected "
+                             "with SPARKLE-corrected genes when applicable. "
+                             "Ignored under --use-sctransform.")
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
-    out_dir = Path(args.output_dir) / "gene_level_analysis"
+    if args.n_hvgs is not None:
+        out_dir = Path(args.output_dir) / f"gene_level_analysis_hvg{args.n_hvgs}"
+    elif args.use_sctransform:
+        out_dir = Path(args.output_dir) / "gene_level_analysis_sct"
+    else:
+        out_dir = Path(args.output_dir) / "gene_level_analysis_new"
+    out_dir = out_dir / "gene_level_analysis"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     raw_path = input_dir / f"{args.tag}_raw.h5ad"
@@ -229,6 +240,16 @@ def main():
     print("Loading h5ad files ...")
     raw_adata = normalize_adata(sc.read_h5ad(raw_path), use_sctransform=args.use_sctransform)
     sp_adata = normalize_adata(sc.read_h5ad(sp_path), use_sctransform=args.use_sctransform)
+
+    # Optionally restrict to top HVGs from RAW data
+    if args.n_hvgs is not None and args.n_hvgs > 0 and not args.use_sctransform:
+        sc.pp.highly_variable_genes(raw_adata, n_top_genes=args.n_hvgs, flavor="seurat")
+        hvgs = raw_adata.var_names[raw_adata.var["highly_variable"].values].tolist()
+        print(f"Selected {len(hvgs)} HVGs from RAW data")
+        raw_adata = raw_adata[:, hvgs].copy()
+        shared_hvgs = sp_adata.var_names.intersection(hvgs)
+        sp_adata = sp_adata[:, shared_hvgs].copy()
+        print(f"Using {raw_adata.n_vars} HVGs for analysis")
 
     ref_df = pd.read_csv(args.snrna_ref, index_col=0)
 

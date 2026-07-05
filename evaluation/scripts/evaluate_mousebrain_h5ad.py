@@ -148,6 +148,29 @@ def load_sparkle_corrected_genes(input_dir, tag):
     return genes
 
 
+def get_hvg_gene_set(raw_path, n_hvgs, use_sctransform=False, sparkle_genes=None):
+    """Return a gene set of top n_hvgs highly variable genes from RAW data.
+
+    If sparkle_genes is provided, the result is intersected with it so that
+    the final set only contains SPARKLE-corrected HVGs.  When use_sctransform
+    is True, SCTransform itself selects HVGs, so this function just returns
+    the sparkle gene set (or None) to avoid double selection.
+    """
+    if use_sctransform:
+        return sparkle_genes
+
+    adata = sc.read_h5ad(raw_path)
+    adata = normalize_adata(adata, use_sctransform=False)
+    sc.pp.highly_variable_genes(adata, n_top_genes=n_hvgs, flavor="seurat")
+    hvgs = adata.var_names[adata.var["highly_variable"].values].tolist()
+    print(f"Selected {len(hvgs)} HVGs from RAW data")
+    if sparkle_genes is not None:
+        sparkle_set = set(sparkle_genes)
+        hvgs = [g for g in hvgs if g in sparkle_set]
+        print(f"After intersecting with SPARKLE-corrected genes: {len(hvgs)} genes")
+    return hvgs
+
+
 def compute_snrna_correlations(pb_df, snrna_ref, method="pearson", gene_mask=None):
     """For each shared cell group, correlate spatial and snRNA profiles.
 
@@ -337,6 +360,13 @@ def main():
         help="Use pysctransform instead of log1p-CPM normalization",
     )
     parser.add_argument(
+        "--n-hvgs", type=int, default=None,
+        help="If set, restrict analysis to the top n_hvgs highly variable "
+             "genes (computed from RAW data) intersected with "
+             "SPARKLE-corrected genes when applicable. Ignored under "
+             "--use-sctransform.",
+    )
+    parser.add_argument(
         "--corr-method", type=str, default="pearson",
         choices=["pearson", "spearman"],
         help="Correlation method for snRNA comparison. Pearson is kept as the "
@@ -353,7 +383,12 @@ def main():
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
-    output_dir = Path(args.output_dir)
+    if args.n_hvgs is not None:
+        output_dir = Path(args.output_dir) / f"method_level_hvg{args.n_hvgs}"
+    elif args.use_sctransform:
+        output_dir = Path(args.output_dir) / "method_level_sct"
+    else:
+        output_dir = Path(args.output_dir) / "method_level_new"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
@@ -377,6 +412,23 @@ def main():
             )
         else:
             print(f"Restricting snRNA comparison to {len(sparkle_corrected_genes)} SPARKLE-corrected genes")
+    else:
+        sparkle_corrected_genes = None
+
+    # Optionally restrict to a HVG subset (computed from RAW)
+    hvg_gene_set = None
+    if args.n_hvgs is not None and args.n_hvgs > 0:
+        raw_path = files.get("RAW") or files.get("raw")
+        if raw_path is None:
+            warnings.warn("--n-hvgs requested but no RAW file found; ignoring.")
+        else:
+            hvg_gene_set = get_hvg_gene_set(
+                raw_path, args.n_hvgs,
+                use_sctransform=args.use_sctransform,
+                sparkle_genes=sparkle_corrected_genes,
+            )
+            if hvg_gene_set is not None:
+                print(f"Restricting analysis to {len(hvg_gene_set)} HVGs")
 
     metrics = {
         "tag": args.tag,
@@ -391,6 +443,10 @@ def main():
         print(f"\nProcessing {method} ...")
         adata = sc.read_h5ad(path)
         adata = normalize_adata(adata, use_sctransform=args.use_sctransform)
+        if hvg_gene_set is not None:
+            shared_hvgs = adata.var_names.intersection(hvg_gene_set)
+            adata = adata[:, shared_hvgs].copy()
+            print(f"  Using {adata.n_vars} HVGs for analysis")
 
         # 1. cell-type correlation heatmap
         pb_df = compute_pseudobulk(adata, group_key="annotation", min_cells=3)
@@ -421,9 +477,10 @@ def main():
         # 2. snRNA correlation comparison
         if snrna_ref is not None:
             try:
+                gene_mask = hvg_gene_set if hvg_gene_set is not None else sparkle_corrected_genes
                 corrs, series = compute_snrna_correlations(
                     pb_df, snrna_ref, method=args.corr_method,
-                    gene_mask=sparkle_corrected_genes,
+                    gene_mask=gene_mask,
                 )
                 mean_corr = float(series.mean(skipna=True))
                 method_metrics["n_snrna_genes"] = len(
