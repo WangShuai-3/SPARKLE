@@ -70,27 +70,26 @@ python evaluation/scripts/final_comparison.py --dataset axolotl \
     --methods sparkle,spatial_soupx,soupx,decontx
 
 # Mosta
-python evaluation/scripts/final_comparison.py --dataset mosta \
-    --x-range 10000 14000 --y-range 8000 17000 \
-    --n-genes 2000 --n-high-genes 2000 \
-    --methods sparkle,spatial_soupx,soupx,decontx
+# python evaluation/scripts/final_comparison.py --dataset mosta \
+#     --x-range 10000 14000 --y-range 8000 17000 \
+#     --n-genes 2000 --n-high-genes 2000 \
+#     --methods sparkle,spatial_soupx,soupx,decontx
 
 # Visium HD
-python evaluation/scripts/final_comparison.py --dataset mosta \
-    --x-range 45000 60000 --y-range 10000 20000 \
-    --n-genes 2000 --n-high-genes 2000 \
+python evaluation/scripts/final_comparison.py --dataset visiumhd \
+    --n-genes 30000 --n-high-genes 30000 \
     --methods sparkle,spatial_soupx,soupx,decontx
 
 # MouseBrain (T304)
 python evaluation/scripts/final_comparison.py --dataset mousebrain \
-    --x-range 12500 17500 --y-range 2000 5000 \
-    --n-genes 2000 --n-high-genes 2000 \
+    --x-range 12500 20000 --y-range 2000 10000 \
+    --n-genes 30000 --n-high-genes 30000 \
     --methods sparkle,spatial_soupx,soupx,decontx
 
 # resource
 python3 evaluation/scripts/benchmark_resource.py \
 --scenario S2 \
---grid-sizes 100 200 300 400 500 800 1000\
+--grid-sizes 100 200 300 400 500 800 1000 \
 --n-genes 500 \
 --methods sparkle,spatial_soupx,soupx,decontx \
 --output evaluation/reports/resource_benchmark.csv \
