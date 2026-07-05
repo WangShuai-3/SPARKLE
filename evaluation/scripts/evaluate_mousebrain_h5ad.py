@@ -68,7 +68,12 @@ def normalize_adata(adata, use_sctransform=False):
         from pysctransform import SCTransform
         n_hvgs = min(2000, adata.n_vars)
         residuals = SCTransform(adata, var_features_n=n_hvgs)
-        adata.X = residuals.values
+        # residuals is cells x HVGs DataFrame; build a new AnnData with HVGs only
+        adata = sc.AnnData(
+            X=residuals.values,
+            obs=adata.obs.loc[residuals.index].copy(),
+            var=pd.DataFrame(index=residuals.columns),
+        )
     else:
         sc.pp.normalize_total(adata, target_sum=1e4)
         sc.pp.log1p(adata)
@@ -233,6 +238,71 @@ def compute_mean_between_corr(pb_df):
     return float(np.mean(corr[mask]))
 
 
+def compute_contamination(pb_df, snrna_ref):
+    """Per-gene contamination score based on the snRNA target group.
+
+    For each gene, the target group is the cell group with the highest snRNA
+    expression.  Contamination is defined as mean expression in non-target
+    groups divided by expression in the target group.
+
+    Returns a Series indexed by gene with the per-gene contamination score.
+    """
+    shared_genes = pb_df.index.intersection(snrna_ref.index)
+    shared_types = pb_df.columns.intersection(snrna_ref.columns)
+    pb = pb_df.loc[shared_genes, shared_types]
+    ref = snrna_ref.loc[shared_genes, shared_types]
+
+    target_groups = ref.idxmax(axis=1)
+    target_idx = [pb.columns.get_loc(g) for g in target_groups]
+    target_expr = pb.to_numpy()[np.arange(len(pb)), target_idx]
+
+    # Mean expression in non-target groups for each gene
+    row_means = pb.mean(axis=1).to_numpy()
+    non_target_mean = (row_means * pb.shape[1] - target_expr) / (pb.shape[1] - 1)
+
+    contamination = np.full_like(target_expr, np.nan, dtype=float)
+    mask = target_expr > 0
+    contamination[mask] = non_target_mean[mask] / target_expr[mask]
+    return pd.Series(contamination, index=shared_genes, name="contamination")
+
+
+def compute_contamination_summary(pb_df, snrna_ref, raw_pb_df=None):
+    """Return contamination score summary for a pseudobulk profile.
+
+    If raw_pb_df is provided, also returns reductions vs RAW on the full gene
+    set and on genes that were highly contaminated in RAW (contamination > 1).
+    """
+    contam = compute_contamination(pb_df, snrna_ref)
+    summary = {
+        "mean_contamination": float(contam.mean(skipna=True)),
+        "median_contamination": float(contam.median(skipna=True)),
+        "n_contam_genes": int(contam.notna().sum()),
+    }
+
+    if raw_pb_df is not None:
+        raw_contam = compute_contamination(raw_pb_df, snrna_ref)
+        # Compare all methods on the same gene set: genes with valid RAW
+        # contamination scores.  This avoids gene-set differences introduced by
+        # methods that change which genes have non-zero target expression.
+        shared = raw_contam.dropna().index.intersection(contam.index)
+        reduction = raw_contam.loc[shared] - contam.loc[shared]
+        summary["mean_contamination_reduction"] = float(reduction.mean(skipna=True))
+        summary["median_contamination_reduction"] = float(reduction.median(skipna=True))
+
+        # Focus on genes highly contaminated in RAW
+        high_mask = raw_contam.loc[shared] > 1.0
+        if high_mask.sum() > 0:
+            summary["mean_contamination_reduction_high_raw"] = float(
+                reduction.loc[high_mask].mean(skipna=True)
+            )
+            summary["n_high_contam_genes"] = int(high_mask.sum())
+        else:
+            summary["mean_contamination_reduction_high_raw"] = float("nan")
+            summary["n_high_contam_genes"] = 0
+
+    return summary
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Evaluate corrected MouseBrain h5ad outputs."
@@ -269,7 +339,10 @@ def main():
     parser.add_argument(
         "--corr-method", type=str, default="pearson",
         choices=["pearson", "spearman"],
-        help="Correlation method for snRNA comparison",
+        help="Correlation method for snRNA comparison. Pearson is kept as the "
+             "default because SPARKLE's main mechanism is removing ambient-RNA "
+             "contamination (i.e. reducing expression magnitude), which Pearson "
+             "captures more directly than Spearman.",
     )
     parser.add_argument(
         "--use-sparkle-corrected-genes", action=argparse.BooleanOptionalAction, default=True,
@@ -312,6 +385,7 @@ def main():
     }
     summary_rows = []
     per_method_corr = {}
+    raw_pb_df = None
 
     for method, path in files.items():
         print(f"\nProcessing {method} ...")
@@ -369,6 +443,28 @@ def main():
             except Exception as e:
                 warnings.warn(f"snRNA comparison failed for {method}: {e}")
 
+            # 3. Contamination summary (uses full shared gene set)
+            try:
+                if method.lower() == "raw":
+                    raw_pb_df = pb_df
+                contam_summary = compute_contamination_summary(
+                    pb_df, snrna_ref, raw_pb_df=raw_pb_df
+                )
+                method_metrics.update(contam_summary)
+                print(
+                    f"  Mean contamination: {contam_summary['mean_contamination']:.4f} "
+                    f"(median {contam_summary['median_contamination']:.4f}, "
+                    f"{contam_summary['n_contam_genes']} genes)"
+                )
+                if "mean_contamination_reduction_high_raw" in contam_summary:
+                    print(
+                        f"  Contamination reduction vs RAW (high-contam genes): "
+                        f"{contam_summary['mean_contamination_reduction_high_raw']:.4f} "
+                        f"({contam_summary.get('n_high_contam_genes', 0)} genes)"
+                    )
+            except Exception as e:
+                warnings.warn(f"Contamination summary failed for {method}: {e}")
+
         metrics["methods"][method] = method_metrics
         summary_rows.append({
             "method": method,
@@ -377,6 +473,10 @@ def main():
             "silhouette": method_metrics["silhouette"],
             "mean_between_corr": method_metrics["mean_between_corr"],
             "mean_snrna_corr": method_metrics.get("mean_snrna_corr", np.nan),
+            "mean_contamination": method_metrics.get("mean_contamination", np.nan),
+            "median_contamination": method_metrics.get("median_contamination", np.nan),
+            "mean_contamination_reduction": method_metrics.get("mean_contamination_reduction", np.nan),
+            "mean_contamination_reduction_high_raw": method_metrics.get("mean_contamination_reduction_high_raw", np.nan),
         })
 
     # snRNA bar plot
@@ -407,6 +507,32 @@ def main():
     print(f"Saved metrics JSON: {json_path}")
 
     summary_df = pd.DataFrame(summary_rows)
+
+    # Contamination reduction vs RAW
+    if snrna_ref is not None and "RAW" in metrics["methods"]:
+        raw_contam = metrics["methods"]["RAW"].get("mean_contamination", np.nan)
+        if not np.isnan(raw_contam):
+            reductions = []
+            for row in summary_rows:
+                m = row["method"]
+                mc = metrics["methods"][m].get("mean_contamination", np.nan)
+                reductions.append({
+                    "method": m,
+                    "mean_contamination": mc,
+                    "contamination_reduction_vs_raw": raw_contam - mc,
+                })
+            reduc_df = pd.DataFrame(reductions)
+            reduc_path = output_dir / f"{args.tag}_contamination_reduction.csv"
+            reduc_df.to_csv(reduc_path, index=False)
+            print(f"Saved contamination reduction CSV: {reduc_path}")
+            summary_df = summary_df.merge(
+                reduc_df[["method", "contamination_reduction_vs_raw"]],
+                on="method", how="left"
+            )
+            print("\nContamination reduction vs RAW:")
+            for _, r in reduc_df.iterrows():
+                print(f"  {r['method']}: {r['contamination_reduction_vs_raw']:.4f}")
+
     csv_path = output_dir / f"{args.tag}_summary.csv"
     summary_df.to_csv(csv_path, index=False)
     print(f"Saved summary CSV: {csv_path}")
