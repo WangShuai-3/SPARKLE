@@ -49,10 +49,10 @@ SCENARIOS = {
         "cluster_strength": 0.6,
     },
     "S5": {
-        "name": "Long lambda multi-type (100 µm)",
+        "name": "Long lambda multi-type (500 µm)",
         "n_cells": 180,
         "empty_fraction": 0.25,
-        "ambient_lambda": 100.0,
+        "ambient_lambda": 500.0,
         "ambient_alpha": 0.01,
         "n_cell_types": 3,
         "marker_fraction": 0.20,

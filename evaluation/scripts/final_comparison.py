@@ -134,7 +134,7 @@ def run_synthetic_comparison(data, n_genes=500, methods=None, lambda_grid=None, 
 
     results = {}
     if lambda_grid is None:
-        lambda_grid_sp = [10, 20, 30, 50, 70, 100, 150, 200, 300]
+        lambda_grid_sp = [10, 20, 30, 50, 70, 100, 150, 200, 300, 500]
     else:
         lambda_grid_sp = lambda_grid
     if r2_threshold is None:
@@ -2467,8 +2467,8 @@ def main():
     parser.add_argument("--n-high-genes", type=int, default=None,
                         help="Number of top genes (default: 200)")
     parser.add_argument("--lambda-grid", type=int, nargs="+",
-                        default=[10, 20, 30, 50, 70, 100, 150, 200, 300],
-                        help="Lambda candidates in um for SPARKLE and SpatialSoupX (default: 10 20 30 50 70 100 150 200 300)")
+                        default=[10, 20, 30, 50, 70, 100, 150, 200, 300, 500],
+                        help="Lambda candidates in um for SPARKLE and SpatialSoupX (default: 10 20 30 50 70 100 150 200 300 500)")
     parser.add_argument("--r2-threshold", type=float, default=0.01,
                         help="Minimum weighted R^2 for SPARKLE gene correction (default: 0.01)")
     parser.add_argument("--max-radius", type=float, default=None,
