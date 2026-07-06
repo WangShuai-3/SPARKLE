@@ -97,7 +97,7 @@ class SPARKLE:
         use_expr_weight: bool = False,
         per_gene_lambda: bool = False,
         cell_level: bool = False,
-        cell_based: bool = False,
+        cell_based: bool = True,
         self_confidence_penalty: bool = True,
         local_radius_factor: float = 3.0,
         classification: Optional[np.ndarray] = None,
