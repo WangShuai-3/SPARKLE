@@ -52,17 +52,17 @@ class TestLoadVisiumHD:
 
         data = load_visiumhd(h5_path, verbose=False)
 
-        assert data["dnb_expr"].shape == (2, 4)
-        assert data["dnb_coords"].shape == (4, 2)
-        assert len(data["dnb_labels"]) == 4
+        assert data["spot_expr"].shape == (2, 4)
+        assert data["spot_coords"].shape == (4, 2)
+        assert len(data["spot_labels"]) == 4
         assert list(data["gene_names"]) == ["geneA", "geneB"]
         assert list(data["cell_ids"]) == [7]
 
         # Labels: pixel 0 (0,0) -> cell, pixel 3 (1,1) -> cell, others empty
-        assert data["dnb_labels"][0] == 0
-        assert data["dnb_labels"][3] == 0
-        assert data["dnb_labels"][1] == -1
-        assert data["dnb_labels"][2] == -1
+        assert data["spot_labels"][0] == 0
+        assert data["spot_labels"][3] == 0
+        assert data["spot_labels"][1] == -1
+        assert data["spot_labels"][2] == -1
 
     def test_missing_file(self, tmp_path):
         with pytest.raises(FileNotFoundError):
@@ -100,21 +100,21 @@ class TestLoadStereoSeq:
 
         data = load_stereoseq(gem_path, verbose=False)
 
-        assert data["dnb_expr"].shape == (2, 4)
-        assert data["dnb_coords"].shape == (4, 2)
-        assert len(data["dnb_labels"]) == 4
+        assert data["spot_expr"].shape == (2, 4)
+        assert data["spot_coords"].shape == (4, 2)
+        assert len(data["spot_labels"]) == 4
         assert list(data["gene_names"]) == ["geneA", "geneB"]
         assert list(data["cell_ids"]) == [1, 2]
 
         # DNB order is first-encounter: (0,0), (1,0), (1,1), (0,1)
-        labels = data["dnb_labels"]
+        labels = data["spot_labels"]
         assert labels[0] == 0  # cell 1
         assert labels[1] == 0  # cell 1
         assert labels[2] == 1  # cell 2
         assert labels[3] == -1  # empty
 
         # geneA total = 5 + 3 + 1 = 9; geneB total = 2 + 4 = 6
-        totals = np.asarray(data["dnb_expr"].sum(axis=1)).ravel()
+        totals = np.asarray(data["spot_expr"].sum(axis=1)).ravel()
         assert totals[0] == pytest.approx(9.0)
         assert totals[1] == pytest.approx(6.0)
 
@@ -123,7 +123,7 @@ class TestLoadStereoSeq:
         _write_gem(gem_path, _minimal_gem_tsv(), gzip_compress=True)
 
         data = load_stereoseq(gem_path, verbose=False)
-        assert data["dnb_expr"].shape == (2, 4)
+        assert data["spot_expr"].shape == (2, 4)
         assert list(data["gene_names"]) == ["geneA", "geneB"]
 
     def test_csv(self, tmp_path):
@@ -137,7 +137,7 @@ class TestLoadStereoSeq:
         _write_gem(gem_path, content)
 
         data = load_stereoseq(gem_path, verbose=False)
-        assert data["dnb_expr"].shape == (2, 2)
+        assert data["spot_expr"].shape == (2, 2)
         assert list(data["gene_names"]) == ["geneA", "geneB"]
 
     def test_custom_columns(self, tmp_path):
@@ -157,7 +157,7 @@ class TestLoadStereoSeq:
             cell_label_col="cell_label",
             verbose=False,
         )
-        assert data["dnb_expr"].shape == (2, 2)
+        assert data["spot_expr"].shape == (2, 2)
         assert list(data["gene_names"]) == ["geneA", "geneB"]
         assert list(data["cell_ids"]) == [1, 2]
 
@@ -171,8 +171,8 @@ class TestLoadStereoSeq:
         _write_gem(gem_path, content)
 
         data = load_stereoseq(gem_path, empty_labels={-1}, verbose=False)
-        assert data["dnb_labels"][0] == -1
-        assert data["dnb_labels"][1] == 0
+        assert data["spot_labels"][0] == -1
+        assert data["spot_labels"][1] == 0
 
     def test_missing_column(self, tmp_path):
         gem_path = tmp_path / "test.tsv"

@@ -96,9 +96,9 @@ def load_visiumhd(
     Returns:
         Dictionary with keys:
 
-        - ``dnb_expr``: [n_genes × n_dnbs] ``csr_matrix`` of UMI counts.
-        - ``dnb_coords``: [n_dnbs × 2] pixel center coordinates in µm.
-        - ``dnb_labels``: [n_dnbs] cell IDs; ``-1`` for empty pixels.
+        - ``spot_expr``: [n_genes × n_spots] ``csr_matrix`` of UMI counts.
+        - ``spot_coords``: [n_spots × 2] pixel center coordinates in µm.
+        - ``spot_labels``: [n_spots] cell IDs; ``-1`` for empty pixels.
         - ``gene_names``: list of gene names.
         - ``cell_ids``: sorted array of original cell IDs.
     """
@@ -134,7 +134,7 @@ def load_visiumhd(
     pixel_to_idx = np.full((max_row + 1, max_col + 1), -1, dtype=np.int32)
     kept_indices = np.arange(n_pixels_total, dtype=np.int32)
     pixel_to_idx[pixel_rows, pixel_cols] = kept_indices
-    dnb_coords = np.column_stack([
+    spot_coords = np.column_stack([
         pixel_cols.astype(np.float64) * pixel_size_um + pixel_size_um / 2.0,
         pixel_rows.astype(np.float64) * pixel_size_um + pixel_size_um / 2.0,
     ])
@@ -191,7 +191,7 @@ def load_visiumhd(
             coo_data[offset:end] = data[mask]
             offset = end
 
-    dnb_expr = csr_matrix(
+    spot_expr = csr_matrix(
         (coo_data, (coo_rows, coo_cols)),
         shape=(n_genes_use, n_pixels_total),
         dtype=np.float64,
@@ -214,25 +214,25 @@ def load_visiumhd(
     cell_to_idx = {cid: i for i, cid in enumerate(cell_ids_list)}
     n_cells = len(cell_ids_list)
 
-    dnb_labels = np.full(n_pixels_total, -1, dtype=np.int32)
+    spot_labels = np.full(n_pixels_total, -1, dtype=np.int32)
     cell_indices_mapped = np.array(
         [cell_to_idx[int(cid)] for cid in kept_cell_ids], dtype=np.int32
     )
-    dnb_labels[kept_pix.astype(np.int32)] = cell_indices_mapped
+    spot_labels[kept_pix.astype(np.int32)] = cell_indices_mapped
 
     f.close()
 
     if verbose:
-        n_cell_pixels = int((dnb_labels >= 0).sum())
-        n_empty_pixels = int((dnb_labels < 0).sum())
+        n_cell_pixels = int((spot_labels >= 0).sum())
+        n_empty_pixels = int((spot_labels < 0).sum())
         print(f"  {n_cells:,} cells, {n_cell_pixels:,} cell pixels, "
               f"{n_empty_pixels:,} empty pixels")
         print(f"  Loaded in {time.time() - t0:.1f}s")
 
     return {
-        "dnb_expr": dnb_expr,
-        "dnb_coords": dnb_coords,
-        "dnb_labels": dnb_labels,
+        "spot_expr": spot_expr,
+        "spot_coords": spot_coords,
+        "spot_labels": spot_labels,
         "gene_names": gene_names_arr,
         "cell_ids": np.array(cell_ids_list, dtype=np.int64),
     }
@@ -306,9 +306,9 @@ def load_stereoseq(
     Returns:
         Dictionary with keys:
 
-        - ``dnb_expr``: [n_genes × n_dnbs] ``csr_matrix`` of UMI counts.
-        - ``dnb_coords``: [n_dnbs × 2] DNB coordinates.
-        - ``dnb_labels``: [n_dnbs] cell IDs; ``-1`` for empty DNBs.
+        - ``spot_expr``: [n_genes × n_spots] ``csr_matrix`` of UMI counts.
+        - ``spot_coords``: [n_spots × 2] spot coordinates.
+        - ``spot_labels``: [n_spots] cell IDs; ``-1`` for empty spots.
         - ``gene_names``: array of gene names.
         - ``cell_ids``: sorted array of original cell IDs.
     """
@@ -420,7 +420,7 @@ def load_stereoseq(
     # Remap original cell labels to 0..n_cells-1
     orig_labels = sorted({lbl for lbl in dnb_orig_label.values() if lbl >= 0})
     label_to_idx = {lbl: i for i, lbl in enumerate(orig_labels)}
-    dnb_labels = np.array(
+    spot_labels = np.array(
         [label_to_idx.get(dnb_orig_label[i], -1) for i in range(n_dnbs)],
         dtype=np.int32,
     )
@@ -430,18 +430,18 @@ def load_stereoseq(
     rows = np.fromiter((k[0] for k in counts.keys()), dtype=np.int32, count=n_counts)
     cols = np.fromiter((k[1] for k in counts.keys()), dtype=np.int32, count=n_counts)
     data = np.fromiter(counts.values(), dtype=np.float64, count=n_counts)
-    dnb_expr = csr_matrix((data, (rows, cols)), shape=(n_genes, n_dnbs))
+    spot_expr = csr_matrix((data, (rows, cols)), shape=(n_genes, n_dnbs))
 
     if verbose:
-        n_empty = int((dnb_labels < 0).sum())
-        print(f"  Loaded {n_genes} genes, {n_dnbs} DNBs "
+        n_empty = int((spot_labels < 0).sum())
+        print(f"  Loaded {n_genes} genes, {n_dnbs} spots "
               f"({n_dnbs - n_empty} cell + {n_empty} empty), "
               f"{len(cell_ids)} cells in {time.time() - t0:.1f}s")
 
     return {
-        "dnb_expr": dnb_expr,
-        "dnb_coords": dnb_coords,
-        "dnb_labels": dnb_labels,
+        "spot_expr": spot_expr,
+        "spot_coords": dnb_coords,
+        "spot_labels": spot_labels,
         "gene_names": gene_names,
         "cell_ids": cell_ids,
     }

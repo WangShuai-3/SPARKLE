@@ -294,6 +294,29 @@ class SPARKLE:
 
         return corrected_cell_expr, self.diagnostics_
 
+    def fit_transform(
+        self,
+        spot_expr: np.ndarray,
+        spot_coords: np.ndarray,
+        spot_labels: np.ndarray,
+    ) -> Tuple[csr_matrix, Dict[str, Any]]:
+        """Fit the model and correct expression from spot-level data.
+
+        This is the recommended entry point for raw spatial data. It is a
+        thin wrapper around ``fit_transform_from_dnb`` (which is kept for
+        backward compatibility).
+
+        Args:
+            spot_expr: [genes × spots] expression matrix.
+            spot_coords: [spots × 2] coordinates in μm.
+            spot_labels: [spots] cell IDs; -1 for empty spots.
+
+        Returns:
+            corrected_cell_expr: [genes × cells] corrected per-cell expression.
+            diagnostics: Dictionary of diagnostic metrics.
+        """
+        return self.fit_transform_from_dnb(spot_expr, spot_coords, spot_labels)
+
     def _fit_cell_based(
         self,
         dnb_expression: np.ndarray,
@@ -321,7 +344,7 @@ class SPARKLE:
         self.diagnostics_ = diag
         return corrected, diag
 
-    def fit_transform(
+    def fit_transform_binned(
         self,
         bin_cell_expr: np.ndarray,
         bin_empty_expr: np.ndarray,

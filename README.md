@@ -13,7 +13,7 @@ Two pipelines available:
 | Pipeline | Architecture | Best for |
 |----------|-------------|----------|
 | **Cell-based** (recommended) | Cells intact + empty space binned separately. Cell-to-cell ambient prediction with zero diagonal → natural self-exclusion. | Data with cell segmentation |
-| Bin-level | Uniform grid bins mixing cell and empty DNBs. Bin-to-bin ambient prediction. | Legacy / no cell masks |
+| Bin-level | Uniform grid bins mixing cell and empty spots. Bin-to-bin ambient prediction. | Legacy / no cell masks |
 
 ### Key Features
 
@@ -27,12 +27,58 @@ Two pipelines available:
 
 ```python
 from stambient import SPARKLE
+from stambient.io_utils import load_stereoseq
+
+data = load_stereoseq("sample.gem.gz")
 
 model = SPARKLE(cell_based=True)  # recommended config
 
-# dnb_expr: [genes × DNBs], dnb_coords: [DNBs × 2], dnb_labels: [DNBs] (-1 = empty)
-corrected, diagnostics = model.fit_transform_from_dnb(
-    dnb_expr, dnb_coords, dnb_labels
+# spot_expr: [genes × spots], spot_coords: [spots × 2], spot_labels: [spots] (-1 = empty)
+corrected, diagnostics = model.fit_transform(
+    data["spot_expr"], data["spot_coords"], data["spot_labels"]
+)
+```
+
+## Loading Data
+
+SPARKLE provides two convenience loaders that return a standard dictionary with
+keys ``spot_expr``, ``spot_coords``, ``spot_labels``, ``gene_names``, and
+``cell_ids``.
+
+### Stereo-seq GEM
+
+```python
+from stambient.io_utils import load_stereoseq
+
+data = load_stereoseq(
+    "sample.gem.gz",
+    gene_col="geneID",        # or "gene"
+    count_col="MIDCounts",    # or "umi_count"
+    cell_label_col="cell",     # or "cell_label"
+)
+```
+
+The GEM loader supports plain text or ``.gz`` files, skips ``#`` comment lines,
+and auto-detects tab or comma delimiters.  You can override the default empty
+label values with ``empty_labels={0}`` (or any int/list/set).
+
+### Visium HD
+
+```python
+from stambient.io_utils import load_visiumhd
+
+data = load_visiumhd("Visium_HD_..._feature_slice.h5")
+```
+
+Visium HD pixels are 2 µm, whereas Stereo-seq DNBs are 0.5 µm.  When running
+SPARKLE on Visium HD, adjust ``bin_size`` so that the physical empty-bin size
+is comparable (e.g., ``bin_size=13`` gives ~26 µm bins, similar to
+``bin_size=50`` at 0.5 µm):
+
+```python
+model = SPARKLE(cell_based=True, bin_size=13)
+corrected, diagnostics = model.fit_transform(
+    data["spot_expr"], data["spot_coords"], data["spot_labels"]
 )
 ```
 
@@ -40,8 +86,8 @@ corrected, diagnostics = model.fit_transform_from_dnb(
 
 ### Cell-Based Pipeline (recommended)
 
-1. **Cells**: extracted intact from DNB labels — centroid (x,y), area (DNB count), expression/area.
-2. **Empty bins**: non-cell DNBs binned spatially into irregular bins.
+1. **Cells**: extracted intact from spot labels — centroid (x,y), area (spot count), expression/area.
+2. **Empty bins**: non-cell spots binned spatially into irregular bins.
 3. **λ estimation**: grid search minimizing empty-bin RSS with cell sources.
 4. **α estimation**: per-gene weighted OLS on empty-bin observations.
 5. **Correction**: for cell c, ambient from **other cells only** (W with zero diagonal), scaled by self-confidence penalty:
@@ -120,9 +166,9 @@ SPARKLE preserves the doublet-score distribution in this window, suggesting that
 
 ### Excluded Methods
 
-**CellBender** — VAE prior estimation fails on spatial DNB data (empty DNBs have 1-2 UMI → zero division / NaN). Falls back to empirical subtraction on full datasets.
+**CellBender** — VAE prior estimation fails on spatial spot data (empty spots have 1-2 UMI → zero division / NaN). Falls back to empirical subtraction on full datasets.
 
-**CellClear** — Requires ≥2000 genes for NMF statistical power, but spatial DNB background bins fail the `contamined_genes_detection` step: background expression profiles are too sparse to match any cell cluster (core algorithm designed for scRNA-seq droplet data, not spatial).
+**CellClear** — Requires ≥2000 genes for NMF statistical power, but spatial background bins fail the `contamined_genes_detection` step: background expression profiles are too sparse to match any cell cluster (core algorithm designed for scRNA-seq droplet data, not spatial).
 
 ## Optimization History
 
@@ -153,8 +199,8 @@ Spatial SoupX (bin-level, global ρ, spatial kernel) achieves 89.9% RMSE↓ on s
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `cell_based` | `False` | Use cell-based pipeline (recommended for segmented data) |
-| `bin_size` | 50 | DNBs per bin edge (cell-based: empty bin size) |
+| `cell_based` | `True` | Use cell-based pipeline (recommended for segmented data) |
+| `bin_size` | 50 | Spots per bin edge (cell-based: empty bin size) |
 | `distance_metric` | `'exponential'` | `'exponential'`, `'gaussian'`, or `'inverse'` |
 | `lambda_distance` | `None` | Distance decay (μm); auto-estimated if None |
 | `max_radius` | 200.0 | Max neighbor search radius (μm) |
@@ -168,8 +214,9 @@ Spatial SoupX (bin-level, global ρ, spatial kernel) achieves 89.9% RMSE↓ on s
 
 ### Methods
 
-- `fit_transform_from_dnb(expr, coords, labels)` → `(corrected_matrix, diagnostics)`
-- `fit_transform(...)` → `(corrected_matrix, diagnostics)`
+- `fit_transform(spot_expr, spot_coords, spot_labels)` → `(corrected_matrix, diagnostics)` (recommended)
+- `fit_transform_from_dnb(expr, coords, labels)` → `(corrected_matrix, diagnostics)` (backward-compatible alias)
+- `fit_transform_binned(bin_cell_expr, bin_empty_expr, bin_n_cell, bin_n_empty, bin_coords, bin_cell_assignment)` → `(corrected_matrix, diagnostics)`
 
 ### Baselines
 
@@ -204,7 +251,7 @@ python evaluation/scripts/final_comparison.py \
     --methods sparkle,spatial_soupx,soupx,decontx
 ```
 
-> **CellBender** and **CellClear** are excluded from `final_comparison.py` due to fundamental incompatibility with spatial DNB data. CellBender's VAE requires ≥50 UMI per background barcode (spatial: 1-2). CellClear's NMF-based gene detection fails because background expression profiles are too sparse to match foreground clusters. See "Excluded Methods" above for details.
+> **CellBender** and **CellClear** are excluded from `final_comparison.py` due to fundamental incompatibility with spatial spot data. CellBender's VAE requires ≥50 UMI per background barcode (spatial: 1-2). CellClear's NMF-based gene detection fails because background expression profiles are too sparse to match foreground clusters. See "Excluded Methods" above for details.
 
 > **DecontX** is cell-level only (no spatial information, gene-specific α). It runs directly in the base environment via `pip install decontx-python`. On MOSTA, uniform contamination estimates produce NaN correlations for between-type analysis.
 
