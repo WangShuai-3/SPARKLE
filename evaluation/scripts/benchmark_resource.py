@@ -2,8 +2,12 @@
 """Benchmark runtime and peak memory of correction methods across synthetic data sizes.
 
 The gene count is kept constant (default 500) while the spatial grid size and the
-number of cells are scaled together.  For each grid size and each method a fresh
-subprocess is spawned so that peak RSS is not polluted by previous methods.
+number of cells are scaled together.  For each method a fresh subprocess is spawned
+so that the reported peak RSS reflects only the correction method, not the synthetic
+data generation overhead.
+
+To keep benchmarking fast for large gene counts, synthetic data with more than 1000
+genes is generated once with 1000 genes and then replicated to the requested size.
 
 Usage example:
     python evaluation/scripts/benchmark_resource.py \
@@ -17,7 +21,6 @@ Usage example:
 
 import argparse
 import multiprocessing as mp
-import resource
 import sys
 import time
 import warnings
@@ -28,56 +31,78 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import numpy as np
 import pandas as pd
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, vstack
 
 
-def _run_single(args_tuple):
-    """Worker: generate one synthetic dataset and run one method.
+GENE_REPLICATION_THRESHOLD = 1000
 
-    Returns a dict with runtime and peak memory.
-    """
-    (grid_size, n_cells, n_genes, method, scenario_id, seed, n_high_genes) = args_tuple
 
-    # Imports inside worker keep the parent process lightweight.
+def _expand_genes(data, n_genes):
+    """Replicate a base synthetic dataset up to n_genes (rows/genes)."""
+    base = data["dnb_expr"].shape[0]
+    if base >= n_genes:
+        return data
+
+    n_repeats = n_genes // base
+    remainder = n_genes % base
+
+    # dnb_expr: [genes x dnbs] (dense or sparse)
+    base_expr = data["dnb_expr"]
+    if hasattr(base_expr, "tocsr"):  # sparse
+        blocks = [base_expr] * n_repeats
+        if remainder:
+            blocks.append(base_expr[:remainder])
+        data["dnb_expr"] = vstack(blocks, format="csr")
+    else:  # dense
+        data["dnb_expr"] = np.vstack(
+            [base_expr] * n_repeats + ([base_expr[:remainder]] if remainder else [])
+        )
+
+    # true_expr: [genes x cells]
+    data["true_expr"] = np.vstack(
+        [data["true_expr"]] * n_repeats
+        + ([data["true_expr"][:remainder]] if remainder else [])
+    )
+
+    # gene_is_high and true_alpha: [genes]
+    data["gene_is_high"] = np.concatenate(
+        [data["gene_is_high"]] * n_repeats
+        + ([data["gene_is_high"][:remainder]] if remainder else [])
+    )
+    if "true_alpha" in data:
+        data["true_alpha"] = np.concatenate(
+            [data["true_alpha"]] * n_repeats
+            + ([data["true_alpha"][:remainder]] if remainder else [])
+        )
+
+    # gene_names
+    base_names = data.get("gene_names", np.array([f"gene_{i}" for i in range(base)]))
+    data["gene_names"] = np.concatenate(
+        [base_names] * n_repeats
+        + ([base_names[:remainder]] if remainder else [])
+    )
+
+    data["params"]["n_genes"] = n_genes
+    data["params"]["n_high_genes"] = int(data["gene_is_high"].sum())
+    return data
+
+
+def _run_method_worker(sub, method, n_high_genes, result_queue):
+    """Run one correction method in an isolated process and measure method-only memory."""
+    import resource
+
     from evaluation.scripts.final_comparison import (
         run_decontx_method,
         run_spatial_soupx_method,
         run_soupx_method,
         run_sparkle_method,
     )
-    from evaluation.synthetic import generate_synthetic_data
-    from evaluation.synthetic.scenarios import get_scenario
 
-    scenario = get_scenario(scenario_id)
+    # Memory baseline after imports but before the method allocates anything.
+    baseline_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+    t0 = time.time()
     try:
-        data = generate_synthetic_data(
-            n_cells=n_cells,
-            grid_width=grid_size,
-            grid_height=grid_size,
-            dnb_pitch=0.5,
-            cell_radius=5.0,
-            cell_radius_cv=0.2,
-            n_genes=n_genes,
-            n_high_genes=80,
-            ambient_lambda=scenario["ambient_lambda"],
-            ambient_alpha=scenario["ambient_alpha"],
-            empty_fraction=scenario["empty_fraction"],
-            n_cell_types=scenario.get("n_cell_types", 1),
-            marker_fraction=scenario.get("marker_fraction", 0.0),
-            cluster_strength=scenario.get("cluster_strength", 0.5),
-            seed=seed,
-        )
-        dnb_expr = csr_matrix(data["dnb_expr"].astype(np.float64))
-        n_total_cells = data["true_expr"].shape[1]
-        sub = {
-            "dnb_expr": dnb_expr,
-            "dnb_coords": data["dnb_coords"],
-            "dnb_labels": data["dnb_labels"],
-            "gene_names": np.array([f"gene_{i}" for i in range(n_genes)]),
-            "cell_ids": np.arange(n_total_cells, dtype=np.int64),
-        }
-
-        t0 = time.time()
         if method == "sparkle":
             corrected, diag = run_sparkle_method(sub, n_high_genes=n_high_genes)
         elif method == "spatial_soupx":
@@ -89,10 +114,79 @@ def _run_single(args_tuple):
         else:
             raise ValueError(f"Unknown method: {method}")
         runtime = time.time() - t0
-
-        peak_mem_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        peak_mem_mb = peak_mem_kb / 1024.0
+        post_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        peak_mem_mb = max(0.0, (post_kb - baseline_kb) / 1024.0)
         status = "ok"
+    except Exception as e:
+        runtime = float("nan")
+        peak_mem_mb = float("nan")
+        status = f"error: {e}"
+
+    result_queue.put({
+        "runtime_sec": runtime,
+        "peak_memory_mb": peak_mem_mb,
+        "status": status,
+    })
+
+
+def _run_single(args_tuple):
+    """Worker: generate one synthetic dataset and run one method.
+
+    Returns a dict with runtime and method-only peak memory.
+    """
+    (grid_size, n_cells, n_genes, method, scenario_id, seed, n_high_genes) = args_tuple
+
+    # Imports inside worker keep the parent process lightweight.
+    from evaluation.synthetic import generate_synthetic_data
+    from evaluation.synthetic.scenarios import get_scenario
+
+    scenario = get_scenario(scenario_id)
+    try:
+        # For genes > threshold, generate a smaller base matrix and replicate it.
+        base_n_genes = min(n_genes, GENE_REPLICATION_THRESHOLD)
+        data = generate_synthetic_data(
+            n_cells=n_cells,
+            grid_width=grid_size,
+            grid_height=grid_size,
+            dnb_pitch=0.5,
+            cell_radius=5.0,
+            cell_radius_cv=0.2,
+            n_genes=base_n_genes,
+            n_high_genes=80,
+            ambient_lambda=scenario["ambient_lambda"],
+            ambient_alpha=scenario["ambient_alpha"],
+            empty_fraction=scenario["empty_fraction"],
+            n_cell_types=scenario.get("n_cell_types", 1),
+            marker_fraction=scenario.get("marker_fraction", 0.0),
+            cluster_strength=scenario.get("cluster_strength", 0.5),
+            seed=seed,
+        )
+        data = _expand_genes(data, n_genes)
+        dnb_expr = csr_matrix(data["dnb_expr"].astype(np.float64))
+        n_total_cells = data["true_expr"].shape[1]
+        sub = {
+            "dnb_expr": dnb_expr,
+            "dnb_coords": data["dnb_coords"],
+            "dnb_labels": data["dnb_labels"],
+            "gene_names": np.array([f"gene_{i}" for i in range(n_genes)]),
+            "cell_ids": np.arange(n_total_cells, dtype=np.int64),
+        }
+
+        # Run method in a fresh subprocess so peak memory reflects only the method.
+        result_queue = mp.Queue()
+        p = mp.Process(
+            target=_run_method_worker,
+            args=(sub, method, n_high_genes, result_queue),
+        )
+        p.start()
+        p.join()
+        if p.exitcode != 0:
+            raise RuntimeError(f"Method subprocess exited with code {p.exitcode}")
+        result = result_queue.get()
+
+        runtime = result["runtime_sec"]
+        peak_mem_mb = result["peak_memory_mb"]
+        status = result["status"]
     except Exception as e:
         runtime = float("nan")
         peak_mem_mb = float("nan")
@@ -135,7 +229,7 @@ def _plot_results(df, output_dir, tag):
     plt.close(fig)
 
     # Peak memory vs n_dnbs
-    fig, ax =plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(8, 5))
     for method in methods:
         sub = df[df["method"] == method].sort_values("n_dnbs")
         ax.plot(sub["n_dnbs"], sub["peak_memory_mb"], marker="o", label=method, color=colors[method])
@@ -188,10 +282,6 @@ def main():
         "--plot", action="store_true",
         help="Generate runtime/memory line plots",
     )
-    parser.add_argument(
-        "--n-jobs", type=int, default=1,
-        help="Number of parallel workers (default: 1, sequential)",
-    )
     args = parser.parse_args()
 
     from evaluation.synthetic.scenarios import get_scenario
@@ -219,11 +309,8 @@ def main():
     print(f"Total runs: {len(tasks)}")
     print("-" * 60)
 
-    if args.n_jobs > 1:
-        with mp.Pool(processes=args.n_jobs) as pool:
-            results = pool.map(_run_single, tasks)
-    else:
-        results = [_run_single(t) for t in tasks]
+    # Sequential execution: one grid size / method at a time.
+    results = [_run_single(t) for t in tasks]
 
     df = pd.DataFrame(results)
     out_path = Path(args.output)
