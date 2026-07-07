@@ -118,18 +118,23 @@ def _run_sparkle_worker(temp_dir, n_high_genes, r2_threshold, lambda_grid, max_r
         )
         runtime = time.time() - t0
         post_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # Total peak RSS since process start is more informative for real data
+        # (it includes the loaded subset). We also keep the incremental delta.
+        total_peak_mb = post_kb / 1024.0
         peak_mem_mb = max(0.0, (post_kb - baseline_kb) / 1024.0)
         status = "ok"
         selected_lambda = diag.get("lambda", float("nan"))
     except Exception as e:
         runtime = float("nan")
+        total_peak_mb = float("nan")
         peak_mem_mb = float("nan")
         status = f"error: {e}"
         selected_lambda = float("nan")
 
     result_queue.put({
         "runtime_sec": runtime,
-        "peak_memory_mb": peak_mem_mb,
+        "peak_memory_mb": total_peak_mb,
+        "memory_increment_mb": peak_mem_mb,
         "status": status,
         "lambda": selected_lambda,
     })
@@ -302,6 +307,7 @@ def main():
             "n_empty_dnbs": n_empty,
             "runtime_sec": result["runtime_sec"],
             "peak_memory_mb": result["peak_memory_mb"],
+            "memory_increment_mb": result["memory_increment_mb"],
             "lambda": result["lambda"],
             "status": result["status"],
         })
