@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark SPARKLE runtime and peak memory on MouseBrain real data.
+"""Benchmark SPARKLE runtime and memory on MouseBrain real data.
 
 Loads the MouseBrain GEM once at the user-specified maximum spatial window,
 then extracts progressively smaller windows by arithmetically shrinking the
@@ -8,6 +8,12 @@ This avoids the repeated cost of parsing the raw GEM file.
 
 Only SPARKLE is benchmarked; r2_threshold can be set to 0 to measure pure
 speed without any gene filtering.
+
+Memory columns in the output CSV:
+- data_memory_mb:    RSS increment from loading the data subset in the worker.
+- peak_memory_mb:    RSS increment from running SPARKLE (method-only).
+- total_peak_mb:     Total peak RSS of the worker process (data + SPARKLE).
+                     This is the actual RAM required for the whole step.
 
 Usage example:
     python evaluation/scripts/benchmark_resource.py \
@@ -97,6 +103,10 @@ def _run_sparkle_worker(temp_dir, n_high_genes, r2_threshold, lambda_grid, max_r
     from evaluation.scripts.final_comparison import run_sparkle_method
 
     temp_dir = Path(temp_dir)
+
+    # Measure before data load.
+    before_load_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
     sub = {
         "dnb_expr": load_npz(str(temp_dir / "dnb_expr.npz")),
         "dnb_coords": np.load(temp_dir / "dnb_coords.npy"),
@@ -105,7 +115,9 @@ def _run_sparkle_worker(temp_dir, n_high_genes, r2_threshold, lambda_grid, max_r
         "cell_ids": np.load(temp_dir / "cell_ids.npy"),
     }
 
-    baseline_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # Measure after data load.
+    after_load_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
     t0 = time.time()
     try:
         _, diag = run_sparkle_method(
@@ -117,20 +129,30 @@ def _run_sparkle_worker(temp_dir, n_high_genes, r2_threshold, lambda_grid, max_r
             verbose=False,
         )
         runtime = time.time() - t0
-        post_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        # Method-only peak memory: increment after data loading.
-        peak_mem_mb = max(0.0, (post_kb - baseline_kb) / 1024.0)
+
+        # Measure after SPARKLE.
+        after_sparkle_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+        # Memory breakdown.
+        data_mem_mb = max(0.0, (after_load_kb - before_load_kb) / 1024.0)
+        method_mem_mb = max(0.0, (after_sparkle_kb - after_load_kb) / 1024.0)
+        total_peak_mb = after_sparkle_kb / 1024.0
+
         status = "ok"
         selected_lambda = diag.get("lambda", float("nan"))
     except Exception as e:
         runtime = float("nan")
-        peak_mem_mb = float("nan")
+        data_mem_mb = float("nan")
+        method_mem_mb = float("nan")
+        total_peak_mb = float("nan")
         status = f"error: {e}"
         selected_lambda = float("nan")
 
     result_queue.put({
         "runtime_sec": runtime,
-        "peak_memory_mb": peak_mem_mb,
+        "data_memory_mb": data_mem_mb,
+        "peak_memory_mb": method_mem_mb,
+        "total_peak_mb": total_peak_mb,
         "status": status,
         "lambda": selected_lambda,
     })
@@ -159,10 +181,12 @@ def _plot_results(df, output_dir):
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(df["n_dnbs"], df["peak_memory_mb"], marker="o", color="#3498db")
+    ax.plot(df["n_dnbs"], df["total_peak_mb"], marker="o", color="#3498db", label="Total peak RSS")
+    ax.plot(df["n_dnbs"], df["peak_memory_mb"], marker="s", color="#2ecc71", label="SPARKLE increment")
     ax.set_xlabel("Number of DNBs")
-    ax.set_ylabel("Peak memory (MB)")
-    ax.set_title("SPARKLE peak memory vs data size (MouseBrain)")
+    ax.set_ylabel("Memory (MB)")
+    ax.set_title("SPARKLE memory vs data size (MouseBrain)")
+    ax.legend()
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     fig.savefig(output_dir / "resource_benchmark_memory.png", dpi=150)
@@ -282,7 +306,9 @@ def main():
             if p.exitcode != 0:
                 result = {
                     "runtime_sec": float("nan"),
+                    "data_memory_mb": float("nan"),
                     "peak_memory_mb": float("nan"),
+                    "total_peak_mb": float("nan"),
                     "status": f"subprocess exited with code {p.exitcode}",
                     "lambda": float("nan"),
                 }
@@ -302,7 +328,9 @@ def main():
             "n_cells": n_cells,
             "n_empty_dnbs": n_empty,
             "runtime_sec": result["runtime_sec"],
+            "data_memory_mb": result["data_memory_mb"],
             "peak_memory_mb": result["peak_memory_mb"],
+            "total_peak_mb": result["total_peak_mb"],
             "lambda": result["lambda"],
             "status": result["status"],
         })
