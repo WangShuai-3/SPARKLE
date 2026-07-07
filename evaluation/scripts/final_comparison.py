@@ -134,9 +134,16 @@ def run_synthetic_comparison(data, n_genes=500, methods=None, lambda_grid=None, 
 
     results = {}
     if lambda_grid is None:
-        lambda_grid_sp = [10, 20, 30, 50, 70, 100, 150, 200, 300, 500]
+        lambda_grid_sp = [10, 20, 30, 50, 70, 100, 150, 200, 300]
     else:
         lambda_grid_sp = lambda_grid
+
+    # If the scenario has a true lambda larger than the grid, extend the grid.
+    scenario_lambda = int(round(data.get("true_lambda", 0)))
+    if scenario_lambda > 0 and scenario_lambda > max(lambda_grid_sp):
+        print(f"  Scenario lambda ({scenario_lambda} um) exceeds grid max; "
+              f"extending lambda grid to {scenario_lambda} um")
+        lambda_grid_sp = sorted(set(lambda_grid_sp + [scenario_lambda]))
     if r2_threshold is None:
         r2_threshold_sp = 0.01
     else:
@@ -2467,8 +2474,8 @@ def main():
     parser.add_argument("--n-high-genes", type=int, default=None,
                         help="Number of top genes (default: 200)")
     parser.add_argument("--lambda-grid", type=int, nargs="+",
-                        default=[10, 20, 30, 50, 70, 100, 150, 200, 300, 500],
-                        help="Lambda candidates in um for SPARKLE and SpatialSoupX (default: 10 20 30 50 70 100 150 200 300 500)")
+                        default=[10, 20, 30, 50, 70, 100, 150, 200, 300],
+                        help="Lambda candidates in um for SPARKLE and SpatialSoupX (default: 10 20 30 50 70 100 150 200 300)")
     parser.add_argument("--r2-threshold", type=float, default=0.01,
                         help="Minimum weighted R^2 for SPARKLE gene correction (default: 0.01)")
     parser.add_argument("--max-radius", type=float, default=None,
