@@ -22,6 +22,13 @@ import scanpy as sc
 from pysctransform import SCTransform
 from scipy.spatial import cKDTree
 
+# Optional line-by-line memory profiler; falls back to no-op if not installed.
+try:
+    from memory_profiler import profile
+except ImportError:
+    def profile(func):
+        return func
+
 
 def compute_neighbor_stats(cell_centroids, sstin_mask, radius=50.0):
     """Find non-sstIN neighbors within radius of any sstIN cell.
@@ -1383,6 +1390,7 @@ def _build_sparkle_var_data(n_total_genes: int, diag: dict, r2_threshold: float)
     }
 
 
+@profile
 def run_sparkle_method(sub, verbose=True, bin_size_um=25.0, spot_pitch_um=0.5, n_high_genes=500, lambda_grid=None, r2_threshold=None, max_radius=None):
     """运行 SPARKLE（本方法）。
 

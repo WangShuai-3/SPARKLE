@@ -9,27 +9,26 @@ This avoids the repeated cost of parsing the raw GEM file.
 Only SPARKLE is benchmarked; r2_threshold can be set to 0 to measure pure
 speed without any gene filtering.
 
-Memory columns in the output CSV:
-- data_memory_mb:    RSS increment from loading the data subset in the worker.
-- peak_memory_mb:    RSS increment from running SPARKLE (method-only).
-- total_peak_mb:     Total peak RSS of the worker process (data + SPARKLE).
-                     This is the actual RAM required for the whole step.
+SPARKLE is run in the main process with ``@profile`` from ``memory_profiler``;
+the line-by-line profile for each run is saved under
+``evaluation/reports/resource_profiles/`` and the maximum SPARKLE memory
+increment (above the already-loaded data) is recorded in the CSV.
 
 Usage example:
     python evaluation/scripts/benchmark_resource.py \
-        --x-range 10000 20000 \
-        --y-range 2000 22000 \
+        --x-range 6000 20000 \
+        --y-range 2000 15000 \
         --n-genes 10000 \
         --n-high-genes 10000 \
         --r2-threshold 0 \
-        --n-runs 5
+        --n-runs 8
 """
 
 import argparse
-import multiprocessing as mp
-import resource
+import gc
+import io
+import re
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -38,18 +37,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import numpy as np
 import pandas as pd
-from scipy.sparse import save_npz, load_npz
 
 from evaluation.scripts.final_comparison import (
     load_mousebrain_data,
     subsample_data,
     run_sparkle_method,
 )
-
-
-# Use spawn so the child process does not inherit (copy-on-write) the parent's
-# full data matrix; this gives a cleaner peak-memory measurement for SPARKLE.
-mp.set_start_method("spawn", force=True)
 
 
 def _shrink_range(x_range, y_range, n_runs, step):
@@ -89,38 +82,66 @@ def _extract_window(data, x_range, y_range):
     }
 
 
-def _run_sparkle_worker(temp_dir, n_high_genes, r2_threshold, lambda_grid, max_radius, result_queue):
-    """Run SPARKLE in an isolated subprocess on the subset written to ``temp_dir``."""
-    import resource
-    import sys
-    from pathlib import Path
+def _parse_memory_profile(profile_text):
+    """Parse memory_profiler text output and return memory statistics.
 
-    from scipy.sparse import load_npz
+    Returns:
+        dict with:
+          - baseline_mb: Mem usage at the first profiled line.
+          - peak_mb: max(Mem usage) during the function.
+          - sparkle_increment_mb: peak_mb - baseline_mb (SPARKLE-only peak).
+          - max_increment_mb: largest single-line Increment.
+    """
+    # Format: "Line #    Mem usage    Increment  Occurrences   Line Contents"
+    mem_usages = []
+    increments = []
+    for line in profile_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("Line") or line.startswith("=="):
+            continue
+        # Each data line: line_no  Mem_usage  MiB  Increment  MiB  Occurrences  Line Contents
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        try:
+            mem_usage = float(parts[1])
+            increment = float(parts[3])
+            mem_usages.append(mem_usage)
+            increments.append(increment)
+        except ValueError:
+            continue
 
-    # Ensure imports work in spawn context.
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    if not mem_usages:
+        return {
+            "baseline_mb": float("nan"),
+            "peak_mb": float("nan"),
+            "sparkle_increment_mb": float("nan"),
+            "max_increment_mb": float("nan"),
+        }
 
-    from evaluation.scripts.final_comparison import run_sparkle_method
-
-    temp_dir = Path(temp_dir)
-
-    # Measure before data load.
-    before_load_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-
-    sub = {
-        "dnb_expr": load_npz(str(temp_dir / "dnb_expr.npz")),
-        "dnb_coords": np.load(temp_dir / "dnb_coords.npy"),
-        "dnb_labels": np.load(temp_dir / "dnb_labels.npy"),
-        "gene_names": np.load(temp_dir / "gene_names.npy"),
-        "cell_ids": np.load(temp_dir / "cell_ids.npy"),
+    baseline = mem_usages[0]
+    peak = max(mem_usages)
+    return {
+        "baseline_mb": baseline,
+        "peak_mb": peak,
+        "sparkle_increment_mb": peak - baseline,
+        "max_increment_mb": max(increments) if increments else 0.0,
     }
 
-    # Measure after data load.
-    after_load_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+def _run_sparkle_profiled(sub, n_high_genes, r2_threshold, lambda_grid, max_radius):
+    """Run SPARKLE in the main process and capture memory_profiler output.
+
+    Returns:
+        (runtime_sec, diag, profile_text, parsed_mem_dict)
+    """
+    old_stdout = sys.stdout
+    captured = io.StringIO()
 
     t0 = time.time()
     try:
-        _, diag = run_sparkle_method(
+        sys.stdout = captured
+        corrected, diag = run_sparkle_method(
             sub,
             n_high_genes=n_high_genes,
             r2_threshold=r2_threshold,
@@ -129,33 +150,25 @@ def _run_sparkle_worker(temp_dir, n_high_genes, r2_threshold, lambda_grid, max_r
             verbose=False,
         )
         runtime = time.time() - t0
-
-        # Measure after SPARKLE.
-        after_sparkle_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-
-        # Memory breakdown.
-        data_mem_mb = max(0.0, (after_load_kb - before_load_kb) / 1024.0)
-        method_mem_mb = max(0.0, (after_sparkle_kb - after_load_kb) / 1024.0)
-        total_peak_mb = after_sparkle_kb / 1024.0
-
         status = "ok"
-        selected_lambda = diag.get("lambda", float("nan"))
     except Exception as e:
-        runtime = float("nan")
-        data_mem_mb = float("nan")
-        method_mem_mb = float("nan")
-        total_peak_mb = float("nan")
+        runtime = time.time() - t0
+        diag = {}
         status = f"error: {e}"
-        selected_lambda = float("nan")
+    finally:
+        sys.stdout = old_stdout
 
-    result_queue.put({
-        "runtime_sec": runtime,
-        "data_memory_mb": data_mem_mb,
-        "peak_memory_mb": method_mem_mb,
-        "total_peak_mb": total_peak_mb,
-        "status": status,
-        "lambda": selected_lambda,
-    })
+    profile_text = captured.getvalue()
+    mem_stats = _parse_memory_profile(profile_text)
+
+    # Print status back to real stdout.
+    if status == "ok":
+        print(f"    Done in {runtime:.1f}s, λ={diag.get('lambda', float('nan')):.0f}μm, "
+              f"SPARKLE peak +{mem_stats['sparkle_increment_mb']:.1f} MiB")
+    else:
+        print(f"    ERROR: {status}")
+
+    return runtime, diag, profile_text, mem_stats, status
 
 
 def _plot_results(df, output_dir):
@@ -181,12 +194,10 @@ def _plot_results(df, output_dir):
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(df["n_dnbs"], df["total_peak_mb"], marker="o", color="#3498db", label="Total peak RSS")
-    ax.plot(df["n_dnbs"], df["peak_memory_mb"], marker="s", color="#2ecc71", label="SPARKLE increment")
+    ax.plot(df["n_dnbs"], df["sparkle_peak_mb"], marker="o", color="#3498db")
     ax.set_xlabel("Number of DNBs")
     ax.set_ylabel("Memory (MB)")
-    ax.set_title("SPARKLE memory vs data size (MouseBrain)")
-    ax.legend()
+    ax.set_title("SPARKLE peak memory increment vs data size (MouseBrain)")
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     fig.savefig(output_dir / "resource_benchmark_memory.png", dpi=150)
@@ -239,6 +250,11 @@ def main():
         help="Output CSV path",
     )
     parser.add_argument(
+        "--profile-dir", type=str,
+        default="evaluation/reports/resource_profiles",
+        help="Directory to save per-run memory_profiler text outputs",
+    )
+    parser.add_argument(
         "--plot", action="store_true",
         help="Generate runtime/memory line plots",
     )
@@ -267,6 +283,9 @@ def main():
 
     # 3. Benchmark SPARKLE on arithmetically shrinking windows.
     print("\n[3/3] Benchmarking SPARKLE...")
+    profile_dir = Path(args.profile_dir)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
     results = []
     for i in range(args.n_runs):
         x_range_i, y_range_i = _shrink_range(x_range, y_range, args.n_runs, i)
@@ -281,39 +300,17 @@ def main():
               f"{window['dnb_expr'].shape[1]} DNBs ({n_cell_dnbs} cell + {n_empty} empty), "
               f"{n_cells} cells")
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            save_npz(tmpdir / "dnb_expr.npz", window["dnb_expr"])
-            np.save(tmpdir / "dnb_coords.npy", window["dnb_coords"])
-            np.save(tmpdir / "dnb_labels.npy", window["dnb_labels"])
-            np.save(tmpdir / "gene_names.npy", window["gene_names"])
-            np.save(tmpdir / "cell_ids.npy", window["cell_ids"])
+        runtime, diag, profile_text, mem_stats, status = _run_sparkle_profiled(
+            window,
+            n_high_genes=args.n_high_genes,
+            r2_threshold=args.r2_threshold,
+            lambda_grid=args.lambda_grid,
+            max_radius=args.max_radius,
+        )
 
-            result_queue = mp.Queue()
-            p = mp.Process(
-                target=_run_sparkle_worker,
-                args=(
-                    str(tmpdir),
-                    args.n_high_genes,
-                    args.r2_threshold,
-                    args.lambda_grid,
-                    args.max_radius,
-                    result_queue,
-                ),
-            )
-            p.start()
-            p.join()
-            if p.exitcode != 0:
-                result = {
-                    "runtime_sec": float("nan"),
-                    "data_memory_mb": float("nan"),
-                    "peak_memory_mb": float("nan"),
-                    "total_peak_mb": float("nan"),
-                    "status": f"subprocess exited with code {p.exitcode}",
-                    "lambda": float("nan"),
-                }
-            else:
-                result = result_queue.get()
+        # Save the full memory_profiler output.
+        profile_path = profile_dir / f"run_{i + 1}.txt"
+        profile_path.write_text(profile_text, encoding="utf-8")
 
         results.append({
             "run": i + 1,
@@ -327,13 +324,17 @@ def main():
             "n_genes": window["dnb_expr"].shape[0],
             "n_cells": n_cells,
             "n_empty_dnbs": n_empty,
-            "runtime_sec": result["runtime_sec"],
-            "data_memory_mb": result["data_memory_mb"],
-            "peak_memory_mb": result["peak_memory_mb"],
-            "total_peak_mb": result["total_peak_mb"],
-            "lambda": result["lambda"],
-            "status": result["status"],
+            "runtime_sec": runtime,
+            "baseline_mb": mem_stats["baseline_mb"],
+            "sparkle_peak_mb": mem_stats["sparkle_increment_mb"],
+            "max_increment_mb": mem_stats["max_increment_mb"],
+            "lambda": diag.get("lambda", float("nan")) if status == "ok" else float("nan"),
+            "status": status,
         })
+
+        # Release memory before the next run.
+        del window
+        gc.collect()
 
     df = pd.DataFrame(results)
     out_path = Path(args.output)
@@ -342,6 +343,7 @@ def main():
 
     print(f"\n{'=' * 60}")
     print(f"Saved CSV: {out_path}")
+    print(f"Saved profiles: {profile_dir}")
     print(f"{'=' * 60}")
     print(df.to_string(index=False))
 
