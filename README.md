@@ -41,7 +41,7 @@ corrected, diagnostics = model.fit_transform(
 
 ## Loading Data
 
-SPARKLE provides two convenience loaders that return a standard dictionary with
+SPARKLE provides convenience loaders that return a standard dictionary with
 keys ``spot_expr``, ``spot_coords``, ``spot_labels``, ``gene_names``, and
 ``cell_ids``.
 
@@ -81,6 +81,26 @@ corrected, diagnostics = model.fit_transform(
     data["spot_expr"], data["spot_coords"], data["spot_labels"]
 )
 ```
+
+### RYTools GEM + scGEM
+
+```python
+from stambient.io_utils import load_RYTools_data
+
+data = load_RYTools_data(
+    "sample.gem.gz",          # full GEM (all DNBs, no cell labels)
+    "sample.scgem.gz",        # cell-labelled scGEM (no background DNBs)
+    gene_col="geneID",
+    count_col="MIDCounts",
+    cell_label_col="cell",
+)
+```
+
+The RYTools loader merges an unlabeled full GEM with a matching scGEM file.
+DNBs present in the scGEM are assigned their cell labels; all other DNBs are
+marked as empty (`-1`) and used as built-in ambient probes.  Column names and
+delimiters are configurable.  See `examples/RYTools_example.md` for a complete
+workflow including h5ad export and downstream analysis in R/Seurat v4.
 
 ## Algorithm
 

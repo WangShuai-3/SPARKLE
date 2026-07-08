@@ -9,6 +9,373 @@ from typing import Optional, Tuple, Dict, Any, Union, List, Set
 import numpy as np
 from scipy.sparse import csr_matrix, issparse
 
+def _load_RYTools_label_map(
+    scgem_path: Union[str, Path],
+    x_col: str = "x",
+    y_col: str = "y",
+    cell_label_col: str = "cell",
+    empty_labels: Optional[Union[int, List[int], Set[int]]] = None,
+    sep: Optional[str] = None,
+    verbose: bool = True,
+) -> Dict[Tuple[int, int], int]:
+    """Build a (x, y) -> original cell-id map from an RYTools-style scGEM file.
+
+    The scGEM file is expected to contain cell-labelled DNBs only; any rows
+    whose ``cell_label_col`` value is in ``empty_labels`` are skipped.  DNBs
+    not present in the map will be treated as empty/background when the full
+    GEM is loaded.
+
+    Args:
+        scgem_path: Path to the scGEM file (plain text or ``.gz``).
+        x_col: Name of the x-coordinate column.
+        y_col: Name of the y-coordinate column.
+        cell_label_col: Name of the cell-label column.
+        empty_labels: Values that indicate an empty/background DNB. Defaults to
+            ``{0, -1}``. Can be a single int or a list/set of ints.
+        sep: Field delimiter. Auto-detected if None.
+        verbose: Print progress messages.
+
+    Returns:
+        Dictionary mapping ``(x, y)`` tuples to original cell IDs.
+    """
+    scgem_path = Path(scgem_path)
+    if not scgem_path.exists():
+        raise FileNotFoundError(f"scGEM file not found: {scgem_path}")
+
+    empty_set = {str(x) for x in _normalize_empty_labels(empty_labels)}
+
+    if verbose:
+        print(f"Building cell label map from {scgem_path.name}...")
+
+    t0 = time.time()
+    with _open_text_file(scgem_path) as f:
+        header_line = None
+        for line in f:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            header_line = stripped
+            break
+
+    if header_line is None:
+        raise ValueError(f"No valid header found in {scgem_path}")
+
+    sep = _detect_delimiter(header_line, sep)
+    header = [h.strip() for h in header_line.split(sep)]
+    required_cols = [x_col, y_col, cell_label_col]
+    missing = [c for c in required_cols if c not in header]
+    if missing:
+        raise ValueError(
+            f"Missing required columns in scGEM: {missing}. "
+            f"Available columns: {header}"
+        )
+
+    col_idx = {c: i for i, c in enumerate(header)}
+    ix = col_idx[x_col]
+    iy = col_idx[y_col]
+    il = col_idx[cell_label_col]
+
+    label_map: Dict[Tuple[int, int], int] = {}
+    n_rows = 0
+    with _open_text_file(scgem_path) as f:
+        # skip header and any comments before it
+        for line in f:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            break
+
+        for line in f:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+
+            parts = stripped.split(sep)
+            if len(parts) <= max(ix, iy, il):
+                continue
+
+            x = int(parts[ix])
+            y = int(parts[iy])
+            label = parts[il]
+
+            if label in empty_set:
+                continue
+
+            label_map[(x, y)] = label
+            n_rows += 1
+            if verbose and n_rows % 5_000_000 == 0:
+                print(f"  {n_rows:,} labelled DNBs, {len(label_map):,} unique positions...")
+
+    if verbose:
+        print(f"  {len(label_map):,} unique DNB positions with cell labels "
+              f"({n_rows:,} rows) in {time.time() - t0:.1f}s")
+
+    return label_map
+
+
+def _load_gem_chunked(
+    gem_path: Union[str, Path],
+    x_col: str = "x",
+    y_col: str = "y",
+    gene_col: str = "geneID",
+    count_col: str = "MIDCounts",
+    sep: Optional[str] = None,
+    nrows_per_chunk: int = 500_000,
+):
+    """Generator yielding pandas DataFrames of a GEM file in chunks.
+
+    Args:
+        gem_path: Path to the GEM file (plain text or ``.gz``).
+        x_col, y_col, gene_col, count_col: Column names.
+        sep: Field delimiter. Auto-detected if None.
+        nrows_per_chunk: Number of rows per chunk.
+
+    Yields:
+        pandas.DataFrame chunks with all original columns as strings.
+    """
+    import pandas as pd
+
+    gem_path = Path(gem_path)
+    if not gem_path.exists():
+        raise FileNotFoundError(f"GEM file not found: {gem_path}")
+
+    with _open_text_file(gem_path) as f:
+        header_line = None
+        for line in f:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            header_line = stripped
+            break
+
+    if header_line is None:
+        raise ValueError(f"No valid header found in {gem_path}")
+
+    sep = _detect_delimiter(header_line, sep)
+    header = [h.strip() for h in header_line.split(sep)]
+    required_cols = [x_col, y_col, gene_col, count_col]
+    missing = [c for c in required_cols if c not in header]
+    if missing:
+        raise ValueError(
+            f"Missing required columns in GEM: {missing}. "
+            f"Available columns: {header}"
+        )
+
+    with _open_text_file(gem_path) as f:
+        # skip header
+        for line in f:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            break
+
+        chunk_rows = []
+        for line in f:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            chunk_rows.append(stripped.split(sep))
+            if len(chunk_rows) >= nrows_per_chunk:
+                yield pd.DataFrame(chunk_rows, columns=header)
+                chunk_rows = []
+        if chunk_rows:
+            yield pd.DataFrame(chunk_rows, columns=header)
+
+
+def _build_dnb_matrix_from_gem(
+    gem_path: Union[str, Path],
+    label_map: Dict[Tuple[int, int], Any],
+    gene_col: str = "geneID",
+    x_col: str = "x",
+    y_col: str = "y",
+    count_col: str = "MIDCounts",
+    sep: Optional[str] = None,
+    nrows_per_chunk: int = 500_000,
+    verbose: bool = True,
+) -> Tuple[csr_matrix, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build a genes × DNBs sparse matrix from a GEM file and a label map.
+
+    DNBs present in ``label_map`` are assigned their original cell ID; all
+    other DNBs are marked as empty (``-1``).  Original cell IDs are then
+    remapped to a contiguous 0..n_cells-1 range for SPARKLE.
+
+    Returns:
+        - spot_expr: [n_genes × n_dnbs] CSR matrix of UMI counts.
+        - spot_coords: [n_dnbs × 2] coordinates.
+        - spot_labels: [n_dnbs] remapped cell indices; -1 for empty.
+        - gene_names: array of gene names.
+        - cell_ids: sorted array of original cell IDs.
+    """
+    import pandas as pd
+    from scipy.sparse import lil_matrix
+
+    gem_path = Path(gem_path)
+    if not gem_path.exists():
+        raise FileNotFoundError(f"GEM file not found: {gem_path}")
+
+    if verbose:
+        print(f"Pass 1: scanning GEM vocabulary from {gem_path.name}...")
+
+    gene_set: Set[str] = set()
+    dnb_set: Set[Tuple[int, int]] = set()
+
+    for chunk in _load_gem_chunked(gem_path, x_col, y_col, gene_col, count_col, sep, nrows_per_chunk):
+        gene_set.update(chunk[gene_col].unique())
+        dnb_set.update(zip(chunk[x_col].astype(int), chunk[y_col].astype(int)))
+        if verbose and len(gene_set) % 2000 == 0:
+            print(f"  Genes: {len(gene_set)}, DNBs: {len(dnb_set)}")
+
+    genes = sorted(gene_set)
+    dnb_list = sorted(dnb_set)
+    gene_to_idx = {g: i for i, g in enumerate(genes)}
+    dnb_to_idx = {d: i for i, d in enumerate(dnb_list)}
+
+    n_genes = len(genes)
+    n_dnbs = len(dnb_list)
+
+    # Remap original cell IDs to 0-based indices
+    all_cells = sorted(set(label_map.values()))
+    cell_to_idx = {c: i for i, c in enumerate(all_cells)}
+    n_cells = len(all_cells)
+
+    n_matched = sum(1 for d in dnb_list if d in label_map)
+    n_empty = n_dnbs - n_matched
+    if verbose:
+        print(f"  Final: {n_genes} genes, {n_dnbs} DNBs "
+              f"({n_matched} cell, {n_empty} empty), {n_cells} cells")
+
+    spot_coords = np.array(dnb_list, dtype=np.float64)
+    spot_labels = np.full(n_dnbs, -1, dtype=np.int32)
+    for i, d in enumerate(dnb_list):
+        if d in label_map:
+            spot_labels[i] = cell_to_idx[label_map[d]]
+
+    if verbose:
+        print("Pass 2: building sparse matrix from GEM...")
+
+    dnb_expr = lil_matrix((n_genes, n_dnbs), dtype=np.float64)
+    total_rows = 0
+
+    for chunk in _load_gem_chunked(gem_path, x_col, y_col, gene_col, count_col, sep, nrows_per_chunk):
+        x_arr = chunk[x_col].astype(int).values
+        y_arr = chunk[y_col].astype(int).values
+        count_arr = chunk[count_col].astype(float).values
+        gene_arr = chunk[gene_col].values
+
+        for i in range(len(chunk)):
+            g_idx = gene_to_idx[gene_arr[i]]
+            d_idx = dnb_to_idx[(x_arr[i], y_arr[i])]
+            dnb_expr[g_idx, d_idx] += count_arr[i]
+
+        total_rows += len(chunk)
+        if verbose and total_rows % 5_000_000 == 0:
+            print(f"  Processed {total_rows:,} rows...")
+
+    if verbose:
+        print(f"  Total rows: {total_rows:,}, nonzeros: {dnb_expr.nnz:,}")
+
+    return dnb_expr.tocsr(), spot_coords, spot_labels, np.array(genes), np.array(all_cells)
+
+
+def load_RYTools_data(
+    gem_path: Union[str, Path],
+    scgem_path: Union[str, Path],
+    gene_col: str = "geneID",
+    x_col: str = "x",
+    y_col: str = "y",
+    count_col: str = "MIDCounts",
+    cell_label_col: str = "cell",
+    empty_labels: Optional[Union[int, List[int], Set[int]]] = None,
+    gem_sep: Optional[str] = None,
+    scgem_sep: Optional[str] = None,
+    pitch_um: Optional[float] = None,
+    nrows_per_chunk: int = 500_000,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """Load RYTools-style Stereo-seq data from a GEM + scGEM file pair.
+
+    RYTools pipelines typically produce:
+      - A full GEM file without cell labels (all DNBs, including background).
+      - A scGEM file that contains only cell-labelled DNBs (no background rows).
+
+    This loader merges the two files: it builds the full genes × DNBs expression
+    matrix from the GEM file, assigns cell labels from the scGEM file, and
+    marks any DNB absent from the scGEM as empty (``-1``).
+
+    Args:
+        gem_path: Path to the full GEM file (plain text or ``.gz``).
+        scgem_path: Path to the scGEM file with cell labels (plain text or
+            ``.gz``).
+        gene_col: Name of the gene-ID column in both files.
+        x_col: Name of the x-coordinate column in both files.
+        y_col: Name of the y-coordinate column in both files.
+        count_col: Name of the UMI count column in the GEM file.
+        cell_label_col: Name of the cell-label column in the scGEM file.
+        empty_labels: Values that indicate an empty/background DNB in the
+            scGEM file. Defaults to ``{0, -1}``. Only relevant if the scGEM
+            happens to contain background rows.
+        gem_sep: Field delimiter for the GEM file. Auto-detected if None.
+        scgem_sep: Field delimiter for the scGEM file. Auto-detected if None.
+        pitch_um: If provided, scale integer coordinates by this factor to
+            convert them to micrometers.  Defaults to ``1.0`` (keep raw
+            coordinates). Use ``0.5`` for Stereo-seq DNB-index coordinates.
+        nrows_per_chunk: Number of rows to read per chunk when scanning the
+            (potentially very large) GEM file.
+        verbose: Print progress messages.
+
+    Returns:
+        Dictionary with keys:
+
+        - ``spot_expr``: [n_genes × n_spots] ``csr_matrix`` of UMI counts.
+        - ``spot_coords``: [n_spots × 2] spot coordinates (in µm if ``pitch_um``
+          was provided, otherwise raw units).
+        - ``spot_labels``: [n_spots] cell indices; ``-1`` for empty spots.
+        - ``gene_names``: array of gene names.
+        - ``cell_ids``: sorted array of original cell IDs.
+    """
+    t0 = time.time()
+
+    label_map = _load_RYTools_label_map(
+        scgem_path,
+        x_col=x_col,
+        y_col=y_col,
+        cell_label_col=cell_label_col,
+        empty_labels=empty_labels,
+        sep=scgem_sep,
+        verbose=verbose,
+    )
+
+    spot_expr, spot_coords, spot_labels, gene_names, cell_ids = _build_dnb_matrix_from_gem(
+        gem_path,
+        label_map,
+        gene_col=gene_col,
+        x_col=x_col,
+        y_col=y_col,
+        count_col=count_col,
+        sep=gem_sep,
+        nrows_per_chunk=nrows_per_chunk,
+        verbose=verbose,
+    )
+
+    if pitch_um is not None and pitch_um != 1.0:
+        if verbose:
+            print(f"Scaling coordinates by pitch_um={pitch_um}...")
+        spot_coords = spot_coords * pitch_um
+
+    if verbose:
+        n_empty = int((spot_labels < 0).sum())
+        n_cell_dnb = int(spot_labels.shape[0]) - n_empty
+        print(f"Loaded {spot_expr.shape[0]} genes, {spot_expr.shape[1]} spots "
+              f"({n_cell_dnb} cell + {n_empty} empty), "
+              f"{len(cell_ids)} cells in {time.time() - t0:.1f}s")
+
+    return {
+        "spot_expr": spot_expr,
+        "spot_coords": spot_coords,
+        "spot_labels": spot_labels,
+        "gene_names": gene_names,
+        "cell_ids": cell_ids,
+    }
 
 def check_inputs(
     expression: np.ndarray,
