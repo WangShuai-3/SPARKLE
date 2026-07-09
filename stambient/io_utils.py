@@ -9,6 +9,12 @@ from typing import Optional, Tuple, Dict, Any, Union, List, Set
 import numpy as np
 from scipy.sparse import csr_matrix, issparse
 
+
+def _pack_xy(x: int, y: int) -> int:
+    """Pack two int32 coordinates into one integer key for fast dict lookup."""
+    return ((int(x) & 0xFFFFFFFF) << 32) | (int(y) & 0xFFFFFFFF)
+
+
 def _load_RYTools_label_map(
     scgem_path: Union[str, Path],
     x_col: str = "x",
@@ -17,7 +23,7 @@ def _load_RYTools_label_map(
     empty_labels: Optional[Union[int, List[int], Set[int]]] = None,
     sep: Optional[str] = None,
     verbose: bool = True,
-) -> Dict[Tuple[int, int], int]:
+) -> Dict[int, int]:
     """Build a (x, y) -> original cell-id map from an RYTools-style scGEM file.
 
     The scGEM file is expected to contain cell-labelled DNBs only; any rows
@@ -36,7 +42,7 @@ def _load_RYTools_label_map(
         verbose: Print progress messages.
 
     Returns:
-        Dictionary mapping ``(x, y)`` tuples to original cell IDs.
+        Dictionary mapping packed ``(x, y)`` integer keys to original cell IDs.
     """
     scgem_path = Path(scgem_path)
     if not scgem_path.exists():
@@ -75,7 +81,7 @@ def _load_RYTools_label_map(
     iy = col_idx[y_col]
     il = col_idx[cell_label_col]
 
-    label_map: Dict[Tuple[int, int], int] = {}
+    label_map: Dict[int, int] = {}
     n_rows = 0
     with _open_text_file(scgem_path) as f:
         # skip header and any comments before it
@@ -101,7 +107,7 @@ def _load_RYTools_label_map(
             if label in empty_set:
                 continue
 
-            label_map[(x, y)] = label
+            label_map[_pack_xy(x, y)] = label
             n_rows += 1
             if verbose and n_rows % 5_000_000 == 0:
                 print(f"  {n_rows:,} labelled DNBs, {len(label_map):,} unique positions...")
@@ -184,7 +190,7 @@ def _load_gem_chunked(
 
 def _build_dnb_matrix_from_gem(
     gem_path: Union[str, Path],
-    label_map: Dict[Tuple[int, int], Any],
+    label_map: Dict[int, Any],
     gene_col: str = "geneID",
     x_col: str = "x",
     y_col: str = "y",
@@ -207,74 +213,119 @@ def _build_dnb_matrix_from_gem(
         - cell_ids: sorted array of original cell IDs.
     """
     import pandas as pd
-    from scipy.sparse import lil_matrix
+    from scipy.sparse import coo_matrix
 
     gem_path = Path(gem_path)
     if not gem_path.exists():
         raise FileNotFoundError(f"GEM file not found: {gem_path}")
 
     if verbose:
-        print(f"Pass 1: scanning GEM vocabulary from {gem_path.name}...")
+        print(f"Single-pass loading GEM from {gem_path.name}...")
 
-    gene_set: Set[str] = set()
-    dnb_set: Set[Tuple[int, int]] = set()
-
-    for chunk in _load_gem_chunked(gem_path, x_col, y_col, gene_col, count_col, sep, nrows_per_chunk):
-        gene_set.update(chunk[gene_col].unique())
-        dnb_set.update(zip(chunk[x_col].astype(int), chunk[y_col].astype(int)))
-        if verbose and len(gene_set) % 2000 == 0:
-            print(f"  Genes: {len(gene_set)}, DNBs: {len(dnb_set)}")
-
-    genes = sorted(gene_set)
-    dnb_list = sorted(dnb_set)
-    gene_to_idx = {g: i for i, g in enumerate(genes)}
-    dnb_to_idx = {d: i for i, d in enumerate(dnb_list)}
-
-    n_genes = len(genes)
-    n_dnbs = len(dnb_list)
-
-    # Remap original cell IDs to 0-based indices
-    all_cells = sorted(set(label_map.values()))
-    cell_to_idx = {c: i for i, c in enumerate(all_cells)}
-    n_cells = len(all_cells)
-
-    n_matched = sum(1 for d in dnb_list if d in label_map)
-    n_empty = n_dnbs - n_matched
-    if verbose:
-        print(f"  Final: {n_genes} genes, {n_dnbs} DNBs "
-              f"({n_matched} cell, {n_empty} empty), {n_cells} cells")
-
-    spot_coords = np.array(dnb_list, dtype=np.float64)
-    spot_labels = np.full(n_dnbs, -1, dtype=np.int32)
-    for i, d in enumerate(dnb_list):
-        if d in label_map:
-            spot_labels[i] = cell_to_idx[label_map[d]]
-
-    if verbose:
-        print("Pass 2: building sparse matrix from GEM...")
-
-    dnb_expr = lil_matrix((n_genes, n_dnbs), dtype=np.float64)
+    t0 = time.time()
+    gene_to_idx: Dict[str, int] = {}  # gene 名到矩阵行号的动态映射，避免先扫一遍收集所有 gene
+    genes: List[str] = []  # 按首次出现顺序保存 gene 名，后续作为 gene_names 返回
+    dnb_to_idx: Dict[int, int] = {}  # packed DNB 坐标到矩阵列号的动态映射，避免千万级 tuple key 开销
+    dnb_x: List[int] = []  # 按首次出现顺序保存 DNB x 坐标，后续和 y 合并为 spot_coords
+    dnb_y: List[int] = []  # 按首次出现顺序保存 DNB y 坐标，后续和 x 合并为 spot_coords
+    row_chunks: List[np.ndarray] = []  # 每个 chunk 的 COO 行索引数组；用 numpy 数组比逐元素 Python list 更省内存
+    col_chunks: List[np.ndarray] = []  # 每个 chunk 的 COO 列索引数组；最后一次性 concatenate
+    data_chunks: List[np.ndarray] = []  # 每个 chunk 的 count 数组；COO 转 CSR 时会自动合并重复项
     total_rows = 0
 
     for chunk in _load_gem_chunked(gem_path, x_col, y_col, gene_col, count_col, sep, nrows_per_chunk):
+        n_chunk = len(chunk)
         x_arr = chunk[x_col].astype(int).values
         y_arr = chunk[y_col].astype(int).values
-        count_arr = chunk[count_col].astype(float).values
-        gene_arr = chunk[gene_col].values
+        count_arr = chunk[count_col].astype(np.float64).values
+        gene_arr = chunk[gene_col].astype(str).values
 
-        for i in range(len(chunk)):
-            g_idx = gene_to_idx[gene_arr[i]]
-            d_idx = dnb_to_idx[(x_arr[i], y_arr[i])]
-            dnb_expr[g_idx, d_idx] += count_arr[i]
+        gene_codes, gene_uniques = pd.factorize(gene_arr, sort=False)  # 当前 chunk 内 gene 编码，避免逐行查 gene 字典
+        gene_chunk_map = np.empty(len(gene_uniques), dtype=np.int32)  # chunk 内 gene code -> 全局 gene index
+        for local_idx, gene in enumerate(gene_uniques):
+            gene = str(gene)  # pandas unique 可能返回 numpy 字符串，统一成 Python str 作为字典 key
+            g_idx = gene_to_idx.get(gene)  # 查询当前 gene 是否已经分配过矩阵行号
+            if g_idx is None:
+                g_idx = len(genes)  # 新 gene 使用下一个行号
+                gene_to_idx[gene] = g_idx  # 记录 gene -> 行号
+                genes.append(gene)  # 保存 gene 名
+            gene_chunk_map[local_idx] = g_idx  # 保存当前 chunk gene code 对应的全局行号
+        rows = gene_chunk_map[gene_codes]  # 向量化得到当前 chunk 每一行的 COO 行索引
 
-        total_rows += len(chunk)
+        x_u64 = x_arr.astype(np.uint64, copy=False)  # x 坐标转为 uint64，便于向量化 packed key
+        y_u64 = y_arr.astype(np.uint64, copy=False)  # y 坐标转为 uint64，便于向量化 packed key
+        dnb_keys = ((x_u64 & np.uint64(0xFFFFFFFF)) << np.uint64(32)) | (y_u64 & np.uint64(0xFFFFFFFF))  # 向量化 packed DNB key
+        dnb_codes, dnb_uniques = pd.factorize(dnb_keys, sort=False)  # 当前 chunk 内 DNB 编码，减少逐行查 DNB 字典
+        _, first_pos = np.unique(dnb_codes, return_index=True)  # 每个 chunk-local DNB 第一次出现的位置，用于记录原始 x/y
+        dnb_chunk_map = np.empty(len(dnb_uniques), dtype=np.int32)  # chunk 内 DNB code -> 全局 DNB index
+        for local_idx, key in enumerate(dnb_uniques):
+            dnb_key = int(key)  # numpy uint64 转 Python int，作为全局 dnb_to_idx 字典 key
+            d_idx = dnb_to_idx.get(dnb_key)  # 查询当前 DNB 是否已经分配过矩阵列号
+            if d_idx is None:
+                d_idx = len(dnb_x)  # 新 DNB 使用下一个列号
+                dnb_to_idx[dnb_key] = d_idx  # 记录 DNB packed key -> 列号
+                pos = first_pos[local_idx]  # 当前 unique DNB 在 chunk 中第一次出现的行号
+                dnb_x.append(int(x_arr[pos]))  # 保存 DNB x 坐标
+                dnb_y.append(int(y_arr[pos]))  # 保存 DNB y 坐标
+            dnb_chunk_map[local_idx] = d_idx  # 保存当前 chunk DNB code 对应的全局列号
+
+        cols = dnb_chunk_map[dnb_codes]  # 向量化得到当前 chunk 每一行的 COO 列索引
+
+        row_chunks.append(rows)  # 保存当前 chunk 的行索引数组
+        col_chunks.append(cols)  # 保存当前 chunk 的列索引数组
+        data_chunks.append(count_arr)  # 保存当前 chunk 的表达计数数组
+        total_rows += n_chunk
         if verbose and total_rows % 5_000_000 == 0:
-            print(f"  Processed {total_rows:,} rows...")
+            print(
+                f"  Processed {total_rows:,} rows; "
+                f"{len(genes):,} genes; {len(dnb_x):,} DNBs; "
+                f"{time.time() - t0:.1f}s"
+            )
+
+    n_genes = len(genes)
+    n_dnbs = len(dnb_x)
+    if n_dnbs == 0:
+        raise ValueError("No DNBs found in the GEM file.")
 
     if verbose:
-        print(f"  Total rows: {total_rows:,}, nonzeros: {dnb_expr.nnz:,}")
+        print(f"Building sparse matrix: {n_genes:,} genes × {n_dnbs:,} DNBs...")
 
-    return dnb_expr.tocsr(), spot_coords, spot_labels, np.array(genes), np.array(all_cells)
+    rows_all = np.concatenate(row_chunks) if row_chunks else np.array([], dtype=np.int32)
+    cols_all = np.concatenate(col_chunks) if col_chunks else np.array([], dtype=np.int32)
+    data_all = np.concatenate(data_chunks) if data_chunks else np.array([], dtype=np.float64)
+    dnb_expr = coo_matrix(
+        (data_all, (rows_all, cols_all)),
+        shape=(n_genes, n_dnbs),
+        dtype=np.float64,
+    ).tocsr()
+
+    spot_coords = np.column_stack(
+        (np.asarray(dnb_x, dtype=np.float64), np.asarray(dnb_y, dtype=np.float64))
+    )
+    all_cells = sorted(set(label_map.values()))
+    cell_to_idx = {c: i for i, c in enumerate(all_cells)}
+    spot_labels = np.full(n_dnbs, -1, dtype=np.int32)
+    n_matched = 0
+    for i, dnb_key in enumerate(dnb_to_idx.keys()):
+        label = label_map.get(dnb_key)
+        if label is not None:
+            spot_labels[i] = cell_to_idx[label]
+            n_matched += 1
+
+    n_empty = n_dnbs - n_matched
+
+    if verbose:
+        print(
+            f"  Final: {n_genes:,} genes, {n_dnbs:,} DNBs "
+            f"({n_matched:,} cell, {n_empty:,} empty), "
+            f"{len(all_cells):,} cells"
+        )
+        print(
+            f"  Total rows: {total_rows:,}, nonzeros: {dnb_expr.nnz:,}, "
+            f"time: {time.time() - t0:.1f}s"
+        )
+
+    return dnb_expr, spot_coords, spot_labels, np.asarray(genes), np.asarray(all_cells)
 
 
 def load_RYTools_data(
