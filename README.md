@@ -191,7 +191,7 @@ Spatial SoupX (bin-level, global ρ, spatial kernel) achieves 89.9% RMSE↓ on s
 | `max_radius` | 200.0 | Max neighbor search radius (μm) |
 | `n_high_genes` | `None` | Number of top genes by empty-bin expression; `None` uses all genes |
 | `n_lambda_genes` | 50 | Top genes for λ grid search |
-| `r2_threshold` | 0.05 | Minimum weighted R² to apply correction |
+| `r2_threshold` | 0.01 | Minimum weighted R² to apply correction |
 | `lambda_grid` | `[10,20,30,50,70,100,150,200,300]` | λ candidates |
 | `use_local_density` | `False` | β modulation (disabled — harmful) |
 | `use_expr_weight` | `False` | EWAP (experimental) |

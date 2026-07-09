@@ -43,7 +43,7 @@ class SPARKLE:
     n_lambda_genes : int
         Number of top genes for λ estimation.
     r2_threshold : float
-        Minimum weighted R² to apply correction.
+        Minimum weighted R² to apply correction. Default 0.01.
     empty_purity : float
         Minimum empty DNB fraction for "pure empty" bin.
     cell_purity : float
@@ -90,7 +90,7 @@ class SPARKLE:
         max_radius: float = 200.0,
         n_high_genes: Optional[int] = None,
         n_lambda_genes: int = 50,
-        r2_threshold: float = 0.05,
+        r2_threshold: float = 0.01,
         empty_purity: float = 0.95,
         cell_purity: float = 0.80,
         lambda_grid: Optional[List[float]] = None,

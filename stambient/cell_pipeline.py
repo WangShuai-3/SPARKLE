@@ -100,7 +100,7 @@ def cell_pipeline_fit(
     max_radius: float = 200.0,
     n_high_genes: Optional[int] = None,
     n_lambda_genes: int = 50,
-    r2_threshold: float = 0.05,
+    r2_threshold: float = 0.01,
     lambda_grid: Optional[List[float]] = None,
     use_expr_weight: bool = False,
     self_confidence_penalty: bool = True,
