@@ -98,7 +98,7 @@ def cell_pipeline_fit(
     bin_size: int = 50,
     distance_metric: DistanceMetric = "exponential",
     max_radius: float = 200.0,
-    n_high_genes: int = 500,
+    n_high_genes: Optional[int] = None,
     n_lambda_genes: int = 50,
     r2_threshold: float = 0.05,
     lambda_grid: Optional[List[float]] = None,
@@ -113,6 +113,8 @@ def cell_pipeline_fit(
         dnb_expr: [genes × DNBs] DNB-level expression.
         dnb_coords: [DNBs × 2] coordinates.
         dnb_labels: [DNBs] cell IDs (-1 for empty).
+        n_high_genes: Number of top high-expression genes to select for
+            correction. If None, all genes are used.
         ... (standard SPARKLE params)
 
     Returns:
@@ -198,7 +200,10 @@ def cell_pipeline_fit(
 
     total_empty = empty_bin_areas.sum()
     mean_empty = empty_bin_expr.sum(axis=1) / total_empty
-    n_select = min(n_high_genes, n_genes)
+    if n_high_genes is None:
+        n_select = n_genes
+    else:
+        n_select = min(n_high_genes, n_genes)
     gene_indices = np.argsort(mean_empty)[::-1][:n_select]
 
     if verbose:

@@ -37,8 +37,9 @@ class SPARKLE:
         Distance decay parameter (μm). Auto-estimated if None.
     max_radius : float
         Maximum neighbor search radius (μm).
-    n_high_genes : int
-        Number of top highly-expressed genes to correct.
+    n_high_genes : int or None
+        Number of top highly-expressed genes to correct. If None, all
+        genes are used.
     n_lambda_genes : int
         Number of top genes for λ estimation.
     r2_threshold : float
@@ -87,7 +88,7 @@ class SPARKLE:
         distance_metric: DistanceMetric = "exponential",
         lambda_distance: Optional[float] = None,
         max_radius: float = 200.0,
-        n_high_genes: int = 500,
+        n_high_genes: Optional[int] = None,
         n_lambda_genes: int = 50,
         r2_threshold: float = 0.05,
         empty_purity: float = 0.95,

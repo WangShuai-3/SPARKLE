@@ -54,7 +54,7 @@ def _compute_source_strength(
 def select_high_expression_genes(
     Y_empty: csr_matrix,
     n_empty: np.ndarray,
-    n_high: int = 500,
+    n_high: Optional[int] = None,
     empty_bin_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Select top high-expression genes based on per-DNB empty expression.
@@ -64,7 +64,7 @@ def select_high_expression_genes(
     Args:
         Y_empty: [genes × bins] empty DNB expression.
         n_empty: [bins] empty DNB counts per bin.
-        n_high: Number of top genes to select.
+        n_high: Number of top genes to select. If None, use all genes.
         empty_bin_mask: If provided, only consider bins where mask is True.
 
     Returns:
@@ -89,8 +89,11 @@ def select_high_expression_genes(
 
     mean_empty = empty_sum / total_empty_dnb
 
-    # Get top N
-    n_select = min(n_high, len(mean_empty))
+    # Get top N (or all genes if n_high is None)
+    if n_high is None:
+        n_select = len(mean_empty)
+    else:
+        n_select = min(n_high, len(mean_empty))
     top_genes = np.argsort(mean_empty)[::-1][:n_select]
     return top_genes
 
