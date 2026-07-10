@@ -25,7 +25,8 @@ evaluation/
 │   ├── axolotl/           # Axolotl 真实数据
 │   ├── mosta/             # MOSTA 成年小鼠脑 Stereo-seq
 │   ├── mousebrain/        # 新加入：Stereo-seq 小鼠脑 T304 + snRNA-seq 308 clusters
-│   └── visiumhd/          # Visium HD 人结肠癌
+│   ├── visiumhd/          # Visium HD 人结肠癌
+│   └── ovarian/           # Visium HD 人卵巢癌 (FF) + scFFPE 单细胞 + FLEX 注释
 └── reports/               # 评测报告输出
 ```
 
@@ -86,6 +87,12 @@ python evaluation/scripts/final_comparison.py --dataset mousebrain \
     --n-genes 30000 --n-high-genes 30000 \
     --methods sparkle,spatial_soupx,soupx,decontx
 
+# Visium HD (人卵巢癌 FF, 内嵌 segmentation)
+python evaluation/scripts/final_comparison.py --dataset ovarian \
+    --x-range 1000 1800 --y-range 300 1100 \
+    --n-genes 30000 --n-high-genes 30000 \
+    --methods sparkle,spatial_soupx,soupx,decontx
+
 # resource (using MouseBrain)
 python evaluation/scripts/benchmark_resource.py \
     --x-range 6000 20000 --y-range 2000 15000 \
@@ -120,3 +127,48 @@ python evaluation/scripts/final_comparison.py --dataset axolotl \
     --max-radius 500 \
     --lambda-grid 200 300 500 700 1000
 ```
+
+## Ovarian (Visium HD) RCTD + 单细胞比较评估
+
+针对 Visium HD 人卵巢癌（FF）数据，仿照 MouseBrain 流程做 RCTD 细胞类型映射
+以及基于 scFFPE 单细胞参考的表达评估。单细胞文件与注释位于
+`evaluation/data/ovarian/`：
+
+- `17k_Ovarian_Cancer_scFFPE_count_filtered_feature_bc_matrix.h5` — scRNA-seq 计数
+- `FLEX_Ovarian_Barcode_Cluster_Annotation.csv` — 每个 barcode 的 `Cell Annotation`（16 类）
+
+完整流程（先跑 `final_comparison.py --dataset ovarian` 生成 h5ad 后）：
+
+```bash
+# 1. 构建单细胞类型 pseudobulk 参考 (genes x 16 cell types)
+python evaluation/scripts/prepare_ovarian_scrna_reference.py
+
+# 2. RCTD doublet 模式（每个方法）；导出 per-cell first_type 用于回填注释
+conda activate r-env
+RCTD_MAX_CORES=16 Rscript evaluation/scripts/run_rctd_ovarian.R
+#   -> evaluation/reports/rctd_ovarian/{rctd_summary_metrics,rctd_shared_metrics,rctd_doublet_results}.csv
+#   -> evaluation/reports/rctd_ovarian/first_type/{Method}_first_type.csv
+
+# 3. 把 RCTD 注释回填进各方法 h5ad（用 RAW 的 first_type 作为共享注释，隔离校正对表达的影响）
+python evaluation/scripts/inject_rctd_annotations.py --annotation-method RAW
+#   -> evaluation/reports/h5ad_ovarian_annotated/
+
+# 4. 基于单细胞参考的表达评估（复用 mousebrain 评估脚本）
+python evaluation/scripts/evaluate_mousebrain_h5ad.py \
+    --tag ovarian_x1000-1800_y300-1100 \
+    --input-dir evaluation/reports/h5ad_ovarian_annotated \
+    --snrna-ref evaluation/data/ovarian/scrna_celltype_pseudobulk.csv \
+    --output-dir evaluation/reports/ovarian_eval \
+    --methods RAW,SPARKLE,SpatialSoupX,SoupX,DecontX
+
+# 5.（可选）参考 marker 定位准确率（RAW vs SPARKLE）
+python evaluation/scripts/reference_marker_localization.py \
+    --tag ovarian_x1000-1800_y300-1100 \
+    --input-dir evaluation/reports/h5ad_ovarian_annotated \
+    --output-dir evaluation/reports/ovarian_eval \
+    --snrna-ref evaluation/data/ovarian/scrna_celltype_pseudobulk.csv
+```
+
+> RCTD 环境需 `spacexr`, `Seurat`, `hdf5r`（已装于 `r-env`）。RCTD 通过
+> `segmentations/cell_segmentation_mask` 计算每个 cell 的 (x,y)，通过 `cell_id`
+> 与 h5ad 对应。
