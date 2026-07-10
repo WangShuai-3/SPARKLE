@@ -1760,7 +1760,8 @@ def evaluate_mousebrain(results, data, sub, gene_names, raw=None):
     return raw, raw_summary
 
 
-def load_visiumhd_data(x_range=None, y_range=None, n_genes=None, verbose=True):
+def load_visiumhd_data(x_range=None, y_range=None, n_genes=None, verbose=True,
+                       h5_path=None, dataset_name="Visium HD"):
     """Load Visium HD human colon cancer data at 2µm pixel resolution.
 
     Keeps native 2µm pixels as DNBs (matching Stereo-seq's 500nm DNB concept).
@@ -1779,14 +1780,24 @@ def load_visiumhd_data(x_range=None, y_range=None, n_genes=None, verbose=True):
     """
     import h5py
 
-    data_dir = Path(__file__).resolve().parent.parent / "data" / "visiumhd"
-    h5_path = data_dir / "Visium_HD_6p5mm_Human_Colon_Cancer_feature_slice.h5"
+    if h5_path is None:
+        data_dir = Path(__file__).resolve().parent.parent / "data" / "visiumhd"
+        h5_path = data_dir / "Visium_HD_6p5mm_Human_Colon_Cancer_feature_slice.h5"
+    else:
+        h5_path = Path(h5_path)
 
     if not h5_path.exists():
         raise FileNotFoundError(f"{h5_path} not found.")
 
     load_all = False  # will be set in pass 1
     f = h5py.File(h5_path, 'r')
+
+    if "segmentations" not in f:
+        f.close()
+        raise ValueError(
+            f"{h5_path.name} has no 'segmentations' group; SPARKLE needs a "
+            f"cell_segmentation_mask. This feature_slice.h5 lacks embedded "
+            f"segmentation (segmented outputs not available for this sample).")
 
     # ── Step 1: Load 2µm pixel mask, build array-based lookup ──────
     t0 = time.time()
@@ -1989,7 +2000,7 @@ def load_visiumhd_data(x_range=None, y_range=None, n_genes=None, verbose=True):
 
     if verbose:
         print(f"\n{'='*60}")
-        print(f"Visium HD data loaded: {n_genes} genes, {n_pixels} 2µm pixels, {n_cells} cells")
+        print(f"{dataset_name} data loaded: {n_genes} genes, {n_pixels} 2µm pixels, {n_cells} cells")
         print(f"{'='*60}")
 
     return {
@@ -2004,7 +2015,20 @@ def load_visiumhd_data(x_range=None, y_range=None, n_genes=None, verbose=True):
     }
 
 
-def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None):
+def load_ovarian_data(x_range=None, y_range=None, n_genes=None, verbose=True):
+    """Load Visium HD Human Ovarian Cancer (FF) data at 2µm pixel resolution.
+
+    Same feature_slice.h5 layout as the colon cancer 6.5mm sample (embedded
+    ``segmentations/cell_segmentation_mask``), so it reuses ``load_visiumhd_data``.
+    """
+    data_dir = Path(__file__).resolve().parent.parent / "data" / "ovarian"
+    h5_path = data_dir / "Visium_HD_Human_Ovarian_Cancer_FF_feature_slice.h5"
+    return load_visiumhd_data(
+        x_range=x_range, y_range=y_range, n_genes=n_genes, verbose=verbose,
+        h5_path=h5_path, dataset_name="Visium HD Ovarian Cancer")
+
+
+def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None, dataset_tag="visiumhd"):
     """Run comparison for Visium HD."""
     if methods is None:
         methods = ['sparkle', 'spatial_soupx', 'soupx']
@@ -2045,9 +2069,9 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
     x_range = data.get('x_range')
     y_range = data.get('y_range')
     if x_range is not None and y_range is not None:
-        tag = f"visiumhd_x{x_range[0]}-{x_range[1]}_y{y_range[0]}-{y_range[1]}"
+        tag = f"{dataset_tag}_x{x_range[0]}-{x_range[1]}_y{y_range[0]}-{y_range[1]}"
     else:
-        tag = "visiumhd_full"
+        tag = f"{dataset_tag}_full"
 
     cell_ids = data.get('cell_ids', np.array([]))
     n_cells = len(cell_ids)
@@ -2096,7 +2120,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Final comparison: Cell SPARKLE vs Spatial SoupX vs SoupX")
     parser.add_argument("--dataset", type=str, default="axolotl",
-                        choices=["axolotl", "mosta", "mousebrain", "visiumhd", "synthetic"],
+                        choices=["axolotl", "mosta", "mousebrain", "visiumhd", "ovarian", "synthetic"],
                         help="Dataset (default: axolotl)")
     parser.add_argument("--scenario", type=str, default="S1",
                         choices=sorted(SCENARIOS.keys()),
@@ -2170,6 +2194,12 @@ def main():
             sys.exit(1)
         sub = subsample_data(data, args.n_genes, cut_genes=cut_genes)
         run_visiumhd_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius)
+    elif args.dataset == "ovarian":
+        data = load_ovarian_data(x_range=x_range, y_range=y_range, n_genes=args.n_genes)
+        if data is None:
+            sys.exit(1)
+        sub = subsample_data(data, args.n_genes, cut_genes=cut_genes)
+        run_visiumhd_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius, dataset_tag="ovarian")
     else:  # synthetic
         if args.all_scenarios:
             run_all_synthetic_scenarios(methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius)

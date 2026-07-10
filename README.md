@@ -230,11 +230,25 @@ python evaluation/scripts/final_comparison.py \
     --n-genes 2000 --n-high-genes 2000 \
     --methods sparkle,spatial_soupx,soupx,decontx
 
+# VisiumHD (Human Colon Cancer 6.5mm, segmentation embedded in feature_slice.h5)
+python evaluation/scripts/final_comparison.py \
+    --dataset visiumhd --x-range 1250 1650 --y-range 500 900 \
+    --n-genes 200 --n-high-genes 200 \
+    --methods sparkle,spatial_soupx,soupx,decontx
+
+# Ovarian (Visium HD Human Ovarian Cancer FF, same feature_slice.h5 layout with embedded segmentation)
+python evaluation/scripts/final_comparison.py \
+    --dataset ovarian --x-range 1250 1650 --y-range 500 900 \
+    --n-genes 200 --n-high-genes 200 \
+    --methods sparkle,spatial_soupx,soupx,decontx
+
 # Synthetic
 python evaluation/scripts/final_comparison.py \
     --dataset synthetic --all-scenarios \
     --methods sparkle,spatial_soupx,soupx,decontx
 ```
+
+> **Note on Visium HD segmentation:** the `visiumhd`/`ovarian` loaders read cell labels from `segmentations/cell_segmentation_mask` embedded in the feature_slice.h5. Some Visium HD samples (e.g. Human Colon Cancer P1) ship a feature_slice.h5 *without* an embedded `segmentations` group; those cannot be evaluated unless the corresponding 10x segmented outputs (cell_segmentations.geojson) are available. The loader raises a clear error in that case.
 
 > **CellBender** and **CellClear** are excluded from `final_comparison.py` due to fundamental incompatibility with spatial spot data. CellBender's VAE requires ≥50 UMI per background barcode (spatial: 1-2). CellClear's NMF-based gene detection fails because background expression profiles are too sparse to match foreground clusters. See "Excluded Methods" above for details.
 
