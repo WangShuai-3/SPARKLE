@@ -86,15 +86,11 @@ python evaluation/scripts/final_comparison.py --dataset mousebrain \
     --n-genes 30000 --n-high-genes 30000 \
     --methods sparkle,spatial_soupx,soupx,decontx
 
-# resource
-python3 evaluation/scripts/benchmark_resource.py \
---scenario S2 \
---grid-sizes 100 200 300 400 500 800 1000 \
---n-genes 500 \
---methods sparkle,spatial_soupx,soupx,decontx \
---output evaluation/reports/resource_benchmark.csv \
---n-jobs 2 \
---plot
+# resource (using MouseBrain)
+python evaluation/scripts/benchmark_resource.py \
+    --x-range 6000 20000 --y-range 2000 15000 \
+    --n-genes 10000 --n-high-genes 10000 \
+    --r2-threshold 0 --plot --n-runs 8
 ```
 
 ## 控制是否保存 h5ad
