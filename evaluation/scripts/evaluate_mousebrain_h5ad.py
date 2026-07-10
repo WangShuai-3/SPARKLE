@@ -132,8 +132,12 @@ def load_snrna_reference(ref_path):
     return df
 
 
-def load_sparkle_corrected_genes(input_dir, tag):
+def load_sparkle_corrected_genes(input_dir, tag, r2_threshold=None):
     """Load gene names marked sparkle_corrected from the SPARKLE h5ad.
+
+    Args:
+        r2_threshold: if provided (float), filter by sparkle_r2 >= r2_threshold
+            instead of using the boolean sparkle_corrected column.
 
     Returns:
         list of gene names, or None if SPARKLE h5ad / column not found.
@@ -142,9 +146,14 @@ def load_sparkle_corrected_genes(input_dir, tag):
     if not sp_path.exists():
         return None
     adata = sc.read_h5ad(sp_path)
-    if "sparkle_corrected" not in adata.var.columns:
-        return None
-    genes = adata.var_names[adata.var["sparkle_corrected"].values].tolist()
+    if r2_threshold is not None:
+        if "sparkle_r2" not in adata.var.columns:
+            return None
+        genes = adata.var_names[adata.var["sparkle_r2"].values >= r2_threshold].tolist()
+    else:
+        if "sparkle_corrected" not in adata.var.columns:
+            return None
+        genes = adata.var_names[adata.var["sparkle_corrected"].values].tolist()
     return genes
 
 
@@ -380,15 +389,24 @@ def main():
              "(sparkle_corrected == True in the SPARKLE h5ad var). "
              "Disable with --no-use-sparkle-corrected-genes to use all shared genes.",
     )
+    parser.add_argument(
+        "--r2-threshold", type=float, default=None,
+        help="If set, filter SPARKLE-corrected genes by sparkle_r2 >= threshold "
+             "instead of using the boolean sparkle_corrected column. "
+             "Implies --use-sparkle-corrected-genes.",
+    )
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
     if args.n_hvgs is not None:
-        output_dir = Path(args.output_dir) / f"method_level_hvg{args.n_hvgs}"
+        sub = f"method_level_hvg{args.n_hvgs}"
     elif args.use_sctransform:
-        output_dir = Path(args.output_dir) / "method_level_sct"
+        sub = "method_level_sct"
     else:
-        output_dir = Path(args.output_dir) / "method_level_new"
+        sub = "method_level_new"
+    if args.r2_threshold is not None:
+        sub += f"_r2{args.r2_threshold}"
+    output_dir = Path(args.output_dir) / sub
     output_dir.mkdir(parents=True, exist_ok=True)
 
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
@@ -402,7 +420,19 @@ def main():
         print(f"Loaded snRNA reference: {snrna_ref.shape}")
 
     sparkle_corrected_genes = None
-    if args.use_sparkle_corrected_genes:
+    if args.r2_threshold is not None:
+        sparkle_corrected_genes = load_sparkle_corrected_genes(
+            input_dir, args.tag, r2_threshold=args.r2_threshold
+        )
+        if sparkle_corrected_genes is None:
+            warnings.warn(
+                f"--r2-threshold={args.r2_threshold} requested but could not find "
+                f"{args.tag}_SPARKLE.h5ad or sparkle_r2 column. "
+                "Falling back to all shared genes."
+            )
+        else:
+            print(f"Restricting snRNA comparison to {len(sparkle_corrected_genes)} genes with sparkle_r2 >= {args.r2_threshold}")
+    elif args.use_sparkle_corrected_genes:
         sparkle_corrected_genes = load_sparkle_corrected_genes(input_dir, args.tag)
         if sparkle_corrected_genes is None:
             warnings.warn(
