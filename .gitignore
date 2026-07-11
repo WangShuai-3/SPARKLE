@@ -52,3 +52,6 @@ evaluation/data/
 # Log files
 evaluation/logs/
 *.log
+
+# Local virtualenvs
+.venv*/
