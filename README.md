@@ -242,6 +242,13 @@ python evaluation/scripts/final_comparison.py \
     --n-genes 200 --n-high-genes 200 \
     --methods sparkle,spatial_soupx,soupx,decontx
 
+# CRC (same window, separate Proseg and StarDist conditions)
+python evaluation/scripts/final_comparison.py \
+    --dataset crc --crc-segmentation both \
+    --x-range 14300 14900 --y-range 2850 3450 \
+    --n-genes 2000 --n-high-genes 2000 --cut-genes \
+    --methods sparkle,spatial_soupx
+
 # Synthetic
 python evaluation/scripts/final_comparison.py \
     --dataset synthetic --all-scenarios \

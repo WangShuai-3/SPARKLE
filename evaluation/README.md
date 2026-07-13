@@ -15,7 +15,7 @@ evaluation/
 ├── scripts/               # 评测脚本
 │   ├── run_benchmark.py   # 主评测流程 (合成数据) — 已集成到 final_comparison.py
 │   ├── test_axolotl.py    # Axolotl 真实数据测试
-│   ├── final_comparison.py# 最终方法对比（支持 axolotl/mosta/visiumhd/synthetic）
+│   ├── final_comparison.py# 最终方法对比（含 CRC 双 segmentation）
 │   └── visualize.py       # 空间热力图生成 — 待实现
 ├── baselines/             # 对比方法
 │   ├── soupx.py           # 原始 SoupX
@@ -26,7 +26,8 @@ evaluation/
 │   ├── mosta/             # MOSTA 成年小鼠脑 Stereo-seq
 │   ├── mousebrain/        # 新加入：Stereo-seq 小鼠脑 T304 + snRNA-seq 308 clusters
 │   ├── visiumhd/          # Visium HD 人结肠癌
-│   └── ovarian/           # Visium HD 人卵巢癌 (FF) + scFFPE 单细胞 + FLEX 注释
+│   ├── ovarian/           # Visium HD 人卵巢癌 (FF) + scFFPE 单细胞 + FLEX 注释
+│   └── CRC/               # CRC 2-µm spots + Proseg/StarDist + Pelka scRNA reference
 └── reports/               # 评测报告输出
 ```
 
@@ -92,6 +93,13 @@ python evaluation/scripts/final_comparison.py --dataset ovarian \
     --x-range 1000 1800 --y-range 300 1100 \
     --n-genes 30000 --n-high-genes 30000 \
     --methods sparkle,spatial_soupx,soupx,decontx
+
+# CRC：相同窗口下依次运行 Proseg 与 StarDist 两个 segmentation 条件
+python evaluation/scripts/final_comparison.py --dataset crc \
+    --crc-segmentation both \
+    --x-range 14300 14900 --y-range 2850 3450 \
+    --n-genes 2000 --n-high-genes 2000 --cut-genes \
+    --max-radius 200 --methods sparkle,spatial_soupx
 
 # resource (using MouseBrain)
 python evaluation/scripts/benchmark_resource.py \
@@ -172,3 +180,76 @@ python evaluation/scripts/reference_marker_localization.py \
 > RCTD 环境需 `spacexr`, `Seurat`, `hdf5r`（已装于 `r-env`）。RCTD 通过
 > `segmentations/cell_segmentation_mask` 计算每个 cell 的 (x,y)，通过 `cell_id`
 > 与 h5ad 对应。
+
+## CRC 双 segmentation + RCTD + 单细胞 reference 评估
+
+CRC 的 `proseg` 和 `stardist` 输入共享相同的 18,085 genes × 470,416 spots
+表达矩阵及坐标，只有 spot-to-cell label map 不同，因此作为两个独立条件平行比较。
+注册后的全切片范围为 x=**13967.49–15338.95 µm**、
+y=**2464.03–3835.49 µm**。
+
+推荐快速窗口 `x=14300–14900, y=2850–3450`（600 × 600 µm）：共有 90,036
+spots 和 1,294,639 UMI；Proseg 包含 2,466 cells（58,254 cell spots、31,782
+empty spots），StarDist 包含 2,421 cells（16,237 cell spots、73,799 empty
+spots）。窗口约占全切片 spots 的 19%，同时保留足够多的细胞供 20 类 RCTD。
+
+```bash
+# 1. 同一窗口内生成两个 segmentation 条件的 h5ad
+python evaluation/scripts/final_comparison.py --dataset crc \
+    --crc-segmentation both \
+    --x-range 14300 14900 --y-range 2850 3450 \
+    --n-genes 2000 --n-high-genes 2000 --cut-genes \
+    --lambda-grid 10 20 30 50 70 100 150 200 --max-radius 200 \
+    --methods sparkle,spatial_soupx
+
+# 完整 baseline 可改为 sparkle,spatial_soupx,soupx,decontx；其中
+# SoupX/DecontX 的高维 cell clustering 是该窗口的主要耗时步骤。
+
+# 2. 构建平衡的 Pelka ClusterMidway reference（同时输出 RCTD counts 和 pseudobulk）
+python evaluation/scripts/prepare_crc_scrna_reference.py --max-cells-per-type 500
+
+# 3. RCTD doublet mode；两种条件写入独立目录，可同时启动
+CRC_SEGMENTATION=proseg \
+RCTD_DATASET_TAG=crc_proseg_x14300-14900_y2850-3450 \
+RCTD_MAX_CORES=16 Rscript evaluation/scripts/run_rctd_crc.R
+
+CRC_SEGMENTATION=stardist \
+RCTD_DATASET_TAG=crc_stardist_x14300-14900_y2850-3450 \
+RCTD_MAX_CORES=16 Rscript evaluation/scripts/run_rctd_crc.R
+
+# 禁止本地 PSOCK 端口的沙箱/集群节点使用 RCTD_MAX_CORES=1。
+
+# 4. 用 RAW RCTD first_type 给所有方法回填固定注释，隔离表达校正效应
+python evaluation/scripts/inject_rctd_annotations.py \
+    --tag crc_proseg_x14300-14900_y2850-3450 \
+    --input-dir evaluation/reports/h5ad \
+    --first-type-dir evaluation/reports/rctd_crc/proseg/first_type \
+    --output-dir evaluation/reports/h5ad_crc_proseg_annotated \
+    --annotation-method RAW
+
+python evaluation/scripts/inject_rctd_annotations.py \
+    --tag crc_stardist_x14300-14900_y2850-3450 \
+    --input-dir evaluation/reports/h5ad \
+    --first-type-dir evaluation/reports/rctd_crc/stardist/first_type \
+    --output-dir evaluation/reports/h5ad_crc_stardist_annotated \
+    --annotation-method RAW
+
+# 5. 两个条件分别与同一个 ClusterMidway pseudobulk reference 做相关分析
+python evaluation/scripts/evaluate_mousebrain_h5ad.py \
+    --tag crc_proseg_x14300-14900_y2850-3450 \
+    --input-dir evaluation/reports/h5ad_crc_proseg_annotated \
+    --snrna-ref evaluation/data/CRC/scrna_reference/prepared_cluster_midway/crc_cluster_midway_pseudobulk.csv \
+    --output-dir evaluation/reports/crc_eval/proseg \
+    --methods RAW,SPARKLE,SpatialSoupX
+
+python evaluation/scripts/evaluate_mousebrain_h5ad.py \
+    --tag crc_stardist_x14300-14900_y2850-3450 \
+    --input-dir evaluation/reports/h5ad_crc_stardist_annotated \
+    --snrna-ref evaluation/data/CRC/scrna_reference/prepared_cluster_midway/crc_cluster_midway_pseudobulk.csv \
+    --output-dir evaluation/reports/crc_eval/stardist \
+    --methods RAW,SPARKLE,SpatialSoupX
+```
+
+CRC 注册坐标带有小角度旋转。loader 用注册后的物理坐标筛选窗口并保存 cell
+centroid，同时从 `bin_id` 恢复严格的 2-µm 网格供 SPARKLE 分箱；刚体变换保持
+距离不变，并避免浮点旋转使 pitch 推断接近零。

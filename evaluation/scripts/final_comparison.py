@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Final comparison: Cell SPARKLE vs Spatial SoupX vs SoupX.
 
-Supports Axolotl (sstIN evaluation) and MOSTA (cortical layer evaluation).
+Supports Axolotl, MOSTA, MouseBrain, Visium HD, Ovarian, CRC, and synthetic data.
 Supports spatial window via --x-range and --y-range.
 
 Note: CellBender is excluded because its VAE fails on spatial DNB data
@@ -1512,7 +1512,8 @@ def _convert_for_json(obj):
 
 
 def save_result_h5ad(expr, gene_names, cell_ids, ann_map, out_path,
-                     method_name="", save_h5ad=True, var_data=None):
+                     method_name="", save_h5ad=True, var_data=None,
+                     cell_coords=None):
     """Save a [genes x cells] expression matrix as cell-based h5ad.
 
     Args:
@@ -1526,6 +1527,8 @@ def save_result_h5ad(expr, gene_names, cell_ids, ann_map, out_path,
         save_h5ad: if False, skip writing h5ad file.
         var_data: optional dict of per-gene annotations (e.g. R² scores)
             to add to adata.var.
+        cell_coords: optional [cells x 2] array of physical x/y centroids.  CRC
+            stores these in obs so RCTD can reuse the exact cropped geometry.
     """
     if not save_h5ad:
         print(f"    Skipping h5ad save: {out_path}")
@@ -1546,9 +1549,30 @@ def save_result_h5ad(expr, gene_names, cell_ids, ann_map, out_path,
     adata.obs_names = [f"Cell_{cid}" for cid in cell_ids_use]
     adata.obs["cell_id"] = cell_ids_use
     if ann_map is not None:
-        adata.obs["annotation"] = [
-            str(ann_map.get(int(cid), "Unknown")) for cid in cell_ids_use
-        ]
+        # Some datasets use integer labels while CRC uses anonymized string IDs.
+        # Try the original key first and only attempt an integer fallback when it
+        # is meaningful; unconditional int(cid) would fail on CRC barcodes.
+        annotations = []
+        for cid in cell_ids_use:
+            value = ann_map.get(cid)
+            if value is None:
+                value = ann_map.get(str(cid))
+            if value is None:
+                try:
+                    value = ann_map.get(int(cid))
+                except (TypeError, ValueError):
+                    pass
+            annotations.append(str(value if value is not None else "Unknown"))
+        adata.obs["annotation"] = annotations
+    if cell_coords is not None:
+        coords_use = np.asarray(cell_coords, dtype=np.float64)[:n_cells_expr]
+        if coords_use.shape != (n_cells_expr, 2):
+            raise ValueError(
+                f"cell_coords must have shape {(n_cells_expr, 2)}, got {coords_use.shape}"
+            )
+        adata.obs["x"] = coords_use[:, 0]
+        adata.obs["y"] = coords_use[:, 1]
+        adata.obsm["spatial"] = coords_use
     if method_name:
         adata.uns["method"] = str(method_name)
     adata.write_h5ad(out_path)
@@ -2028,8 +2052,166 @@ def load_ovarian_data(x_range=None, y_range=None, n_genes=None, verbose=True):
         h5_path=h5_path, dataset_name="Visium HD Ovarian Cancer")
 
 
-def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None, dataset_tag="visiumhd"):
-    """Run comparison for Visium HD."""
+def _load_crc_grid_coords(bin_ids_path):
+    """Recover the regular 2-µm grid coordinates encoded in CRC bin IDs.
+
+    ``spot_coords_um.npy`` contains registered physical coordinates.  Registration
+    applies a small rotation, which is correct for distance calculations but makes
+    nearly every floating-point x/y value unique.  The generic binning code infers
+    spot pitch from repeated axis coordinates, so feeding it the registered values
+    would incorrectly infer a near-zero pitch and create one bin per spot.
+
+    The IDs have the form ``s_002um_<grid_x>_<grid_y>-1``.  Multiplying both grid
+    indices by 2 preserves all Euclidean distances under the rigid registration
+    while restoring an exact rectilinear grid for robust 25-µm aggregation.
+    """
+    coords = []
+    with open(bin_ids_path, "r", encoding="utf-8") as handle:
+        next(handle)  # bin_id header
+        for line_number, line in enumerate(handle, start=2):
+            token = line.strip()
+            parts = token.split("_")
+            if len(parts) != 4 or parts[0] != "s" or parts[1] != "002um":
+                raise ValueError(
+                    f"Unexpected CRC bin ID at {bin_ids_path}:{line_number}: {token!r}"
+                )
+            try:
+                grid_x = int(parts[2])
+                grid_y = int(parts[3].split("-")[0])
+            except ValueError as exc:
+                raise ValueError(
+                    f"Malformed CRC grid indices at {bin_ids_path}:{line_number}: {token!r}"
+                ) from exc
+            coords.append((grid_x * 2.0, grid_y * 2.0))
+    return np.asarray(coords, dtype=np.float64)
+
+
+def _cell_centroids(coords, labels, n_cells):
+    """Return mean x/y coordinates for contiguous non-negative cell labels."""
+    covered = labels >= 0
+    counts = np.bincount(labels[covered], minlength=n_cells).astype(np.float64)
+    if np.any(counts == 0):
+        raise ValueError("Cell label remapping produced a cell without covered spots")
+    x_sum = np.bincount(labels[covered], weights=coords[covered, 0], minlength=n_cells)
+    y_sum = np.bincount(labels[covered], weights=coords[covered, 1], minlength=n_cells)
+    return np.column_stack((x_sum / counts, y_sum / counts))
+
+
+def load_crc_data(segmentation="proseg", x_range=None, y_range=None, verbose=True):
+    """Load the SPARKLE-ready CRC slice for one segmentation condition.
+
+    Proseg and StarDist share the same raw expression, registered spot
+    coordinates, bin IDs, and genes.  Only ``spot_labels.npy`` and the associated
+    ``cell_ids.npy`` differ.  Keeping ``segmentation`` explicit therefore makes
+    the two conditions directly comparable without duplicating data preparation.
+
+    Spatial windows are interpreted in the registered physical coordinate system
+    reported by ``spot_coords_um.npy``.  Labels are remapped after cropping so
+    every downstream method receives contiguous 0..N-1 indices; original cell
+    IDs are retained in the output h5ad files for RCTD annotation round-tripping.
+    """
+    from scipy.sparse import load_npz
+
+    segmentation = segmentation.lower()
+    if segmentation not in {"proseg", "stardist"}:
+        raise ValueError("CRC segmentation must be 'proseg' or 'stardist'")
+
+    data_root = Path(__file__).resolve().parent.parent / "data" / "CRC" / "07.sparkle_ready"
+    seg_dir = data_root / segmentation
+    required = [
+        seg_dir / "spot_expr_genes_by_bins.npz",
+        seg_dir / "spot_coords_um.npy",
+        seg_dir / "spot_labels.npy",
+        seg_dir / "cell_ids.npy",
+        seg_dir / "gene_names.tsv",
+        seg_dir / "bin_ids.tsv",
+    ]
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        raise FileNotFoundError("Missing CRC input file(s): " + ", ".join(missing))
+
+    physical_coords_all = np.load(seg_dir / "spot_coords_um.npy", mmap_mode="r")
+    labels_all = np.load(seg_dir / "spot_labels.npy", mmap_mode="r")
+    cell_ids_all = np.load(seg_dir / "cell_ids.npy", allow_pickle=False)
+
+    if verbose:
+        xy_min = np.asarray(physical_coords_all).min(axis=0)
+        xy_max = np.asarray(physical_coords_all).max(axis=0)
+        print(f"CRC registered spot range (µm): "
+              f"x=[{xy_min[0]:.2f}, {xy_max[0]:.2f}], "
+              f"y=[{xy_min[1]:.2f}, {xy_max[1]:.2f}]")
+
+    keep = np.ones(len(labels_all), dtype=bool)
+    if x_range is not None:
+        keep &= ((physical_coords_all[:, 0] >= x_range[0]) &
+                 (physical_coords_all[:, 0] <= x_range[1]))
+    if y_range is not None:
+        keep &= ((physical_coords_all[:, 1] >= y_range[0]) &
+                 (physical_coords_all[:, 1] <= y_range[1]))
+    kept_indices = np.flatnonzero(keep)
+    if kept_indices.size == 0:
+        raise ValueError(
+            f"CRC window x={x_range}, y={y_range} contains no registered spots"
+        )
+
+    # Crop the shared sparse expression only after the inexpensive coordinate
+    # mask is known.  CSR column slicing is cheap at this dataset size and keeps
+    # memory proportional to the selected window.
+    dnb_expr = load_npz(seg_dir / "spot_expr_genes_by_bins.npz")[:, kept_indices].tocsr()
+    physical_coords = np.asarray(physical_coords_all[kept_indices], dtype=np.float64)
+    grid_coords_all = _load_crc_grid_coords(seg_dir / "bin_ids.tsv")
+    dnb_coords = grid_coords_all[kept_indices]
+    original_labels = np.asarray(labels_all[kept_indices], dtype=np.int32)
+
+    # A cropped window usually contains only a subset of the full-slice cells.
+    # Vectorized remapping prevents large original labels from being interpreted
+    # as column indices by cell-level aggregation.
+    present_labels = np.unique(original_labels[original_labels >= 0])
+    if present_labels.size == 0:
+        raise ValueError(
+            f"CRC {segmentation} window x={x_range}, y={y_range} has no segmented cells"
+        )
+    if present_labels[-1] >= len(cell_ids_all):
+        raise ValueError("CRC spot label exceeds the available cell_ids mapping")
+    label_lookup = np.full(int(present_labels[-1]) + 1, -1, dtype=np.int32)
+    label_lookup[present_labels] = np.arange(len(present_labels), dtype=np.int32)
+    dnb_labels = np.full_like(original_labels, -1)
+    covered = original_labels >= 0
+    dnb_labels[covered] = label_lookup[original_labels[covered]]
+    cell_ids = np.asarray(cell_ids_all)[present_labels]
+    cell_coords = _cell_centroids(physical_coords, dnb_labels, len(cell_ids))
+
+    with open(seg_dir / "gene_names.tsv", "r", encoding="utf-8") as handle:
+        next(handle)  # gene_name header
+        gene_names = np.asarray([line.rstrip("\n") for line in handle])
+    if dnb_expr.shape[0] != len(gene_names):
+        raise ValueError("CRC expression rows and gene_names.tsv are inconsistent")
+
+    if verbose:
+        n_cell_spots = int((dnb_labels >= 0).sum())
+        n_empty_spots = int((dnb_labels < 0).sum())
+        print(f"CRC/{segmentation}: {len(gene_names):,} genes, "
+              f"{len(dnb_labels):,} spots ({n_cell_spots:,} cell + "
+              f"{n_empty_spots:,} empty), {len(cell_ids):,} cells")
+
+    return {
+        "dnb_expr": dnb_expr,
+        "dnb_coords": dnb_coords,
+        "dnb_labels": dnb_labels,
+        "gene_names": gene_names,
+        "cell_ids": cell_ids,
+        "cell_coords": cell_coords,
+        "physical_spot_coords": physical_coords,
+        "ann_map": {},
+        "adata": None,
+        "x_range": x_range,
+        "y_range": y_range,
+        "segmentation": segmentation,
+    }
+
+
+def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None, dataset_tag="visiumhd", spot_pitch_um=2.0):
+    """Run the shared comparison pipeline for Visium HD-like 2-µm spots."""
     if methods is None:
         methods = ['sparkle', 'spatial_soupx', 'soupx']
     methods = [m.lower().strip() for m in methods]
@@ -2043,12 +2225,12 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
     results = {}
 
     if 'sparkle' in methods:
-        corrected, diag = run_sparkle_method(sub, spot_pitch_um=2.0, n_high_genes=n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, max_radius=max_radius)
+        corrected, diag = run_sparkle_method(sub, spot_pitch_um=spot_pitch_um, n_high_genes=n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, max_radius=max_radius)
         if corrected is not None:
             results['SPARKLE'] = {'corrected': corrected, 'diag': diag}
 
     if 'spatial_soupx' in methods:
-        corrected, diag = run_spatial_soupx_method(sub, spot_pitch_um=2.0, lambda_grid=lambda_grid, max_radius=max_radius)
+        corrected, diag = run_spatial_soupx_method(sub, spot_pitch_um=spot_pitch_um, lambda_grid=lambda_grid, max_radius=max_radius)
         results['SpatialSoupX'] = {'corrected': corrected, 'diag': diag}
 
     if 'soupx' in methods:
@@ -2077,9 +2259,10 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
     n_cells = len(cell_ids)
     raw_cell = compute_cell_expr(sub['dnb_expr'], sub['dnb_labels'], n_cells)
     ann_map = data.get('ann_map', {})
+    cell_coords = data.get('cell_coords')
     save_result_h5ad(raw_cell, sub['gene_names'], cell_ids, ann_map,
                      reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW",
-                     save_h5ad=save_h5ad)
+                     save_h5ad=save_h5ad, cell_coords=cell_coords)
     metrics = {
         "dataset": tag,
         "n_cells": int(raw_cell.shape[1]),
@@ -2095,7 +2278,8 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
                              reports_root / "h5ad" / f"{tag}_{method_name}.h5ad",
                              method_name,
                              save_h5ad=save_h5ad,
-                             var_data=var_data)
+                             var_data=var_data,
+                             cell_coords=cell_coords)
             metrics["methods"][method_name] = {
                 "runtime": r['diag'].get('runtime', 0),
             }
@@ -2120,8 +2304,11 @@ def main():
     parser = argparse.ArgumentParser(
         description="Final comparison: Cell SPARKLE vs Spatial SoupX vs SoupX")
     parser.add_argument("--dataset", type=str, default="axolotl",
-                        choices=["axolotl", "mosta", "mousebrain", "visiumhd", "ovarian", "synthetic"],
+                        choices=["axolotl", "mosta", "mousebrain", "visiumhd", "ovarian", "crc", "synthetic"],
                         help="Dataset (default: axolotl)")
+    parser.add_argument("--crc-segmentation", type=str, default="both",
+                        choices=["proseg", "stardist", "both"],
+                        help="CRC segmentation condition(s) to evaluate (default: both)")
     parser.add_argument("--scenario", type=str, default="S1",
                         choices=sorted(SCENARIOS.keys()),
                         help="Synthetic scenario ID (default: S1)")
@@ -2200,6 +2387,29 @@ def main():
             sys.exit(1)
         sub = subsample_data(data, args.n_genes, cut_genes=cut_genes)
         run_visiumhd_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius, dataset_tag="ovarian")
+    elif args.dataset == "crc":
+        # Run both segmentation conditions sequentially under distinct tags.
+        # The raw expression and spatial window are identical, so differences
+        # downstream can be attributed to the label map rather than input data.
+        segmentations = (["proseg", "stardist"]
+                         if args.crc_segmentation == "both"
+                         else [args.crc_segmentation])
+        for segmentation in segmentations:
+            print(f"\n{'#' * 60}\nCRC SEGMENTATION CONDITION: {segmentation.upper()}\n{'#' * 60}")
+            data = load_crc_data(
+                segmentation=segmentation, x_range=x_range, y_range=y_range
+            )
+            sub = subsample_data(data, args.n_genes, cut_genes=cut_genes)
+            run_visiumhd_comparison(
+                data, sub, args.n_genes, methods,
+                n_high_genes=args.n_high_genes,
+                lambda_grid=lambda_grid,
+                r2_threshold=r2_threshold,
+                save_h5ad=save_h5ad,
+                max_radius=max_radius,
+                dataset_tag=f"crc_{segmentation}",
+                spot_pitch_um=2.0,
+            )
     else:  # synthetic
         if args.all_scenarios:
             run_all_synthetic_scenarios(methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius)
