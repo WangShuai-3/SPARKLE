@@ -316,6 +316,21 @@ def _plot_results(df, output_dir):
     fig.savefig(output_dir / "resource_benchmark_runtime.png", dpi=150)
     plt.close(fig)
 
+    if "area_mm2" in df:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        if "cpu_runtime_sec" in df:
+            ax.plot(df["area_mm2"], df["cpu_runtime_sec"], marker="o", label="CPU")
+        if "gpu_runtime_sec" in df:
+            ax.plot(df["area_mm2"], df["gpu_runtime_sec"], marker="o", label="GPU")
+        ax.set_xlabel("Tissue window area (mm²)")
+        ax.set_ylabel("Runtime (s)")
+        ax.set_title("SPARKLE CPU/GPU runtime vs tissue area (MouseBrain)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        fig.savefig(output_dir / "resource_benchmark_runtime_area.png", dpi=150)
+        plt.close(fig)
+
     if "gpu_speedup" in df and df["gpu_speedup"].notna().any():
         fig, ax = plt.subplots(figsize=(8, 5))
         ax.plot(df["n_dnbs"], df["gpu_speedup"], marker="o", color="#27ae60")
@@ -328,20 +343,92 @@ def _plot_results(df, output_dir):
         fig.savefig(output_dir / "resource_benchmark_gpu_speedup.png", dpi=150)
         plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    if "cpu_host_rss_increment_mb" in df:
-        ax.plot(df["n_dnbs"], df["cpu_host_rss_increment_mb"], marker="o", label="CPU RSS")
-    if "gpu_peak_allocated_mb" in df:
-        ax.plot(df["n_dnbs"], df["gpu_peak_allocated_mb"], marker="o", label="GPU allocated")
-        ax.plot(df["n_dnbs"], df["gpu_peak_reserved_mb"], marker="o", label="GPU reserved")
-    ax.set_xlabel("Number of DNBs")
-    ax.set_ylabel("Memory (MB)")
-    ax.set_title("SPARKLE CPU/GPU peak memory vs data size (MouseBrain)")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    fig.savefig(output_dir / "resource_benchmark_memory.png", dpi=150)
-    plt.close(fig)
+    def plot_memory_panels(x_column, x_label, filename):
+        """Keep host RAM and device VRAM in separate, comparable panels."""
+        panel_kinds = []
+        if any(c in df for c in ("cpu_host_rss_peak_mb", "gpu_host_rss_peak_mb")):
+            panel_kinds.append("host_peak")
+        if any(
+            c in df
+            for c in ("cpu_host_rss_increment_mb", "gpu_host_rss_increment_mb")
+        ):
+            panel_kinds.append("host_increment")
+        if "gpu_peak_allocated_mb" in df:
+            panel_kinds.append("device")
+        if not panel_kinds:
+            return
+
+        fig, axes = plt.subplots(
+            1, len(panel_kinds), figsize=(6 * len(panel_kinds), 4.8), squeeze=False
+        )
+        for ax, kind in zip(axes[0], panel_kinds):
+            if kind == "host_peak":
+                if "cpu_host_rss_peak_mb" in df:
+                    ax.plot(
+                        df[x_column],
+                        df["cpu_host_rss_peak_mb"] / 1024.0,
+                        marker="o",
+                        label="CPU run",
+                    )
+                if "gpu_host_rss_peak_mb" in df:
+                    ax.plot(
+                        df[x_column],
+                        df["gpu_host_rss_peak_mb"] / 1024.0,
+                        marker="o",
+                        label="GPU run",
+                    )
+                ax.set_title("Host RAM: absolute peak RSS")
+            elif kind == "host_increment":
+                if "cpu_host_rss_increment_mb" in df:
+                    ax.plot(
+                        df[x_column],
+                        df["cpu_host_rss_increment_mb"] / 1024.0,
+                        marker="o",
+                        label="CPU run",
+                    )
+                if "gpu_host_rss_increment_mb" in df:
+                    ax.plot(
+                        df[x_column],
+                        df["gpu_host_rss_increment_mb"] / 1024.0,
+                        marker="o",
+                        label="GPU run",
+                    )
+                ax.set_title("Host RAM: SPARKLE increment")
+            else:
+                ax.plot(
+                    df[x_column],
+                    df["gpu_peak_allocated_mb"] / 1024.0,
+                    marker="o",
+                    label="Allocated",
+                )
+                if "gpu_peak_reserved_mb" in df:
+                    ax.plot(
+                        df[x_column],
+                        df["gpu_peak_reserved_mb"] / 1024.0,
+                        marker="o",
+                        linestyle="--",
+                        label="Reserved",
+                    )
+                ax.set_title("GPU device VRAM")
+            ax.set_xlabel(x_label)
+            ax.set_ylabel("Memory (GiB)")
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+        fig.suptitle("SPARKLE resource usage by memory pool (MouseBrain)")
+        plt.tight_layout()
+        fig.savefig(output_dir / filename, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    plot_memory_panels(
+        "n_dnbs", "Number of DNBs", "resource_benchmark_memory.png"
+    )
+    if "area_mm2" in df:
+        plot_memory_panels(
+            "area_mm2",
+            "Tissue window area (mm²)",
+            "resource_benchmark_memory_area.png",
+        )
 
     print(f"Saved plots in {output_dir}")
 

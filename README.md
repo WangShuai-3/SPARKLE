@@ -433,6 +433,7 @@ python evaluation/scripts/final_comparison.py \
 - **`evaluation/scripts/prepare_mousebrain_snrna_reference.R`** — extract `cell_subclass` pseudobulk profiles from the provided Seurat RDS reference for the script above.
 - **`evaluation/scripts/compare_sparkle_cpu_gpu.py`** — verify CPU/GPU lambda, alpha, R², and corrected-expression consistency on deterministic synthetic data.
 - **`evaluation/scripts/benchmark_resource.py`** — paired CPU/GPU SPARKLE benchmark across shrinking MouseBrain windows. Reports runtime, speedup, host RSS, CUDA peak allocated/reserved memory, and produces runtime/speedup/memory plots.
+- The memory plot separates absolute host RSS, SPARKLE host-RAM increment, and GPU device VRAM into distinct panels; allocated VRAM is a subset of reserved VRAM and is not added to it.
 
 Run any script with `--help` for detailed options.
 

@@ -121,10 +121,13 @@ python evaluation/scripts/benchmark_resource.py \
 以及 `*_cell_aggregation_sec`、`*_empty_bin_assignment_sec`、
 `*_empty_expression_aggregation_sec`、`*_empty_graph_build_sec`、
 `*_lambda_search_sec`、`*_alpha_estimation_sec`、`*_correction_sec` 等阶段耗时。
-其中 allocated 表示
-张量实际占用，reserved 表示 PyTorch CUDA allocator 向驱动保留的显存，通常后者
-更接近运行任务需要预留的显存容量。`--plot` 会额外生成 runtime、GPU speedup 和
-memory 三张图。只测一种后端可使用 `--backends cpu` 或 `--backends gpu`；在 GPU
+其中 allocated 表示张量实际占用，reserved 表示 PyTorch CUDA allocator 向驱动
+保留的显存，通常后者更接近运行任务需要预留的显存容量；allocated 是 reserved
+的一部分，二者不能相加。memory 图将资源池分为三个 panel：CPU/GPU 运行的 host
+RAM 绝对 RSS 峰值、相对运行前基线的 host RAM 增量，以及仅 GPU 才有的 device
+VRAM allocated/reserved，避免把系统内存和显存当成同一种可互换资源。
+`--plot` 会额外生成 runtime、GPU speedup 和 memory 三类图。只测一种后端可使用
+`--backends cpu` 或 `--backends gpu`；在 GPU
 节点或 CI 中建议加 `--require-gpu`，避免自动回退被误当成 GPU 基准。
 如果已有相同窗口和参数的 CPU CSV，可通过 `--cpu-baseline` 复用；脚本会严格
 检查每个 run 的窗口、DNB 数、cell 数、empty DNB 数和 gene 数，再计算 GPU
