@@ -143,13 +143,20 @@ def main():
         rctd = pd.read_csv(csv_path)
         print(f"  CSV:  {rctd.shape[0]} rows, columns: {rctd.columns.tolist()}")
 
-        # Build lookup: cell_id -> first_type (vectorized)
-        rctd_map = dict(zip(rctd["cell_id"], rctd["first_type"]))
-        mapped = adata.obs["cell_id"].map(rctd_map)
+        # Build lookup via cell_id -> enrich multiple obs columns
+        rctd = rctd.set_index("cell_id")
+        # First_type -> annotation (the primary column the eval script reads)
+        mapped = adata.obs["cell_id"].map(rctd["first_type"])
         n_missing = int(mapped.isna().sum())
         n_mapped = int(mapped.notna().sum())
-        # Keep existing "Unknown" for any unmapped cell
         adata.obs["annotation"] = mapped.fillna(adata.obs["annotation"]).astype(object).values
+        # Additional RCTD confidence columns (if present in the CSV)
+        bonus_numeric = {"singlet_score": "rctd_singlet_score",
+                         "min_score": "rctd_min_score",
+                         "score_delta": "rctd_score_delta"}
+        for csv_col, obs_col in bonus_numeric.items():
+            if csv_col in rctd.columns:
+                adata.obs[obs_col] = adata.obs["cell_id"].map(rctd[csv_col]).astype(float)
 
         print(f"  Mapped: {n_mapped}, missing (kept Unknown): {n_missing}")
         print(f"  Post-injection annotation counts:\n{adata.obs['annotation'].value_counts().to_string()}")
