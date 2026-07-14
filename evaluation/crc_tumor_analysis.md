@@ -7,11 +7,12 @@
 > 方法：SPARKLE / SpatialSoupX / SoupX / DecontX，以 RAW 为基线
 
 本文参照 `evaluation/ovarian_tumor_analysis.md` 的评估思路，在同一个 CRC
-窗口中平行处理两套分割。重点回答三个问题：
+窗口中平行处理两套分割。重点回答四个问题：
 
 1. 不同校正方法是否提高 RCTD 细胞类型映射的确定性；
 2. 校正后的类型 pseudobulk 是否更接近配对的 Pelka CRC 单细胞参考；
-3. 上述结论是否在 Proseg 与 StarDist 两种分割下保持一致。
+3. 考虑细胞质心距离后，空间 CellChat 通讯是否更接近 Pelka 单细胞参考；
+4. 上述结论是否在 Proseg 与 StarDist 两种分割下保持一致。
 
 所有 baseline 均使用仓库原始实现和默认算法参数；没有为本次全基因运行增加
 降维、减少 `n_init`、缩减 marker 或改写后验计算。
@@ -62,6 +63,8 @@ run_rctd_crc.R                                # 每个分割、每个方法独�
 inject_rctd_annotations.py --annotation-method RAW
                                                # 固定 RAW 注释，隔离表达校正效应
 evaluate_mousebrain_h5ad.py                   # 类型 pseudobulk vs 单细胞 reference
+run_cellchat_spatial_crc.R                    # 质心距离约束的空间 CellChat v2
+analyze_crc_spatial_cellchat_vs_scrna.py      # 空间互作 vs Pelka CellChat reference
 ```
 
 RCTD 与空间数据共有 **17,590 个基因**。单细胞相关分析只使用相应条件中
@@ -278,7 +281,91 @@ Proseg 的 Δ 范围为 −0.0053 至 −0.0018；StarDist 为 +0.0274 至 +0.03
 
 ---
 
-## 4. 总体结论
+## 4. 考虑质心距离的空间 CellChat 与单细胞参考
+
+参照 ovarian 分析，使用 **CellChat v2.2.0** 的空间模式，并设置
+`distance.use=TRUE`、`interaction.range=250 µm`、`contact.range=100 µm`、
+`nboot=20`、随机种子 42。坐标直接使用分割 mask 的物理质心。每套分割内五种
+方法固定使用同一批 RAW-RCTD `first_type` 细胞；少于 10 个细胞的类型在运行前
+统一排除：Proseg 为 **3,924 个细胞、14 类**，StarDist 为 **2,290 个细胞、
+14 类**。CRC 的肿瘤类型定义为 Pelka `ClusterMidway=EpiT`，正常上皮 `Epi` 不
+归入肿瘤。
+
+Pelka 平衡参考的 9,781 个单细胞也用同一版本的 R CellChat 和 CellChatDB.human
+运行，但不使用空间距离。空间与单细胞互作均按
+`(source, target, ligand, receptor)` 唯一键比较，显著阈值为 `p<0.05`。
+
+### 4.1 空间通讯数量与概率
+
+| 分割 | 方法 | 显著互作 | 总概率 | 自分泌概率 | EpiT 相关概率 |
+|------|------|---------:|-------:|-----------:|--------------:|
+| Proseg | RAW | 1,167 | 0.2420 | 0.0597 | 0.0648 |
+| Proseg | **SPARKLE** | **1,156（−0.9%）** | **0.2215（−8.5%）** | **0.0571（−4.3%）** | **0.0590（−8.9%）** |
+| Proseg | SoupX | 1,165 | 0.2331 | 0.0581 | 0.0619 |
+| Proseg | SpatialSoupX | 14,977 | 4.7473 | 1.0697 | 0.7377 |
+| Proseg | DecontX | 0 | 0 | 0 | 0 |
+| StarDist | RAW | 166 | 0.05045 | 0.01700 | 0.02690 |
+| StarDist | **SPARKLE** | **159（−4.2%）** | **0.03401（−32.6%）** | **0.00855（−49.7%）** | **0.01258（−53.2%）** |
+| StarDist | SoupX | 166 | 0.04919 | 0.01662 | 0.02594 |
+| StarDist | SpatialSoupX | 5,908 | 1.5508 | 0.2950 | 0.3746 |
+| StarDist | DecontX | 0 | 0 | 0 | 0 |
+
+SPARKLE 保留了绝大多数显著互作，但降低通讯概率；StarDist 的下降明显大于
+Proseg。SoupX 仍接近 RAW；SpatialSoupX 在两套分割分别把显著互作放大约
+12.8 倍和 35.6 倍；DecontX 没有任何过表达配体–受体对，二者都不宜解读为
+可靠的通讯恢复。
+
+不过，**通讯概率下降本身不是改善证据**。例如 StarDist 中下降最大的两项
+EpiT→EpiT 信号是 `CEACAM5→CEACAM6` 和 `CEACAM6→CEACAM6`，它们在 Pelka
+单细胞参考中均为显著互作。因此不能把 StarDist 的 −53.2% 肿瘤相关概率全部
+归因于去除 ambient 假信号。
+
+### 4.2 单细胞参考的互作集合验证
+
+Pelka 参考中有 17,580 个可检验互作，其中 15,119 个在 `p<0.05` 下显著。下面
+以每套分割的 RAW 显著互作为锚，区分“单细胞参考阳性”和“单细胞参考阴性”：
+
+| 分割/范围 | RAW TP / FP | SPARKLE TP / FP | RAW-TP 保留 | RAW-FP 去除 | 新增参考阴性 |
+|-----------|------------:|-----------------:|------------:|------------:|-------------:|
+| Proseg / 全部 | 786 / 14 | 786 / 13 | 781/786（99.36%） | 1/14（7.14%） | 0 |
+| Proseg / EpiT 相关 | 246 / 5 | 246 / 5 | **246/246（100%）** | 0/5 | 0 |
+| StarDist / 全部 | 120 / 8 | 120 / 8 | **120/120（100%）** | 0/8 | 0 |
+| StarDist / EpiT 相关 | 61 / 4 | 61 / 4 | **61/61（100%）** | 0/4 | 0 |
+
+这里 SPARKLE 的当前 TP 数可以与 RAW-TP 保留数不同：Proseg 全部范围丢失 5 个
+RAW-TP，同时新增 5 个参考阳性互作，因此总 TP 仍为 786。更重要的是，RAW 的
+参考阴性互作只有 14 个和 8 个，分母太小；CRC 不能复现 ovarian 中“去除约 23%
+假阳性”的强结论。能可靠支持的是：**没有新增参考阴性互作，且 EpiT 相关的
+RAW 参考阳性互作在两套分割中全部保留。**
+
+### 4.3 单细胞参考的通讯概率排序
+
+空间距离核与无空间单细胞结果的绝对概率不可直接比较，因此只比较排序。对
+“RAW 显著且单细胞可检验”的固定互作集合，将校正后消失的互作记为概率 0，
+计算 Spearman 相关；95% 区间来自按 source-target 细胞类型对分层的 5,000 次
+配对 bootstrap。
+
+| 分割/范围 | RAW | SPARKLE | Δ | bootstrap 95% 区间 |
+|-----------|----:|--------:|--:|---------------------:|
+| Proseg / 全部（n=800） | 0.6126 | 0.5938 | −0.0187 | [−0.0430, +0.0021] |
+| Proseg / EpiT 相关（n=251） | 0.6668 | 0.6754 | **+0.0086** | **[+0.0022, +0.0167]** |
+| StarDist / 全部（n=128） | 0.5863 | 0.6145 | +0.0282 | [−0.0000, +0.0609] |
+| StarDist / EpiT 相关（n=65） | 0.6664 | 0.7123 | +0.0459 | [−0.0119, +0.1089] |
+
+因此 CRC 的空间通讯结论是**局部、有限改善，而非全局明确改善**：两种分割的
+EpiT 相关排序都向单细胞参考靠近，但只有 Proseg 的区间明确高于 0；StarDist
+方向为正但互作数较少、区间跨 0。Proseg 全部互作没有改善，StarDist 全部互作
+仅呈边界正向趋势。结合 4.2，最稳妥的表述是 SPARKLE 基本保留单细胞支持的
+肿瘤通讯，并改善部分肿瘤互作的相对排序，但没有充分证据把整体强度下降都称为
+去除假阳性。
+
+> 单细胞参考并非绝对真值：它混合多个 donor，且组织解离会丢失空间依赖信号。
+> 另外，Proseg 仅 800/1,167、StarDist 仅 128/166 个 RAW 空间显著互作能在参考
+> 的测试集合中评估；其余互作不被计作假阳性或真阳性。
+
+---
+
+## 5. 总体结论
 
 1. **窗口与基因覆盖**：在 800×800 µm、160,064 spots、18,085 全基因上完成了
    Proseg 与 StarDist 的五方法平行评估。
@@ -289,13 +376,16 @@ Proseg 的 Δ 范围为 −0.0053 至 −0.0018；StarDist 为 +0.0274 至 +0.03
    提升 +0.0284；两种分割中类型间相关都下降，方向一致。
 4. **分割敏感性**：RAW singlet、可用细胞数、cell/empty spot 比例以及方法内部
    参数均随分割明显变化。双条件报告是必要的，不能只展示一套 segmentation。
-5. **baseline 解释**：SoupX 成本高而变化小；DecontX 的参考一致性损失和细胞
+5. **空间通讯**：SPARKLE 在两套分割中保留全部 RAW 的 EpiT 相关参考阳性互作，
+   且肿瘤互作概率排序向单细胞参考靠近；但只有 Proseg 的排序增量区间明确高于
+   0，参考阴性分母很小，不能声称 CRC 的整体通讯已明确改善。
+6. **baseline 解释**：SoupX 成本高而变化小；DecontX 的参考一致性损失和细胞
    退出提示激进校正；SpatialSoupX 的高 singlet/高 reference 相关不能脱离低保留率
    和更高类型间相关单独解读。
 
 ---
 
-## 5. 结果位置
+## 6. 结果位置
 
 - 五方法 h5ad：`evaluation/reports/h5ad/`
 - RCTD：`evaluation/reports/rctd_crc/{proseg,stardist}/`
@@ -307,6 +397,8 @@ Proseg 的 Δ 范围为 −0.0053 至 −0.0018；StarDist 为 +0.0274 至 +0.03
   `evaluation/reports/crc_eval_paired_shared_r2/`
 - 严格配对同细胞 RCTD score 结果：
   `evaluation/reports/crc_eval_paired_rctd/`
+- 空间 CellChat 与 Pelka 单细胞参考结果：
+  `evaluation/reports/crc_eval_cellchat_spatial/`
 
 中间矩阵和图表由 `.gitignore` 忽略，不纳入版本库；本报告、CRC 流程脚本和命令
 示例纳入版本控制。

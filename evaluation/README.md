@@ -261,6 +261,20 @@ python evaluation/scripts/analyze_crc_paired_shared_r2.py
 # 10,000 次按共识细胞类型分层的配对 bootstrap。主要指标 score margin 越低，
 # 表示 RCTD 越偏向 singlet；跨 segmentation 的绝对 score 仅作描述。
 python evaluation/scripts/analyze_crc_paired_rctd_scores.py
+
+# 8. 考虑分割细胞质心距离的空间 CellChat v2；两套分割分别运行，五种方法在
+# 各分割内固定使用 RAW-RCTD first_type 和完全相同的细胞集合。
+CRC_SEGMENTATION=proseg \
+  /home/shuaiwang/miniconda3/envs/r-env/bin/Rscript \
+  evaluation/scripts/run_cellchat_spatial_crc.R
+
+CRC_SEGMENTATION=stardist \
+  /home/shuaiwang/miniconda3/envs/r-env/bin/Rscript \
+  evaluation/scripts/run_cellchat_spatial_crc.R
+
+# 9. 将空间显著配体-受体互作与同一 R CellChat 生成的 Pelka 单细胞参考比较；
+# 同时对固定 RAW 互作集合执行 5,000 次分层配对 bootstrap。
+python evaluation/scripts/analyze_crc_spatial_cellchat_vs_scrna.py
 ```
 
 CRC 注册坐标带有小角度旋转。loader 用注册后的物理坐标筛选窗口并保存 cell
