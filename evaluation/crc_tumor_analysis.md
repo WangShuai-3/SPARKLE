@@ -153,6 +153,45 @@ RAW 在 Proseg 与 StarDist 中的 singlet 分别为 37.31% 和 63.31%，实际 
 **segmentation 本身是 RCTD 结论的重要条件**。因此本报告不合并两个条件，也不
 把某一分割的绝对 singlet 值外推为校正算法的普遍效果。
 
+### 2.4 严格配对的 RCTD score 比较
+
+为避免 2.1/2.2 中细胞保留集合不同造成选择偏差，进一步运行
+`analyze_crc_paired_rctd_scores.py`。该分析沿用 3.4 节的跨分割物理细胞配对，
+并只保留 Proseg/StarDist × RAW/SPARKLE 四份 RCTD 结果都存在的细胞：最终纳入
+**1,328/1,423 对（93.32%）、13 个类型**。RAW 与 SPARKLE 在同一分割内逐细胞
+配对，bootstrap 也按共识细胞类型分层并使用相同的重采样索引（10,000 次）。
+
+RCTD doublet mode 的主要连续指标定义为
+`score margin = singlet_score - min_score`；spacexr 在 margin < 25 时判为 singlet，
+因此 **margin 越低越偏向 singlet**。结果如下：
+
+| 分割 | RAW margin | SPARKLE margin | 配对 Δ | bootstrap 95% 区间 | RAW singlet | SPARKLE singlet | Δ singlet | first_type 一致率 |
+|------|-----------:|---------------:|-------:|---------------------:|------------:|----------------:|----------:|------------------:|
+| Proseg | 31.074 | 28.090 | **−2.984** | [−3.437, −2.575] | 47.97% | 52.48% | **+4.52 pp** | 97.74% |
+| StarDist | 14.573 | 14.051 | **−0.522** | [−0.975, −0.045] | 73.42% | 74.32% | +0.90 pp | 93.52% |
+
+- **Proseg 是明确改善**：63 个细胞由 doublet 转为 singlet、仅 3 个反向变化；
+  精确 McNemar/binomial 检验 `p=1.30×10⁻15`，singlet 增量的 bootstrap 95%
+  区间为 [+3.39, +5.72] pp。13/13 个细胞类型的平均 margin 都下降，说明结果
+  不是由单一大类驱动。
+- **StarDist 的连续 margin 有小幅改善，但类别变化证据不足**：62 个细胞转为
+  singlet、50 个反向变化，`p=0.299`；singlet 增量区间 [−0.68, +2.48] pp 跨过
+  0。13 个类型中 9 个 margin 下降。
+- RAW→SPARKLE 后 `first_type` 一致率仍为 93.5%–97.7%，主要变化是 singlet/
+  doublet 置信度，而非大范围重写主细胞类型。
+
+敏感性分析将匹配距离改为 3–7.5 µm，并将每类型最少细胞数改为 3、10、20：
+Proseg margin Δ 为 −2.67 至 −2.98、singlet 增加 +4.29 至 +4.59 pp；StarDist
+margin Δ 为 −0.49 至 −0.70，而 singlet 变化区间在所有设置均跨 0，结论稳定。
+
+这与 3.4 节形成互补：Proseg 的 RCTD singlet 置信度明确改善，但对单细胞参考的
+表达相关基本不变；StarDist 的参考相关明确提高，而 RCTD 类别变化较小。两组
+指标分别衡量混合类型判定与表达保真，不能互相替代。
+
+> 不同 segmentation 的绝对 RCTD score 还受 UMI 深度和每个细胞所含 spots 数量
+> 影响，因此 Proseg 与 StarDist 的绝对 margin 只能作描述，不能据此给分割方法
+> 排名。这里的主要推断是每套分割内部 RAW→SPARKLE 的同细胞配对变化。
+
 ---
 
 ## 3. 与 Pelka 单细胞 reference 的表达一致性
@@ -243,8 +282,9 @@ Proseg 的 Δ 范围为 −0.0053 至 −0.0018；StarDist 为 +0.0274 至 +0.03
 
 1. **窗口与基因覆盖**：在 800×800 µm、160,064 spots、18,085 全基因上完成了
    Proseg 与 StarDist 的五方法平行评估。
-2. **RCTD**：SPARKLE 在两种分割中都降低 shared-cell doublet（Proseg −2.72 pp；
-   StarDist −3.04 pp），且保留的细胞显著多于 DecontX/SpatialSoupX。
+2. **RCTD**：普通 shared-cell 汇总中 SPARKLE 在两种分割都降低 doublet；进一步
+   固定同一批物理细胞后，Proseg 的 margin 和 singlet 分类均明确改善，StarDist
+   仅有较小的 margin 改善，singlet 比例变化未达显著。
 3. **单细胞保真**：Proseg 中 SPARKLE 与 RAW 基本持平（−0.0007），StarDist 中
    提升 +0.0284；两种分割中类型间相关都下降，方向一致。
 4. **分割敏感性**：RAW singlet、可用细胞数、cell/empty spot 比例以及方法内部
@@ -265,6 +305,8 @@ Proseg 的 Δ 范围为 −0.0053 至 −0.0018；StarDist 为 +0.0274 至 +0.03
   `evaluation/reports/crc_eval_full/{proseg,stardist}/method_level_new/`
 - 严格配对同细胞/共同 R² 基因结果：
   `evaluation/reports/crc_eval_paired_shared_r2/`
+- 严格配对同细胞 RCTD score 结果：
+  `evaluation/reports/crc_eval_paired_rctd/`
 
 中间矩阵和图表由 `.gitignore` 忽略，不纳入版本库；本报告、CRC 流程脚本和命令
 示例纳入版本控制。

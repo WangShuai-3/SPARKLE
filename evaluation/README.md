@@ -255,6 +255,12 @@ python evaluation/scripts/evaluate_mousebrain_h5ad.py \
 # 6. 严格配对比较：跨分割相同物理细胞 + 两套分割共同通过 R² 的基因
 # 默认用 5-µm 双向最近邻、RAW-RCTD 共识注释和 1,000 次配对 bootstrap。
 python evaluation/scripts/analyze_crc_paired_shared_r2.py
+
+# 7. 在上述相同物理细胞中配对比较 RAW/SPARKLE 的 RCTD score
+# 仅纳入 Proseg/StarDist × RAW/SPARKLE 四份 RCTD 结果都存在的细胞；默认执行
+# 10,000 次按共识细胞类型分层的配对 bootstrap。主要指标 score margin 越低，
+# 表示 RCTD 越偏向 singlet；跨 segmentation 的绝对 score 仅作描述。
+python evaluation/scripts/analyze_crc_paired_rctd_scores.py
 ```
 
 CRC 注册坐标带有小角度旋转。loader 用注册后的物理坐标筛选窗口并保存 cell
