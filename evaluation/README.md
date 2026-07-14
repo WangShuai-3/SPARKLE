@@ -251,6 +251,10 @@ python evaluation/scripts/evaluate_mousebrain_h5ad.py \
     --snrna-ref evaluation/data/CRC/scrna_reference/prepared_cluster_midway/crc_cluster_midway_pseudobulk.csv \
     --output-dir evaluation/reports/crc_eval_full/stardist \
     --methods RAW,SPARKLE,SpatialSoupX,SoupX,DecontX
+
+# 6. 严格配对比较：跨分割相同物理细胞 + 两套分割共同通过 R² 的基因
+# 默认用 5-µm 双向最近邻、RAW-RCTD 共识注释和 1,000 次配对 bootstrap。
+python evaluation/scripts/analyze_crc_paired_shared_r2.py
 ```
 
 CRC 注册坐标带有小角度旋转。loader 用注册后的物理坐标筛选窗口并保存 cell
