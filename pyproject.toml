@@ -29,9 +29,13 @@ dev = [
     "leidenalg>=0.8.0",
     "soupx-python>=0.3.0",
     "pysctransform>=0.1",
+    "psutil>=5.9",
+]
+gpu = [
+    "torch>=2.0",
 ]
 all = [
-    "stambient[dev]",
+    "stambient[dev,gpu]",
 ]
 
 [tool.setuptools]

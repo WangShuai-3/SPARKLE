@@ -16,9 +16,16 @@ from scipy.stats import ttest_ind
 import anndata as ad
 from stambient import SPARKLE
 from evaluation.baselines.spatial_soupx import run_spatial_soupx
-from evaluation.baselines.soupx import run_soupx
+try:
+    from evaluation.baselines.soupx import run_soupx
+except ImportError as exc:
+    _SOUPX_IMPORT_ERROR = exc
+
+    def run_soupx(*args, **kwargs):
+        raise ImportError(
+            "SoupX is unavailable. Install soupx-python to run that baseline."
+        ) from _SOUPX_IMPORT_ERROR
 from evaluation.synthetic import generate_synthetic_data, SCENARIOS
-import scanpy as sc
 from scipy.spatial import cKDTree
 
 # Optional line-by-line memory profiler; falls back to no-op if not installed.
@@ -117,7 +124,7 @@ def _rmse(pred, true):
     return float(np.sqrt(np.mean((pred - true) ** 2)))
 
 
-def run_synthetic_comparison(data, n_genes=500, methods=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None):
+def run_synthetic_comparison(data, n_genes=500, methods=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None, use_gpu=False):
     """Run methods on a synthetic scenario and report RMSE reduction vs raw."""
     if methods is None:
         methods = ["sparkle", "spatial_soupx", "soupx", "decontx"]
@@ -176,6 +183,7 @@ def run_synthetic_comparison(data, n_genes=500, methods=None, lambda_grid=None, 
             cell_based=True,
             self_confidence_penalty=False,
             verbose=False,
+            use_gpu=use_gpu,
         )
         sp_corr, diag = model.fit_transform_from_dnb(dnb_expr, dnb_coords, dnb_labels)
         sp_t = time.time() - t0
@@ -311,7 +319,7 @@ def run_synthetic_comparison(data, n_genes=500, methods=None, lambda_grid=None, 
     return {"rmse_raw": rmse_raw, "results": results}
 
 
-def run_all_synthetic_scenarios(methods=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None):
+def run_all_synthetic_scenarios(methods=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None, use_gpu=False):
     """Run all S1–S10 scenarios and print a consolidated benchmark table."""
     from evaluation.synthetic.scenarios import list_scenarios
 
@@ -325,7 +333,7 @@ def run_all_synthetic_scenarios(methods=None, lambda_grid=None, r2_threshold=Non
 
     for sid in scenario_ids:
         data = load_synthetic_scenario_data(sid, seed=42)
-        summary = run_synthetic_comparison(data, n_genes=500, methods=methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius)
+        summary = run_synthetic_comparison(data, n_genes=500, methods=methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius, use_gpu=use_gpu)
         all_results[sid] = summary
         if not method_names:
             method_names = list(summary["results"].keys())
@@ -494,7 +502,7 @@ def load_axolotl_data_windowed(x_range=None, y_range=None):
     }
 
 
-def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None):
+def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None, use_gpu=False):
     """Run multi-method comparison for Axolotl."""
     if methods is None:
         methods = ['sparkle', 'spatial_soupx', 'soupx', 'decontx']
@@ -579,6 +587,7 @@ def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2
             bin_size=50, max_radius=max_radius_sp, n_high_genes=n_high, n_lambda_genes=min(100, sub_all.shape[0]),
             r2_threshold=r2_threshold_sp, lambda_grid=lambda_grid_sp,
             use_local_density=False, cell_based=True, verbose=True,
+            use_gpu=use_gpu,
         )
         sp_corr, sp_diag = model.fit_transform_from_dnb(sub_all, dnb_coords, dnb_labels)
         sp_t = time.time() - t0
@@ -726,7 +735,7 @@ def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2
     save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
 
 
-def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None):
+def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None, use_gpu=False):
     """Run 3-way comparison for MOSTA with cortical layer evaluation."""
     if methods is None:
         methods = ['sparkle', 'spatial_soupx', 'soupx']
@@ -741,7 +750,7 @@ def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None
     results = {}
 
     if 'sparkle' in methods:
-        corrected, diag = run_sparkle_method(sub, n_high_genes=n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, max_radius=max_radius)
+        corrected, diag = run_sparkle_method(sub, n_high_genes=n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, max_radius=max_radius, use_gpu=use_gpu)
         if corrected is not None:
             results['SPARKLE'] = {'corrected': corrected, 'diag': diag}
 
@@ -828,7 +837,7 @@ def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None
         print(f"  {method_name:<16} {runtime:7.1f}s  {str(de):>8} {s_str:>8}")
 
 
-def run_mousebrain_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None):
+def run_mousebrain_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None, use_gpu=False):
     """Run comparison for MouseBrain (T304), using cell_group annotations."""
     if methods is None:
         methods = ['sparkle', 'spatial_soupx', 'soupx', 'decontx']
@@ -843,7 +852,7 @@ def run_mousebrain_comparison(data, sub, n_genes=200, methods=None, n_high_genes
     results = {}
 
     if 'sparkle' in methods:
-        corrected, diag = run_sparkle_method(sub, n_high_genes=n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, max_radius=max_radius)
+        corrected, diag = run_sparkle_method(sub, n_high_genes=n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, max_radius=max_radius, use_gpu=use_gpu)
         if corrected is not None:
             results['SPARKLE'] = {'corrected': corrected, 'diag': diag}
 
@@ -1300,7 +1309,7 @@ def _build_sparkle_var_data(n_total_genes: int, diag: dict, r2_threshold: float)
 
 
 @profile
-def run_sparkle_method(sub, verbose=True, bin_size_um=25.0, spot_pitch_um=0.5, n_high_genes=500, lambda_grid=None, r2_threshold=None, max_radius=None):
+def run_sparkle_method(sub, verbose=True, bin_size_um=25.0, spot_pitch_um=0.5, n_high_genes=500, lambda_grid=None, r2_threshold=None, max_radius=None, use_gpu=False, gpu_dtype="float64", gpu_gene_batch_size=None):
     """运行 SPARKLE（本方法）。
 
     核心流程：
@@ -1348,6 +1357,9 @@ def run_sparkle_method(sub, verbose=True, bin_size_um=25.0, spot_pitch_um=0.5, n
         r2_threshold=r2_threshold,
         lambda_grid=lambda_grid,
         use_local_density=False, cell_based=True, verbose=verbose,
+        use_gpu=use_gpu,
+        gpu_dtype=gpu_dtype,
+        gpu_gene_batch_size=gpu_gene_batch_size,
     )
     t0 = time.time()
     corrected, diag = model.fit_transform_from_dnb(dnb_expr, dnb_coords, dnb_labels)
@@ -1424,6 +1436,7 @@ def run_decontx_method(sub, verbose=True):
 
     先聚合 DNB → cell 表达，再调用 decontx-python。
     """
+    import scanpy as sc
     from decontx import decontx as run_dx
     print(f"\n  DecontX...")
     dnb_expr = sub['dnb_expr']
@@ -2210,7 +2223,7 @@ def load_crc_data(segmentation="proseg", x_range=None, y_range=None, verbose=Tru
     }
 
 
-def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None, dataset_tag="visiumhd", spot_pitch_um=2.0):
+def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None, dataset_tag="visiumhd", spot_pitch_um=2.0, use_gpu=False):
     """Run the shared comparison pipeline for Visium HD-like 2-µm spots."""
     if methods is None:
         methods = ['sparkle', 'spatial_soupx', 'soupx']
@@ -2225,7 +2238,7 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
     results = {}
 
     if 'sparkle' in methods:
-        corrected, diag = run_sparkle_method(sub, spot_pitch_um=spot_pitch_um, n_high_genes=n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, max_radius=max_radius)
+        corrected, diag = run_sparkle_method(sub, spot_pitch_um=spot_pitch_um, n_high_genes=n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, max_radius=max_radius, use_gpu=use_gpu)
         if corrected is not None:
             results['SPARKLE'] = {'corrected': corrected, 'diag': diag}
 
@@ -2329,6 +2342,8 @@ def main():
                         help="Minimum weighted R^2 for SPARKLE gene correction (default: 0.01)")
     parser.add_argument("--max-radius", type=float, default=None,
                         help="Spatial neighborhood radius in um (default: 200 for axolotl, 300 for others)")
+    parser.add_argument("--use-gpu", action="store_true",
+                        help="Use CUDA for SPARKLE when available; otherwise fall back to CPU")
     parser.add_argument("--save-h5ad", action=argparse.BooleanOptionalAction, default=True,
                         help="Save corrected h5ad files (default: True)")
     parser.add_argument("--cut-genes", action=argparse.BooleanOptionalAction, default=False,
@@ -2366,27 +2381,27 @@ def main():
 
     if args.dataset == "axolotl":
         data = load_axolotl_data_windowed(x_range, y_range)
-        run_axolotl_comparison(data, args.n_genes, methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius)
+        run_axolotl_comparison(data, args.n_genes, methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius, use_gpu=args.use_gpu)
     elif args.dataset == "mosta":
         data = load_mosta_data(x_range=x_range, y_range=y_range)
         sub = subsample_data(data, args.n_genes, cut_genes=cut_genes)
-        run_mosta_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius)
+        run_mosta_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius, use_gpu=args.use_gpu)
     elif args.dataset == "mousebrain":
         data = load_mousebrain_data(x_range=x_range, y_range=y_range, annotation_level=args.annotation_level)
         sub = subsample_data(data, args.n_genes, cut_genes=cut_genes)
-        run_mousebrain_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius)
+        run_mousebrain_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius, use_gpu=args.use_gpu)
     elif args.dataset == "visiumhd":
         data = load_visiumhd_data(x_range=x_range, y_range=y_range, n_genes=args.n_genes)
         if data is None:
             sys.exit(1)
         sub = subsample_data(data, args.n_genes, cut_genes=cut_genes)
-        run_visiumhd_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius)
+        run_visiumhd_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius, use_gpu=args.use_gpu)
     elif args.dataset == "ovarian":
         data = load_ovarian_data(x_range=x_range, y_range=y_range, n_genes=args.n_genes)
         if data is None:
             sys.exit(1)
         sub = subsample_data(data, args.n_genes, cut_genes=cut_genes)
-        run_visiumhd_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius, dataset_tag="ovarian")
+        run_visiumhd_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius, dataset_tag="ovarian", use_gpu=args.use_gpu)
     elif args.dataset == "crc":
         # Run both segmentation conditions sequentially under distinct tags.
         # The raw expression and spatial window are identical, so differences
@@ -2409,13 +2424,14 @@ def main():
                 max_radius=max_radius,
                 dataset_tag=f"crc_{segmentation}",
                 spot_pitch_um=2.0,
+                use_gpu=args.use_gpu,
             )
     else:  # synthetic
         if args.all_scenarios:
-            run_all_synthetic_scenarios(methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius)
+            run_all_synthetic_scenarios(methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius, use_gpu=args.use_gpu)
         else:
             data = load_synthetic_scenario_data(args.scenario, seed=42)
-            run_synthetic_comparison(data, args.n_genes, methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius)
+            run_synthetic_comparison(data, args.n_genes, methods, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius, use_gpu=args.use_gpu)
 
 
 if __name__ == "__main__":

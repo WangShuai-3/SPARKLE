@@ -13,9 +13,24 @@ Key advantage over pure bin-level:
 import numpy as np
 from scipy.sparse import csr_matrix
 from typing import Dict, Tuple, Optional, List
+from time import perf_counter
 
-from .spatial import build_spatial_graph, build_spatial_graph_between, DistanceMetric
+from .spatial import (
+    build_spatial_distance_graph,
+    build_spatial_distance_graph_between,
+    distance_graph_to_weights,
+    DistanceMetric,
+)
 from .estimation import _expression_weight as _ewap_source
+from .gpu import (
+    resolve_gpu,
+    choose_gpu_gene_batch_size,
+    sparse_mm,
+    sparse_distance_graph_to_gpu_csr,
+    weighted_gpu_csr,
+    to_cpu,
+    to_gpu,
+)
 
 
 def _self_confidence_weight(source_c: np.ndarray, mode: str = "1/(1+s/p90)") -> np.ndarray:
@@ -55,15 +70,21 @@ def _bin_empty_dnbs(
     dnb_coords: np.ndarray,
     dnb_labels: np.ndarray,
     bin_size: int,
-) -> Tuple[np.ndarray, np.ndarray, list]:
-    """Bin only empty DNBs (label = -1) into spatial bins."""
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Assign empty DNBs to bins in one pass.
+
+    Returns bin centroids/areas plus two aligned arrays describing the sparse
+    DNB-to-bin mapping.  Returning the mapping directly avoids the former
+    per-bin boolean scan, whose complexity was O(n_empty * n_bins).
+    """
     empty_mask = dnb_labels < 0
     n_empty = empty_mask.sum()
     if n_empty == 0:
-        return np.zeros((0, 2)), np.zeros(0, dtype=np.int64), []
+        empty = np.zeros(0, dtype=np.int64)
+        return np.zeros((0, 2)), empty, empty, empty
 
-    empty_coords = dnb_coords[empty_mask]
-    empty_orig_idx = np.where(empty_mask)[0]
+    empty_orig_idx = np.flatnonzero(empty_mask)
+    empty_coords = dnb_coords[empty_orig_idx]
 
     x_min, y_min = empty_coords.min(axis=0)
     x_max, y_max = empty_coords.max(axis=0)
@@ -76,19 +97,22 @@ def _bin_empty_dnbs(
     bin_y = np.clip(bin_y, 0, n_bins_x - 1)  # reuse n_bins_x for both dims
     bin_ids = bin_x.astype(np.int64) * 100000 + bin_y.astype(np.int64)
 
-    unique_bins, inverse = np.unique(bin_ids, return_inverse=True)
-    n_bins = len(unique_bins)
+    _, inverse = np.unique(bin_ids, return_inverse=True)
+    inverse = inverse.astype(np.int64, copy=False)
+    n_bins = int(inverse.max()) + 1
 
-    bin_areas = np.bincount(inverse, minlength=n_bins)
-    bin_coords = np.zeros((n_bins, 2))
-    np.add.at(bin_coords[:, 0], inverse, empty_coords[:, 0])
-    np.add.at(bin_coords[:, 1], inverse, empty_coords[:, 1])
-    bin_coords[:, 0] /= bin_areas
-    bin_coords[:, 1] /= bin_areas
+    bin_areas = np.bincount(inverse, minlength=n_bins).astype(
+        np.int64, copy=False
+    )
+    bin_coords = np.column_stack(
+        (
+            np.bincount(inverse, weights=empty_coords[:, 0], minlength=n_bins),
+            np.bincount(inverse, weights=empty_coords[:, 1], minlength=n_bins),
+        )
+    )
+    bin_coords /= bin_areas[:, None]
 
-    bin_dnb_idx = [empty_orig_idx[inverse == i] for i in range(n_bins)]
-
-    return bin_coords, bin_areas, bin_dnb_idx
+    return bin_coords, bin_areas, empty_orig_idx, inverse
 
 
 def cell_pipeline_fit(
@@ -106,6 +130,9 @@ def cell_pipeline_fit(
     self_confidence_penalty: bool = True,
     penalty_mode: str = "1/(1+(s/p90)²)",
     verbose: bool = True,
+    use_gpu: bool = False,
+    gpu_gene_batch_size: Optional[int] = None,
+    gpu_dtype: str = "float64",
 ) -> Tuple[np.ndarray, Dict]:
     """Run cell-based SPARKLE pipeline.
 
@@ -116,11 +143,37 @@ def cell_pipeline_fit(
         n_high_genes: Number of top high-expression genes to select for
             correction. If None, all genes are used.
         ... (standard SPARKLE params)
+        use_gpu: Use PyTorch CUDA for batched sparse/dense computations.
+            Falls back to CPU with a warning if CUDA is unavailable.
+        gpu_gene_batch_size: Number of genes processed per CUDA batch. If None,
+            choose it adaptively from currently available GPU memory.
+        gpu_dtype: GPU precision mode: ``float64`` for strict reproducibility,
+            ``mixed`` for float32 sparse products plus float64 reductions, or
+            ``float32`` for maximum throughput.
 
     Returns:
         corrected_cell_expr: [genes × n_cells] corrected per-cell expression.
         diagnostics: dict with λ, α, R², etc.
     """
+    total_started = perf_counter()
+    timings = {}
+    if gpu_dtype not in {"float64", "mixed", "float32"}:
+        raise ValueError("gpu_dtype must be one of: float64, mixed, float32")
+
+    gpu, gpu_fallback_reason = resolve_gpu(use_gpu)
+    if gpu is not None:
+        storage_dtype = (
+            gpu.torch.float64 if gpu_dtype == "float64" else gpu.torch.float32
+        )
+        reduction_dtype = (
+            gpu.torch.float32 if gpu_dtype == "float32" else gpu.torch.float64
+        )
+    if verbose:
+        if gpu is not None:
+            print(f"Using GPU acceleration: {gpu.name}")
+        elif use_gpu:
+            print("Using CPU fallback")
+
     if lambda_grid is None:
         lambda_grid = [10, 20, 30, 50, 70, 100, 150, 200]
 
@@ -135,6 +188,7 @@ def cell_pipeline_fit(
         dnb_csc = csr_matrix(dnb_expr).tocsc()
 
     # ── 1. Extract cells ───────────────────────────────────────
+    stage_started = perf_counter()
     unique_cells = np.unique(dnb_labels[cell_mask_labels])
     n_cells = len(unique_cells)
     cell_id_to_idx = {cid: i for i, cid in enumerate(unique_cells)}
@@ -167,14 +221,17 @@ def cell_pipeline_fit(
     # Actually: dnb_csc @ C gives [genes × cells] directly
     cell_expr_sp = dnb_csc @ C
     cell_expr = np.asarray(cell_expr_sp.todense()) if hasattr(cell_expr_sp, 'todense') else cell_expr_sp.toarray()
+    timings["cell_aggregation_sec"] = perf_counter() - stage_started
 
     # ── 2. Bin empty DNBs ──────────────────────────────────────
+    stage_started = perf_counter()
     if verbose:
         print(f"Binning {empty_mask.sum()} empty DNBs...")
 
-    empty_bin_coords, empty_bin_areas, empty_bin_dnb_idx = _bin_empty_dnbs(
+    empty_bin_coords, empty_bin_areas, empty_dnb_indices, empty_bin_indices = _bin_empty_dnbs(
         dnb_coords, dnb_labels, bin_size
     )
+    timings["empty_bin_assignment_sec"] = perf_counter() - stage_started
     n_empty_bins = len(empty_bin_areas)
 
     if verbose:
@@ -182,19 +239,26 @@ def cell_pipeline_fit(
               f"(areas {empty_bin_areas.min()}-{empty_bin_areas.max()})")
 
     # Empty bin expression via sparse indicator matrix
-    empty_dnb_list = np.concatenate(empty_bin_dnb_idx) if empty_bin_dnb_idx else np.array([], dtype=np.int64)
-    empty_bin_list = np.concatenate([np.full(len(idx), i, dtype=np.int64) for i, idx in enumerate(empty_bin_dnb_idx)]) if empty_bin_dnb_idx else np.array([], dtype=np.int64)
-    if len(empty_dnb_list) > 0:
+    expression_started = perf_counter()
+    if len(empty_dnb_indices) > 0:
         C_empty = csr_matrix(
-            (np.ones(len(empty_dnb_list), dtype=np.float64), (empty_dnb_list, empty_bin_list)),
+            (
+                np.ones(len(empty_dnb_indices), dtype=np.float64),
+                (empty_dnb_indices, empty_bin_indices),
+            ),
             shape=(n_dnbs, n_empty_bins)
         )
         empty_bin_expr_sp = dnb_csc @ C_empty
         empty_bin_expr = np.asarray(empty_bin_expr_sp.todense()) if hasattr(empty_bin_expr_sp, 'todense') else empty_bin_expr_sp.toarray()
     else:
         empty_bin_expr = np.zeros((n_genes, 0), dtype=np.float64)
+    timings["empty_expression_aggregation_sec"] = (
+        perf_counter() - expression_started
+    )
+    timings["empty_binning_sec"] = perf_counter() - stage_started
 
     # ── 3. Select high-expression genes ────────────────────────
+    stage_started = perf_counter()
     if n_empty_bins == 0:
         raise RuntimeError("No empty bins available for ambient estimation.")
 
@@ -208,13 +272,25 @@ def cell_pipeline_fit(
 
     if verbose:
         print(f"Selected {len(gene_indices)} high-expression genes")
+    timings["gene_selection_sec"] = perf_counter() - stage_started
 
     # ── 4. Prepare spatial graphs (cells → empty bins) ─────────
     # We need distances from empty bins to cells (for λ/α estimation)
     # and from cells to cells (for correction).
     # Build them as separate cross-graphs to avoid the full combined matrix.
+    stage_started = perf_counter()
+    empty_to_cell_distances = build_spatial_distance_graph_between(
+        empty_bin_coords, cell_centroids, max_radius
+    )
+    empty_to_cell_graph_nnz = int(empty_to_cell_distances.nnz)
+    if gpu is not None:
+        empty_distance_gpu = sparse_distance_graph_to_gpu_csr(
+            empty_to_cell_distances, gpu, dtype=storage_dtype
+        )
+    timings["empty_graph_build_sec"] = perf_counter() - stage_started
 
     # ── 5. Estimate λ ──────────────────────────────────────────
+    stage_started = perf_counter()
     if verbose:
         print(f"Estimating λ via grid search...")
 
@@ -231,85 +307,185 @@ def cell_pipeline_fit(
 
     best_lam = lambda_grid[0]
     best_rss = np.inf
-    W_empty_cache = {}
     w = empty_bin_areas.astype(np.float64)
     y_obs_lambda = empty_bin_expr[lambda_gene_indices].T  # [n_empty_bins × n_lambda_use]
 
+    if gpu is not None:
+        cell_source_gpu = to_gpu(cell_source.T, gpu, dtype=storage_dtype)
+        w_gpu = to_gpu(w[:, None], gpu, dtype=reduction_dtype)
+        y_obs_lambda_gpu = to_gpu(y_obs_lambda, gpu, dtype=reduction_dtype)
+        areas_gpu = to_gpu(
+            empty_bin_areas[:, None], gpu, dtype=reduction_dtype
+        )
+
     for lam in lambda_grid:
-        # Build graph: distances from empty bins to cells
-        W_empty_to_cell = build_spatial_graph_between(
-            empty_bin_coords, cell_centroids, max_radius, lam, distance_metric
-        )
-        W_empty_cache[lam] = W_empty_to_cell
+        if gpu is not None:
+            W_empty_gpu = weighted_gpu_csr(
+                empty_distance_gpu, lam, distance_metric, gpu
+            )
+            weighted_sums_gpu = sparse_mm(
+                W_empty_gpu, cell_source_gpu, gpu
+            ).to(dtype=reduction_dtype)
+            N_gb_gpu = areas_gpu * weighted_sums_gpu
+            denom_gpu = (w_gpu * N_gb_gpu.square()).sum(dim=0)
+            numer_gpu = (w_gpu * y_obs_lambda_gpu * N_gb_gpu).sum(dim=0)
+            alpha_gpu = gpu.torch.where(
+                denom_gpu > 0, numer_gpu / denom_gpu, gpu.torch.zeros_like(denom_gpu)
+            ).clamp_min(0.0)
+            residuals_gpu = y_obs_lambda_gpu - alpha_gpu.unsqueeze(0) * N_gb_gpu
+            total_rss = float((w_gpu * residuals_gpu.square()).sum().item())
+        else:
+            W_empty_to_cell = distance_graph_to_weights(
+                empty_to_cell_distances, lam, distance_metric
+            )
+            # Batched weighted sums for all lambda genes at once
+            weighted_sums = W_empty_to_cell.dot(cell_source.T)
+            N_gb_all = empty_bin_areas[:, None] * weighted_sums
 
-        # Batched weighted sums for all lambda genes at once
-        weighted_sums = W_empty_to_cell.dot(cell_source.T)  # [n_empty_bins × n_lambda_use]
-        N_gb_all = empty_bin_areas[:, None] * weighted_sums
+            denom = (w[:, None] * N_gb_all ** 2).sum(axis=0)
+            alpha_g = np.divide(
+                (w[:, None] * y_obs_lambda * N_gb_all).sum(axis=0),
+                denom,
+                out=np.zeros(n_lambda_use, dtype=np.float64),
+                where=denom > 0,
+            )
+            alpha_g = np.maximum(alpha_g, 0.0)
 
-        denom = (w[:, None] * N_gb_all ** 2).sum(axis=0)
-        alpha_g = np.divide(
-            (w[:, None] * y_obs_lambda * N_gb_all).sum(axis=0),
-            denom,
-            out=np.zeros(n_lambda_use, dtype=np.float64),
-            where=denom > 0,
-        )
-        alpha_g = np.maximum(alpha_g, 0.0)
-
-        residuals = y_obs_lambda - alpha_g[None, :] * N_gb_all
-        rss_per_gene = (w[:, None] * residuals ** 2).sum(axis=0)
-        total_rss = rss_per_gene.sum()
+            residuals = y_obs_lambda - alpha_g[None, :] * N_gb_all
+            rss_per_gene = (w[:, None] * residuals ** 2).sum(axis=0)
+            total_rss = rss_per_gene.sum()
 
         if total_rss < best_rss:
             best_rss = total_rss
             best_lam = lam
 
+    if gpu is not None:
+        best_W_empty_gpu = weighted_gpu_csr(
+            empty_distance_gpu, best_lam, distance_metric, gpu
+        )
+    else:
+        W_empty_to_cell = distance_graph_to_weights(
+            empty_to_cell_distances, best_lam, distance_metric
+        )
+    timings["lambda_search_sec"] = perf_counter() - stage_started
+
     if verbose:
         print(f"  → Optimal λ = {best_lam:.1f} μm (RSS = {best_rss:.2f})")
 
     # ── 6. Estimate α per gene ──────────────────────────────────
+    stage_started = perf_counter()
     if verbose:
         print("Estimating gene-specific leakage rates α...")
-
-    W_empty_to_cell = W_empty_cache[best_lam]
 
     n_genes_use = len(gene_indices)
     alphas = np.zeros(n_genes_use, dtype=np.float64)
     r2_scores = np.zeros(n_genes_use, dtype=np.float64)
     w_empty = empty_bin_areas.astype(np.float64)
 
-    # Precompute source strengths for all high-expression genes in one matrix
-    sources = np.divide(
-        cell_expr[gene_indices], cell_areas[None, :],
-        out=np.zeros((n_genes_use, n_cells), dtype=np.float64),
-        where=cell_areas[None, :] > 0,
-    )
-    if use_expr_weight:
-        sources = np.array([_ewap_source(s) for s in sources])
-
-    # Batched weighted sums and OLS for all genes
-    weighted_sums = W_empty_to_cell.dot(sources.T)  # [n_empty_bins × n_genes_use]
-    N_gb_all = empty_bin_areas[:, None] * weighted_sums
-    y_obs_all = empty_bin_expr[gene_indices].T  # [n_empty_bins × n_genes_use]
-
-    denom = (w_empty[:, None] * N_gb_all ** 2).sum(axis=0)
-    alphas = np.divide(
-        (w_empty[:, None] * y_obs_all * N_gb_all).sum(axis=0),
-        denom,
-        out=np.zeros(n_genes_use, dtype=np.float64),
-        where=denom > 0,
-    )
-    alphas = np.maximum(alphas, 0.0)
-    alphas[denom == 0] = 0.0
-
-    ss_res = (w_empty[:, None] * (y_obs_all - alphas[None, :] * N_gb_all) ** 2).sum(axis=0)
-    y_mean = (w_empty[:, None] * y_obs_all).sum(axis=0) / w_empty.sum() if w_empty.sum() > 0 else 0.0
-    ss_tot = (w_empty[:, None] * (y_obs_all - y_mean[None, :]) ** 2).sum(axis=0)
     eps = 1e-15
-    r2_scores = np.where(
-        ss_tot > eps,
-        1.0 - ss_res / ss_tot,
-        np.where(ss_res > eps, 0.0, 1.0),
-    )
+    if gpu is not None:
+        w_empty_gpu = to_gpu(w_empty[:, None], gpu, dtype=reduction_dtype)
+        if gpu_gene_batch_size is None:
+            effective_gpu_gene_batch_size = choose_gpu_gene_batch_size(
+                gpu,
+                n_rows=n_empty_bins,
+                n_cells=n_cells,
+                dtype=storage_dtype,
+                max_batch_size=n_genes_use,
+            )
+        else:
+            effective_gpu_gene_batch_size = max(1, int(gpu_gene_batch_size))
+        for start in range(0, n_genes_use, effective_gpu_gene_batch_size):
+            stop = min(start + effective_gpu_gene_batch_size, n_genes_use)
+            batch_gene_indices = gene_indices[start:stop]
+            sources_batch = np.divide(
+                cell_expr[batch_gene_indices],
+                cell_areas[None, :],
+                out=np.zeros((stop - start, n_cells), dtype=np.float64),
+                where=cell_areas[None, :] > 0,
+            )
+            if use_expr_weight:
+                sources_batch = np.array([_ewap_source(s) for s in sources_batch])
+            y_obs_batch = empty_bin_expr[batch_gene_indices].T
+
+            sources_gpu = to_gpu(sources_batch.T, gpu, dtype=storage_dtype)
+            y_obs_gpu = to_gpu(y_obs_batch, gpu, dtype=reduction_dtype)
+            weighted_sums_gpu = sparse_mm(
+                best_W_empty_gpu, sources_gpu, gpu
+            ).to(dtype=reduction_dtype)
+            N_gb_gpu = areas_gpu * weighted_sums_gpu
+            denom_gpu = (w_empty_gpu * N_gb_gpu.square()).sum(dim=0)
+            numer_gpu = (w_empty_gpu * y_obs_gpu * N_gb_gpu).sum(dim=0)
+            alphas_gpu = gpu.torch.where(
+                denom_gpu > 0,
+                numer_gpu / denom_gpu,
+                gpu.torch.zeros_like(denom_gpu),
+            ).clamp_min(0.0)
+            ss_res_gpu = (
+                w_empty_gpu * (y_obs_gpu - alphas_gpu.unsqueeze(0) * N_gb_gpu).square()
+            ).sum(dim=0)
+            if w_empty.sum() > 0:
+                y_mean_gpu = (w_empty_gpu * y_obs_gpu).sum(dim=0) / w_empty.sum()
+            else:
+                y_mean_gpu = gpu.torch.zeros(
+                    stop - start, dtype=reduction_dtype, device=gpu.device
+                )
+            ss_tot_gpu = (
+                w_empty_gpu * (y_obs_gpu - y_mean_gpu.unsqueeze(0)).square()
+            ).sum(dim=0)
+            r2_gpu = gpu.torch.where(
+                ss_tot_gpu > eps,
+                1.0 - ss_res_gpu / ss_tot_gpu,
+                gpu.torch.where(
+                    ss_res_gpu > eps,
+                    gpu.torch.zeros_like(ss_res_gpu),
+                    gpu.torch.ones_like(ss_res_gpu),
+                ),
+            )
+            alphas[start:stop] = to_cpu(alphas_gpu, gpu)
+            r2_scores[start:stop] = to_cpu(r2_gpu, gpu)
+    else:
+        # Precompute source strengths for all high-expression genes in one matrix
+        sources = np.divide(
+            cell_expr[gene_indices], cell_areas[None, :],
+            out=np.zeros((n_genes_use, n_cells), dtype=np.float64),
+            where=cell_areas[None, :] > 0,
+        )
+        if use_expr_weight:
+            sources = np.array([_ewap_source(s) for s in sources])
+        y_obs_all = empty_bin_expr[gene_indices].T
+
+        # Batched weighted sums and OLS for all genes
+        weighted_sums = W_empty_to_cell.dot(sources.T)
+        N_gb_all = empty_bin_areas[:, None] * weighted_sums
+
+        denom = (w_empty[:, None] * N_gb_all ** 2).sum(axis=0)
+        alphas = np.divide(
+            (w_empty[:, None] * y_obs_all * N_gb_all).sum(axis=0),
+            denom,
+            out=np.zeros(n_genes_use, dtype=np.float64),
+            where=denom > 0,
+        )
+        alphas = np.maximum(alphas, 0.0)
+        alphas[denom == 0] = 0.0
+
+        ss_res = (w_empty[:, None] * (y_obs_all - alphas[None, :] * N_gb_all) ** 2).sum(axis=0)
+        y_mean = (w_empty[:, None] * y_obs_all).sum(axis=0) / w_empty.sum() if w_empty.sum() > 0 else 0.0
+        ss_tot = (w_empty[:, None] * (y_obs_all - y_mean[None, :]) ** 2).sum(axis=0)
+        ss_ratio = np.divide(
+            ss_res,
+            ss_tot,
+            out=np.zeros_like(ss_res),
+            where=ss_tot > eps,
+        )
+        r2_scores = np.where(
+            ss_tot > eps,
+            1.0 - ss_ratio,
+            np.where(ss_res > eps, 0.0, 1.0),
+        )
+        effective_gpu_gene_batch_size = None
+
+    timings["alpha_estimation_sec"] = perf_counter() - stage_started
 
     n_corrected = int((r2_scores >= r2_threshold).sum())
     if verbose:
@@ -319,13 +495,24 @@ def cell_pipeline_fit(
     if verbose:
         print("Applying cell-level ambient correction...")
 
-    # Build cell-to-cell distance matrix (excluding self)
-    W_cell_to_cell = build_spatial_graph(
-        cell_centroids, max_radius, best_lam, distance_metric
+    stage_started = perf_counter()
+    cell_to_cell_distances = build_spatial_distance_graph(
+        cell_centroids, max_radius
     )
-    # Zero out self-connections (diagonal) efficiently in CSR format
-    W_cell_to_cell.setdiag(0.0)
-    W_cell_to_cell.eliminate_zeros()
+    cell_to_cell_graph_nnz = int(cell_to_cell_distances.nnz)
+    if gpu is not None:
+        cell_distance_gpu = sparse_distance_graph_to_gpu_csr(
+            cell_to_cell_distances, gpu, dtype=storage_dtype
+        )
+        W_cell_gpu = weighted_gpu_csr(
+            cell_distance_gpu, best_lam, distance_metric, gpu
+        )
+    else:
+        W_cell_to_cell = distance_graph_to_weights(
+            cell_to_cell_distances, best_lam, distance_metric
+        )
+    timings["cell_graph_build_sec"] = perf_counter() - stage_started
+    stage_started = perf_counter()
 
     corrected_expr = np.zeros((n_genes, n_cells), dtype=np.float64)
 
@@ -350,21 +537,69 @@ def cell_pipeline_fit(
         cg_idx = np.array(corrected_gene_indices, dtype=np.int64)
         cpos = np.array(corrected_positions, dtype=np.int64)
 
-        corr_sources = np.divide(
-            cell_expr[cg_idx], cell_areas[None, :],
-            out=np.zeros((len(cg_idx), n_cells), dtype=np.float64),
-            where=cell_areas[None, :] > 0,
-        )
-        if use_expr_weight:
-            corr_sources = np.array([_ewap_source(s) for s in corr_sources])
+        if gpu is not None:
+            cell_areas_gpu = to_gpu(
+                cell_areas[:, None], gpu, dtype=reduction_dtype
+            )
+            for start in range(0, len(cg_idx), effective_gpu_gene_batch_size):
+                stop = min(start + effective_gpu_gene_batch_size, len(cg_idx))
+                batch_gene_indices = cg_idx[start:stop]
+                batch_positions = cpos[start:stop]
+                corr_sources = np.divide(
+                    cell_expr[batch_gene_indices],
+                    cell_areas[None, :],
+                    out=np.zeros((stop - start, n_cells), dtype=np.float64),
+                    where=cell_areas[None, :] > 0,
+                )
+                if use_expr_weight:
+                    corr_sources = np.array([_ewap_source(s) for s in corr_sources])
+                corr_sources_gpu = to_gpu(
+                    corr_sources.T, gpu, dtype=storage_dtype
+                )
+                neighbor_gpu = sparse_mm(
+                    W_cell_gpu, corr_sources_gpu, gpu
+                ).to(dtype=reduction_dtype)
+                ambient_gpu = (
+                    to_gpu(
+                        alphas[batch_positions][None, :],
+                        gpu,
+                        dtype=reduction_dtype,
+                    )
+                    * cell_areas_gpu
+                    * neighbor_gpu
+                )
+                if self_confidence_penalty:
+                    penalties = _self_confidence_weight(corr_sources, mode=penalty_mode)
+                    ambient_gpu *= to_gpu(
+                        penalties.T, gpu, dtype=reduction_dtype
+                    )
+                corrected_gpu = (
+                    to_gpu(
+                        cell_expr[batch_gene_indices].T,
+                        gpu,
+                        dtype=reduction_dtype,
+                    )
+                    - ambient_gpu
+                ).clamp_min(0.0)
+                corrected_expr[batch_gene_indices] = to_cpu(corrected_gpu.T, gpu)
+        else:
+            corr_sources = np.divide(
+                cell_expr[cg_idx], cell_areas[None, :],
+                out=np.zeros((len(cg_idx), n_cells), dtype=np.float64),
+                where=cell_areas[None, :] > 0,
+            )
+            if use_expr_weight:
+                corr_sources = np.array([_ewap_source(s) for s in corr_sources])
+            # Single sparse-dense matrix multiply for all corrected genes
+            neighbor_contribs = W_cell_to_cell.dot(corr_sources.T)
+            ambient = alphas[cpos][None, :] * cell_areas[:, None] * neighbor_contribs
+            if self_confidence_penalty:
+                penalties = _self_confidence_weight(corr_sources, mode=penalty_mode)
+                ambient *= penalties.T
+            corrected_expr[cg_idx] = np.maximum(cell_expr[cg_idx] - ambient.T, 0.0)
 
-        # Single sparse-dense matrix multiply for all corrected genes
-        neighbor_contribs = W_cell_to_cell.dot(corr_sources.T)  # [n_cells × n_corrected]
-        ambient = alphas[cpos][None, :] * cell_areas[:, None] * neighbor_contribs
-        if self_confidence_penalty:
-            penalties = _self_confidence_weight(corr_sources, mode=penalty_mode)
-            ambient *= penalties.T
-        corrected_expr[cg_idx] = np.maximum(cell_expr[cg_idx] - ambient.T, 0.0)
+    timings["correction_sec"] = perf_counter() - stage_started
+    timings["total_sec"] = perf_counter() - total_started
 
     diagnostics = {
         "lambda_estimated": best_lam,
@@ -381,6 +616,16 @@ def cell_pipeline_fit(
         "n_empty_bins": n_empty_bins,
         "empty_bin_areas_mean": float(empty_bin_areas.mean()) if n_empty_bins > 0 else 0,
         "cell_areas_mean": float(cell_areas.mean()),
+        "compute_backend": "gpu" if gpu is not None else "cpu",
+        "gpu_requested": bool(use_gpu),
+        "gpu_device": gpu.name if gpu is not None else None,
+        "gpu_fallback_reason": gpu_fallback_reason,
+        "gpu_gene_batch_size": effective_gpu_gene_batch_size if gpu is not None else None,
+        "gpu_dtype": gpu_dtype if gpu is not None else None,
+        "gpu_sparse_format": "csr" if gpu is not None else None,
+        "empty_to_cell_graph_nnz": empty_to_cell_graph_nnz,
+        "cell_to_cell_graph_nnz": cell_to_cell_graph_nnz,
+        "timings_sec": timings,
     }
 
     return corrected_expr, diagnostics

@@ -68,28 +68,52 @@ def build_spatial_graph(
     Returns:
         Sparse [N × N] CSR matrix of distance weights. Diagonal is 0.
     """
+    return distance_graph_to_weights(
+        build_spatial_distance_graph(coords, max_radius), lam, metric
+    )
+
+
+def build_spatial_distance_graph(
+    coords: np.ndarray,
+    max_radius: float,
+) -> csr_matrix:
+    """Build a CSR graph whose values are distances, excluding its diagonal.
+
+    Keeping topology/distances separate from weights lets lambda grid search
+    run without repeating the KDTree neighbor search.
+    """
     tree = cKDTree(coords)
     n = len(coords)
+    dist_coo = tree.sparse_distance_matrix(
+        tree, max_radius, output_type="coo_matrix"
+    )
+    mask = dist_coo.row != dist_coo.col
+    return csr_matrix(
+        (
+            dist_coo.data[mask].astype(np.float64, copy=False),
+            (dist_coo.row[mask], dist_coo.col[mask]),
+        ),
+        shape=(n, n),
+        dtype=np.float64,
+    )
 
-    # Use sparse_distance_matrix for a fully vectorized construction.
-    # It returns a COO matrix with distances as data for all pairs within radius.
-    dist_coo = tree.sparse_distance_matrix(tree, max_radius, output_type="coo_matrix")
 
-    # Exclude self-connections
-    row = dist_coo.row
-    col = dist_coo.col
-    data = dist_coo.data
-    mask = row != col
-    if not mask.all():
-        row = row[mask]
-        col = col[mask]
-        data = data[mask]
-
-    # Apply weight function vectorized
-    weights = compute_distance_weights(data, lam, metric)
-
-    W = csr_matrix((weights, (row, col)), shape=(n, n), dtype=np.float64)
-    return W
+def distance_graph_to_weights(
+    distance_graph: csr_matrix,
+    lam: float,
+    metric: DistanceMetric = "exponential",
+) -> csr_matrix:
+    """Apply a distance kernel while reusing a CSR graph's topology."""
+    distances = distance_graph.tocsr()
+    return csr_matrix(
+        (
+            compute_distance_weights(distances.data, lam, metric),
+            distances.indices.copy(),
+            distances.indptr.copy(),
+        ),
+        shape=distances.shape,
+        dtype=np.float64,
+    )
 
 
 def compute_neighbor_weighted_sum(
@@ -131,14 +155,29 @@ def build_spatial_graph_between(
     Returns:
         Sparse [M × N] CSR matrix of distance weights.
     """
+    return distance_graph_to_weights(
+        build_spatial_distance_graph_between(coords_a, coords_b, max_radius),
+        lam,
+        metric,
+    )
+
+
+def build_spatial_distance_graph_between(
+    coords_a: np.ndarray,
+    coords_b: np.ndarray,
+    max_radius: float,
+) -> csr_matrix:
+    """Build a cross-CSR graph whose values are pairwise distances."""
     tree_a = cKDTree(coords_a)
     tree_b = cKDTree(coords_b)
     dist_coo = tree_a.sparse_distance_matrix(
         tree_b, max_radius, output_type="coo_matrix"
     )
-    weights = compute_distance_weights(dist_coo.data, lam, metric)
     return csr_matrix(
-        (weights, (dist_coo.row, dist_coo.col)),
+        (
+            dist_coo.data.astype(np.float64, copy=False),
+            (dist_coo.row, dist_coo.col),
+        ),
         shape=(len(coords_a), len(coords_b)),
         dtype=np.float64,
     )

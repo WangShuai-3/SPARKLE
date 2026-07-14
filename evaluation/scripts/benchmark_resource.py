@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Benchmark SPARKLE runtime and memory on MouseBrain real data.
+"""Benchmark CPU/GPU SPARKLE runtime and memory on MouseBrain real data.
 
 Loads the MouseBrain GEM once at the user-specified maximum spatial window,
 then extracts progressively smaller windows by arithmetically shrinking the
 side lengths (each step subtracts an equal fraction of the original side length).
 This avoids the repeated cost of parsing the raw GEM file.
 
-Only SPARKLE is benchmarked; r2_threshold can be set to 0 to measure pure
-speed without any gene filtering.
+Each spatial window can run on CPU, GPU, or both. In paired mode the output
+contains end-to-end speedup, process RSS, GPU peak allocated memory, and GPU
+peak reserved memory. ``r2_threshold`` can be set to 0 to measure pure speed
+without any gene filtering.
 
-SPARKLE is run in the main process with ``@profile`` from ``memory_profiler``;
-the line-by-line profile for each run is saved under
-``evaluation/reports/resource_profiles/`` and the maximum SPARKLE memory
-increment (above the already-loaded data) is recorded in the CSV.
+Host RSS is sampled with ``psutil``. When ``memory_profiler`` is installed its
+line-by-line output is also saved under ``evaluation/reports/resource_profiles/``.
+CUDA memory comes from PyTorch's peak allocator counters.
 
 Usage example:
     python evaluation/scripts/benchmark_resource.py \
@@ -21,14 +22,15 @@ Usage example:
         --n-genes 10000 \
         --n-high-genes 10000 \
         --r2-threshold 0 \
-        --n-runs 8
+        --n-runs 8 \
+        --backends cpu gpu
 """
 
 import argparse
 import gc
 import io
-import re
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -43,6 +45,59 @@ from evaluation.scripts.final_comparison import (
     subsample_data,
     run_sparkle_method,
 )
+from stambient.gpu import resolve_gpu
+
+
+MIB = 1024 ** 2
+
+
+class _RSSMonitor:
+    """Sample this process' RSS in a background thread during one model run."""
+
+    def __init__(self, interval_sec=0.02):
+        self.interval_sec = interval_sec
+        self.baseline_mb = float("nan")
+        self.peak_mb = float("nan")
+        self._process = None
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        try:
+            import psutil
+
+            self._process = psutil.Process()
+            self.baseline_mb = self._process.memory_info().rss / MIB
+            self.peak_mb = self.baseline_mb
+            self._thread = threading.Thread(target=self._sample, daemon=True)
+            self._thread.start()
+        except ImportError:
+            pass
+
+    def _sample(self):
+        while not self._stop.wait(self.interval_sec):
+            try:
+                rss_mb = self._process.memory_info().rss / MIB
+                self.peak_mb = max(self.peak_mb, rss_mb)
+            except Exception:
+                return
+
+    def stop(self):
+        if self._thread is None:
+            return
+        try:
+            rss_mb = self._process.memory_info().rss / MIB
+            self.peak_mb = max(self.peak_mb, rss_mb)
+        except Exception:
+            pass
+        self._stop.set()
+        self._thread.join(timeout=max(1.0, self.interval_sec * 5))
+
+    @property
+    def increment_mb(self):
+        if not np.isfinite(self.baseline_mb) or not np.isfinite(self.peak_mb):
+            return float("nan")
+        return max(self.peak_mb - self.baseline_mb, 0.0)
 
 
 def _shrink_range(x_range, y_range, n_runs, step):
@@ -129,16 +184,42 @@ def _parse_memory_profile(profile_text):
     }
 
 
-def _run_sparkle_profiled(sub, n_high_genes, r2_threshold, lambda_grid, max_radius):
+def _run_sparkle_profiled(
+    sub,
+    n_high_genes,
+    r2_threshold,
+    lambda_grid,
+    max_radius,
+    use_gpu=False,
+    gpu_context=None,
+    gpu_dtype="float64",
+    gpu_gene_batch_size=None,
+):
     """Run SPARKLE in the main process and capture memory_profiler output.
 
     Returns:
-        (runtime_sec, diag, profile_text, parsed_mem_dict)
+        (runtime_sec, diag, profile_text, parsed_mem_dict, gpu_mem_dict, status)
     """
     old_stdout = sys.stdout
     captured = io.StringIO()
+    rss_monitor = _RSSMonitor()
+    gpu_mem = {
+        "baseline_allocated_mb": float("nan"),
+        "peak_allocated_mb": float("nan"),
+        "allocated_increment_mb": float("nan"),
+        "peak_reserved_mb": float("nan"),
+    }
+
+    if use_gpu and gpu_context is not None:
+        torch = gpu_context.torch
+        device = gpu_context.device
+        torch.cuda.synchronize(device)
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(device)
+        gpu_mem["baseline_allocated_mb"] = torch.cuda.memory_allocated(device) / MIB
 
     t0 = time.time()
+    rss_monitor.start()
     try:
         sys.stdout = captured
         corrected, diag = run_sparkle_method(
@@ -148,31 +229,69 @@ def _run_sparkle_profiled(sub, n_high_genes, r2_threshold, lambda_grid, max_radi
             lambda_grid=lambda_grid,
             max_radius=max_radius,
             verbose=False,
+            use_gpu=use_gpu,
+            gpu_dtype=gpu_dtype,
+            gpu_gene_batch_size=gpu_gene_batch_size,
         )
+        if use_gpu and gpu_context is not None:
+            gpu_context.torch.cuda.synchronize(gpu_context.device)
         runtime = time.time() - t0
-        status = "ok"
+        if corrected is None or diag.get("error"):
+            status = f"error: {diag.get('error', 'SPARKLE returned no result')}"
+        elif use_gpu and diag.get("compute_backend") != "gpu":
+            status = "fallback"
+        else:
+            status = "ok"
     except Exception as e:
         runtime = time.time() - t0
         diag = {}
         status = f"error: {e}"
     finally:
         sys.stdout = old_stdout
+        rss_monitor.stop()
+
+    if use_gpu and gpu_context is not None:
+        torch = gpu_context.torch
+        device = gpu_context.device
+        try:
+            torch.cuda.synchronize(device)
+            gpu_mem["peak_allocated_mb"] = torch.cuda.max_memory_allocated(device) / MIB
+            gpu_mem["peak_reserved_mb"] = torch.cuda.max_memory_reserved(device) / MIB
+            gpu_mem["allocated_increment_mb"] = max(
+                gpu_mem["peak_allocated_mb"] - gpu_mem["baseline_allocated_mb"], 0.0
+            )
+        except Exception:
+            pass
 
     profile_text = captured.getvalue()
     mem_stats = _parse_memory_profile(profile_text)
+    mem_stats.update({
+        "rss_baseline_mb": rss_monitor.baseline_mb,
+        "rss_peak_mb": rss_monitor.peak_mb,
+        "rss_increment_mb": rss_monitor.increment_mb,
+    })
 
     # Print status back to real stdout.
-    if status == "ok":
-        print(f"    Done in {runtime:.1f}s, λ={diag.get('lambda', float('nan')):.0f}μm, "
-              f"SPARKLE peak +{mem_stats['sparkle_increment_mb']:.1f} MiB")
+    if status in {"ok", "fallback"}:
+        backend = diag.get("compute_backend", "unknown")
+        message = (
+            f"    Done in {runtime:.1f}s ({backend}), "
+            f"λ={diag.get('lambda', float('nan')):.0f}μm, "
+            f"RSS peak +{mem_stats['rss_increment_mb']:.1f} MiB"
+        )
+        if use_gpu:
+            message += f", GPU peak {gpu_mem['peak_allocated_mb']:.1f} MiB allocated"
+        if status == "fallback":
+            message += f" [fallback: {diag.get('gpu_fallback_reason', 'unknown')}]"
+        print(message)
     else:
         print(f"    ERROR: {status}")
 
-    return runtime, diag, profile_text, mem_stats, status
+    return runtime, diag, profile_text, mem_stats, gpu_mem, status
 
 
 def _plot_results(df, output_dir):
-    """Generate runtime and peak-memory plots versus number of DNBs."""
+    """Generate paired runtime, speedup, and memory plots."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -184,20 +303,41 @@ def _plot_results(df, output_dir):
     df = df.sort_values("n_dnbs")
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(df["n_dnbs"], df["runtime_sec"], marker="o", color="#e74c3c")
+    if "cpu_runtime_sec" in df:
+        ax.plot(df["n_dnbs"], df["cpu_runtime_sec"], marker="o", label="CPU")
+    if "gpu_runtime_sec" in df:
+        ax.plot(df["n_dnbs"], df["gpu_runtime_sec"], marker="o", label="GPU")
     ax.set_xlabel("Number of DNBs")
     ax.set_ylabel("Runtime (s)")
-    ax.set_title("SPARKLE runtime vs data size (MouseBrain)")
+    ax.set_title("SPARKLE CPU/GPU runtime vs data size (MouseBrain)")
+    ax.legend()
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     fig.savefig(output_dir / "resource_benchmark_runtime.png", dpi=150)
     plt.close(fig)
 
+    if "gpu_speedup" in df and df["gpu_speedup"].notna().any():
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(df["n_dnbs"], df["gpu_speedup"], marker="o", color="#27ae60")
+        ax.axhline(1.0, color="black", linestyle="--", linewidth=1)
+        ax.set_xlabel("Number of DNBs")
+        ax.set_ylabel("CPU runtime / GPU runtime")
+        ax.set_title("SPARKLE GPU speedup (MouseBrain)")
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        fig.savefig(output_dir / "resource_benchmark_gpu_speedup.png", dpi=150)
+        plt.close(fig)
+
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(df["n_dnbs"], df["sparkle_peak_mb"], marker="o", color="#3498db")
+    if "cpu_host_rss_increment_mb" in df:
+        ax.plot(df["n_dnbs"], df["cpu_host_rss_increment_mb"], marker="o", label="CPU RSS")
+    if "gpu_peak_allocated_mb" in df:
+        ax.plot(df["n_dnbs"], df["gpu_peak_allocated_mb"], marker="o", label="GPU allocated")
+        ax.plot(df["n_dnbs"], df["gpu_peak_reserved_mb"], marker="o", label="GPU reserved")
     ax.set_xlabel("Number of DNBs")
     ax.set_ylabel("Memory (MB)")
-    ax.set_title("SPARKLE peak memory increment vs data size (MouseBrain)")
+    ax.set_title("SPARKLE CPU/GPU peak memory vs data size (MouseBrain)")
+    ax.legend()
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     fig.savefig(output_dir / "resource_benchmark_memory.png", dpi=150)
@@ -258,10 +398,43 @@ def main():
         "--plot", action="store_true",
         help="Generate runtime/memory line plots",
     )
+    parser.add_argument(
+        "--backends", nargs="+", choices=["cpu", "gpu"], default=["cpu", "gpu"],
+        help="Backends to benchmark (default: cpu gpu)",
+    )
+    parser.add_argument(
+        "--require-gpu", action="store_true",
+        help="Exit before loading data when a requested GPU is unavailable",
+    )
+    parser.add_argument(
+        "--cpu-baseline", type=str, default=None,
+        help="Reuse an existing CPU benchmark CSV instead of rerunning CPU",
+    )
+    parser.add_argument(
+        "--gpu-dtype", choices=["float64", "mixed", "float32"], default="float64",
+        help="GPU precision mode (default: float64)",
+    )
+    parser.add_argument(
+        "--gpu-gene-batch-size", type=int, default=None,
+        help="Override adaptive GPU gene batch size",
+    )
     args = parser.parse_args()
 
     x_range = tuple(args.x_range)
     y_range = tuple(args.y_range)
+    backends = list(dict.fromkeys(args.backends))
+    cpu_baseline = pd.read_csv(args.cpu_baseline) if args.cpu_baseline else None
+    if cpu_baseline is not None and len(cpu_baseline) != args.n_runs:
+        parser.error(
+            f"CPU baseline contains {len(cpu_baseline)} runs, expected {args.n_runs}"
+        )
+
+    gpu_context = None
+    gpu_unavailable_reason = None
+    if "gpu" in backends:
+        gpu_context, gpu_unavailable_reason = resolve_gpu(True)
+        if gpu_context is None and args.require_gpu:
+            parser.error(f"GPU requested but unavailable: {gpu_unavailable_reason}")
 
     print("=" * 60)
     print("RESOURCE BENCHMARK: SPARKLE on MouseBrain")
@@ -269,6 +442,13 @@ def main():
     print(f"  Genes: {args.n_genes}, high genes: {args.n_high_genes}")
     print(f"  R2 threshold: {args.r2_threshold}")
     print(f"  Arithmetic shrink steps: {args.n_runs}")
+    print(f"  Backends: {', '.join(backends)}")
+    if args.cpu_baseline:
+        print(f"  CPU baseline: {args.cpu_baseline}")
+    if gpu_context is not None:
+        print(f"  GPU: {gpu_context.name} ({args.gpu_dtype}, adaptive batch={args.gpu_gene_batch_size is None})")
+    elif "gpu" in backends:
+        print(f"  GPU unavailable: {gpu_unavailable_reason}")
     print("=" * 60)
 
     # 1. Load the full MouseBrain data once (the expensive step).
@@ -300,19 +480,7 @@ def main():
               f"{window['dnb_expr'].shape[1]} DNBs ({n_cell_dnbs} cell + {n_empty} empty), "
               f"{n_cells} cells")
 
-        runtime, diag, profile_text, mem_stats, status = _run_sparkle_profiled(
-            window,
-            n_high_genes=args.n_high_genes,
-            r2_threshold=args.r2_threshold,
-            lambda_grid=args.lambda_grid,
-            max_radius=args.max_radius,
-        )
-
-        # Save the full memory_profiler output.
-        profile_path = profile_dir / f"run_{i + 1}.txt"
-        profile_path.write_text(profile_text, encoding="utf-8")
-
-        results.append({
+        row = {
             "run": i + 1,
             "x_min": x_range_i[0],
             "x_max": x_range_i[1],
@@ -328,13 +496,119 @@ def main():
             "n_genes": window["dnb_expr"].shape[0],
             "n_cells": n_cells,
             "n_empty_dnbs": n_empty,
-            "runtime_sec": runtime,
-            "baseline_mb": mem_stats["baseline_mb"],
-            "sparkle_peak_mb": mem_stats["sparkle_increment_mb"],
-            "max_increment_mb": mem_stats["max_increment_mb"],
-            "lambda": diag.get("lambda", float("nan")) if status == "ok" else float("nan"),
-            "status": status,
-        })
+        }
+
+        if cpu_baseline is not None:
+            baseline_row = cpu_baseline.iloc[i]
+            for key, actual in (
+                ("x_min", x_range_i[0]),
+                ("x_max", x_range_i[1]),
+                ("y_min", y_range_i[0]),
+                ("y_max", y_range_i[1]),
+                ("n_genes", window["dnb_expr"].shape[0]),
+                ("n_dnbs", window["dnb_expr"].shape[1]),
+                ("n_cells", n_cells),
+                ("n_empty_dnbs", n_empty),
+            ):
+                if key not in baseline_row or not np.isclose(baseline_row[key], actual):
+                    raise ValueError(
+                        f"CPU baseline run {i + 1} has {key}={baseline_row.get(key)}, "
+                        f"but current benchmark has {actual}"
+                    )
+            baseline_peak = float(baseline_row.get("sparkle_peak_mb", float("nan")))
+            baseline_rss = float(baseline_row.get("baseline_mb", float("nan")))
+            row.update({
+                "cpu_runtime_sec": float(baseline_row["runtime_sec"]),
+                "cpu_host_rss_baseline_mb": baseline_rss,
+                "cpu_host_rss_peak_mb": baseline_rss + baseline_peak,
+                "cpu_host_rss_increment_mb": baseline_peak,
+                "cpu_profiler_increment_mb": baseline_peak,
+                "cpu_lambda": float(baseline_row.get("lambda", float("nan"))),
+                "cpu_compute_backend": "cpu",
+                "cpu_status": str(baseline_row.get("status", "ok")),
+                "cpu_baseline_source": str(args.cpu_baseline),
+            })
+
+        for backend in backends:
+            if backend == "cpu" and cpu_baseline is not None:
+                continue
+            if backend == "gpu" and gpu_context is None:
+                row.update({
+                    "gpu_runtime_sec": float("nan"),
+                    "gpu_host_rss_increment_mb": float("nan"),
+                    "gpu_peak_allocated_mb": float("nan"),
+                    "gpu_peak_reserved_mb": float("nan"),
+                    "gpu_lambda": float("nan"),
+                    "gpu_compute_backend": "unavailable",
+                    "gpu_status": f"unavailable: {gpu_unavailable_reason}",
+                })
+                continue
+
+            print(f"    [{backend.upper()}]")
+            runtime, diag, profile_text, mem_stats, gpu_mem, status = _run_sparkle_profiled(
+                window,
+                n_high_genes=args.n_high_genes,
+                r2_threshold=args.r2_threshold,
+                lambda_grid=args.lambda_grid,
+                max_radius=args.max_radius,
+                use_gpu=(backend == "gpu"),
+                gpu_context=gpu_context if backend == "gpu" else None,
+                gpu_dtype=args.gpu_dtype,
+                gpu_gene_batch_size=args.gpu_gene_batch_size,
+            )
+
+            profile_path = profile_dir / f"run_{i + 1}_{backend}.txt"
+            profile_path.write_text(profile_text, encoding="utf-8")
+            row.update({
+                f"{backend}_runtime_sec": runtime,
+                f"{backend}_host_rss_baseline_mb": mem_stats["rss_baseline_mb"],
+                f"{backend}_host_rss_peak_mb": mem_stats["rss_peak_mb"],
+                f"{backend}_host_rss_increment_mb": mem_stats["rss_increment_mb"],
+                f"{backend}_profiler_increment_mb": mem_stats["sparkle_increment_mb"],
+                f"{backend}_lambda": diag.get("lambda", float("nan")),
+                f"{backend}_compute_backend": diag.get("compute_backend", backend),
+                f"{backend}_status": status,
+                f"{backend}_empty_to_cell_graph_nnz": diag.get("empty_to_cell_graph_nnz", float("nan")),
+                f"{backend}_cell_to_cell_graph_nnz": diag.get("cell_to_cell_graph_nnz", float("nan")),
+            })
+            for stage, seconds in diag.get("timings_sec", {}).items():
+                row[f"{backend}_{stage}"] = seconds
+            if backend == "gpu":
+                row.update({
+                    "gpu_peak_allocated_mb": gpu_mem["peak_allocated_mb"],
+                    "gpu_peak_reserved_mb": gpu_mem["peak_reserved_mb"],
+                    "gpu_allocated_increment_mb": gpu_mem["allocated_increment_mb"],
+                    "gpu_device": gpu_context.name,
+                    "gpu_dtype": diag.get("gpu_dtype", args.gpu_dtype),
+                    "gpu_gene_batch_size": diag.get("gpu_gene_batch_size"),
+                    "gpu_sparse_format": diag.get("gpu_sparse_format"),
+                })
+
+        cpu_runtime = row.get("cpu_runtime_sec", float("nan"))
+        gpu_runtime = row.get("gpu_runtime_sec", float("nan"))
+        gpu_is_valid = row.get("gpu_compute_backend") == "gpu" and row.get("gpu_status") == "ok"
+        row["gpu_speedup"] = (
+            cpu_runtime / gpu_runtime
+            if gpu_is_valid and np.isfinite(cpu_runtime) and gpu_runtime > 0
+            else float("nan")
+        )
+        row["lambda_match"] = (
+            bool(row.get("cpu_lambda") == row.get("gpu_lambda"))
+            if gpu_is_valid and "cpu_lambda" in row
+            else None
+        )
+
+        # Backward-compatible aliases for the original CPU-only CSV columns.
+        if "cpu_runtime_sec" in row:
+            row.update({
+                "runtime_sec": row["cpu_runtime_sec"],
+                "baseline_mb": row["cpu_host_rss_baseline_mb"],
+                "sparkle_peak_mb": row["cpu_host_rss_increment_mb"],
+                "max_increment_mb": row["cpu_profiler_increment_mb"],
+                "lambda": row["cpu_lambda"],
+                "status": row["cpu_status"],
+            })
+        results.append(row)
 
         # Release memory before the next run.
         del window

@@ -65,6 +65,9 @@ python evaluation/scripts/final_comparison.py --dataset synthetic --scenario S1
 python evaluation/scripts/final_comparison.py --dataset synthetic --all-scenarios \
     --methods sparkle,spatial_soupx,soupx,decontx
 
+# CPU/GPU 数值一致性与运行时间检查（无 GPU 时验证 fallback）
+conda run -n scvi python evaluation/scripts/compare_sparkle_cpu_gpu.py
+
 # Axoltol
 python evaluation/scripts/final_comparison.py --dataset axolotl \
     --x-range 10500 12500 --y-range 6000 11100 \
@@ -105,8 +108,39 @@ python evaluation/scripts/final_comparison.py --dataset crc \
 python evaluation/scripts/benchmark_resource.py \
     --x-range 6000 20000 --y-range 2000 15000 \
     --n-genes 10000 --n-high-genes 10000 \
-    --r2-threshold 0 --plot --n-runs 8
+    --r2-threshold 0 --plot --n-runs 8 \
+    --backends cpu gpu --require-gpu \
+    --gpu-dtype float64 \
+    --output evaluation/reports/resource_benchmark_mousebrain_cpu_gpu_final.csv
 ```
+
+资源比较默认对每个空间窗口依次运行 CPU 和 GPU，并在 CSV 中保存
+`cpu_runtime_sec`、`gpu_runtime_sec`、`gpu_speedup`、两种后端的 host RSS，
+以及 `gpu_peak_allocated_mb` 和 `gpu_peak_reserved_mb`。CSV 还包含
+`gpu_gene_batch_size`、`gpu_dtype`、`gpu_sparse_format`、两张空间图的 nnz，
+以及 `*_cell_aggregation_sec`、`*_empty_bin_assignment_sec`、
+`*_empty_expression_aggregation_sec`、`*_empty_graph_build_sec`、
+`*_lambda_search_sec`、`*_alpha_estimation_sec`、`*_correction_sec` 等阶段耗时。
+其中 allocated 表示
+张量实际占用，reserved 表示 PyTorch CUDA allocator 向驱动保留的显存，通常后者
+更接近运行任务需要预留的显存容量。`--plot` 会额外生成 runtime、GPU speedup 和
+memory 三张图。只测一种后端可使用 `--backends cpu` 或 `--backends gpu`；在 GPU
+节点或 CI 中建议加 `--require-gpu`，避免自动回退被误当成 GPU 基准。
+如果已有相同窗口和参数的 CPU CSV，可通过 `--cpu-baseline` 复用；脚本会严格
+检查每个 run 的窗口、DNB 数、cell 数、empty DNB 数和 gene 数，再计算 GPU
+speedup，避免重复运行耗时较长的 CPU 基准。
+
+GPU 使用一次构建/一次传输的距离 CSR 图；各个 lambda 只在设备上更新权重。
+`--gpu-gene-batch-size` 缺省时根据空闲显存自动选择。`--gpu-dtype float64`
+用于严格 CPU/GPU 对照；`mixed` 和 `float32` 是近似快速模式，建议同时运行
+`compare_sparkle_cpu_gpu.py --gpu-dtype ... --require-gpu` 检查目标规模的误差。
+
+RTX 4090 完整实测结果见根目录 README。empty-DNB 分箱已由逐 bin 全量布尔扫描
+改为一次向量化映射：8 个窗口的分箱总时间从 1,768.9s 降至 20.9s（减少
+98.8%）。相同新代码下，CPU 总时间为 412.6s，GPU strict-float64 总时间为
+182.8s，GPU 总体加速 2.26×；8 个窗口的 λ 与 corrected-gene 数均保持一致。
+最大 allocated/reserved 显存仍为 8,261.8/10,798 MiB，这是自适应大 batch
+用显存换取吞吐的结果。
 
 ## 控制是否保存 h5ad
 

@@ -19,6 +19,7 @@ from .correction import correct_expression
 from .cell_pipeline import cell_pipeline_fit
 from .diagnostics import compute_diagnostics, print_diagnostics
 from .io_utils import check_inputs
+from .gpu import GPUExecutionError
 
 
 class SPARKLE:
@@ -80,6 +81,15 @@ class SPARKLE:
         Pre-computed bin classification. Overrides purity thresholds.
     verbose : bool
         Print progress messages.
+    use_gpu : bool
+        If True, accelerate the batched sparse/dense computations in the
+        recommended cell-based pipeline with PyTorch CUDA. If PyTorch, CUDA,
+        or a working GPU is unavailable, SPARKLE warns and falls back to CPU.
+    gpu_dtype : str
+        GPU precision mode: 'float64' (strictest agreement), 'mixed'
+        (float32 sparse products and float64 reductions), or 'float32'.
+    gpu_gene_batch_size : int or None
+        Genes per GPU batch. None chooses a batch from available VRAM.
     """
 
     def __init__(
@@ -103,6 +113,9 @@ class SPARKLE:
         local_radius_factor: float = 3.0,
         classification: Optional[np.ndarray] = None,
         verbose: bool = True,
+        use_gpu: bool = False,
+        gpu_dtype: str = "float64",
+        gpu_gene_batch_size: Optional[int] = None,
     ):
         self.bin_size = bin_size
         self.distance_metric = distance_metric
@@ -123,6 +136,9 @@ class SPARKLE:
         self.local_radius_factor = local_radius_factor
         self.classification = classification
         self.verbose = verbose
+        self.use_gpu = use_gpu
+        self.gpu_dtype = gpu_dtype
+        self.gpu_gene_batch_size = gpu_gene_batch_size
 
         # Results (populated after fit)
         self.lambda_ = None
@@ -159,6 +175,15 @@ class SPARKLE:
         if self.cell_based:
             return self._fit_cell_based(
                 dnb_expression, dnb_coordinates, dnb_cell_labels
+            )
+
+        if self.use_gpu:
+            import warnings
+
+            warnings.warn(
+                "GPU acceleration currently applies to cell_based=True; "
+                "running the legacy bin-level pipeline on CPU.",
+                RuntimeWarning,
             )
 
         # ── Standard bin-level pipeline ────────────────────────────
@@ -325,8 +350,7 @@ class SPARKLE:
         dnb_cell_labels: np.ndarray,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Cell-based pipeline: cells intact, empty DNBs binned separately."""
-        corrected, diag = cell_pipeline_fit(
-            dnb_expression, dnb_coordinates, dnb_cell_labels,
+        kwargs = dict(
             bin_size=self.bin_size,
             distance_metric=self.distance_metric,
             max_radius=self.max_radius,
@@ -338,6 +362,34 @@ class SPARKLE:
             self_confidence_penalty=self.self_confidence_penalty,
             verbose=self.verbose,
         )
+        try:
+            corrected, diag = cell_pipeline_fit(
+                dnb_expression, dnb_coordinates, dnb_cell_labels,
+                use_gpu=self.use_gpu,
+                gpu_dtype=self.gpu_dtype,
+                gpu_gene_batch_size=self.gpu_gene_batch_size,
+                **kwargs,
+            )
+        except (GPUExecutionError, RuntimeError) as exc:
+            if not self.use_gpu:
+                raise
+            # A device can disappear or run out of memory after successful
+            # initialization. Re-running on CPU preserves the fallback promise.
+            import warnings
+
+            warnings.warn(
+                f"GPU execution failed ({exc}); restarting SPARKLE on CPU.",
+                RuntimeWarning,
+            )
+            corrected, diag = cell_pipeline_fit(
+                dnb_expression, dnb_coordinates, dnb_cell_labels,
+                use_gpu=False,
+                gpu_dtype=self.gpu_dtype,
+                gpu_gene_batch_size=self.gpu_gene_batch_size,
+                **kwargs,
+            )
+            diag["gpu_requested"] = True
+            diag["gpu_fallback_reason"] = str(exc)
         self.lambda_ = diag["lambda_estimated"]
         self.alpha_ = diag.get("alphas", None)
         self.r2_scores_ = diag.get("r2_scores", None)

@@ -3,10 +3,12 @@
 import numpy as np
 import pytest
 from stambient.spatial import (
+    build_spatial_distance_graph,
     build_spatial_graph,
     compute_distance_weights,
     compute_local_density,
     compute_neighbor_weighted_sum,
+    distance_graph_to_weights,
 )
 
 
@@ -31,6 +33,18 @@ class TestDistanceWeights:
 
 
 class TestSpatialGraph:
+    @pytest.mark.parametrize("metric", ["exponential", "gaussian", "inverse"])
+    def test_distance_topology_reweight_matches_direct_graph(self, metric):
+        coords = np.array([[0.0, 0.0], [3.0, 4.0], [20.0, 0.0]])
+        distances = build_spatial_distance_graph(coords, max_radius=10.0)
+        reused = distance_graph_to_weights(distances, lam=7.0, metric=metric)
+        direct = build_spatial_graph(
+            coords, max_radius=10.0, lam=7.0, metric=metric
+        )
+        np.testing.assert_array_equal(reused.indptr, direct.indptr)
+        np.testing.assert_array_equal(reused.indices, direct.indices)
+        np.testing.assert_allclose(reused.data, direct.data, rtol=0, atol=0)
+
     def test_build_and_weighted_sum(self):
         coords = np.array([
             [0.0, 0.0],

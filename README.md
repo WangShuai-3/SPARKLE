@@ -39,6 +39,169 @@ corrected, diagnostics = model.fit_transform(
 )
 ```
 
+### GPU acceleration
+
+The recommended cell-based pipeline can offload its batched sparse matrix
+multiplications, lambda search, per-gene regression, and correction to a CUDA
+GPU through PyTorch:
+
+```python
+model = SPARKLE(
+    cell_based=True,
+    use_gpu=True,
+    gpu_dtype="float64",       # "mixed" or "float32" for approximate fast mode
+    gpu_gene_batch_size=None,  # adapt automatically to available VRAM
+)
+corrected, diagnostics = model.fit_transform(
+    data["spot_expr"], data["spot_coords"], data["spot_labels"]
+)
+print(diagnostics["compute_backend"], diagnostics["gpu_device"])
+```
+
+Install a PyTorch build compatible with the machine's CUDA runtime (or use
+`pip install 'stambient[gpu]'`). If PyTorch, CUDA, or the device is unavailable,
+SPARKLE emits a warning and transparently runs on CPU. The default `float64`
+mode keeps fitted parameters and corrected expression consistent with the
+NumPy/SciPy implementation. `mixed` uses float32 CSR multiplication with
+float64 regression/correction reductions, while `float32` keeps all GPU math
+in float32. The latter two are approximate fast modes; validate them for the
+target dataset. The legacy `cell_based=False` pipeline remains CPU only.
+
+The optimized GPU path builds each KDTree distance topology once, transfers
+its CSR row/column indices and distances once, and computes all lambda weights
+on-device. Gene batch size is selected from currently free VRAM unless it is
+overridden. Diagnostics expose `gpu_dtype`, `gpu_gene_batch_size`,
+`gpu_sparse_format`, both graph `*_nnz` values, and detailed `timings_sec` for
+aggregation, binning, graph construction, lambda search, alpha estimation, and
+correction.
+
+CPU/GPU consistency was validated in the `scvi` environment on an NVIDIA RTX
+4090. On the 300-cell/600-gene validation, all three modes selected the same
+lambda and passed alpha, R², and corrected-matrix checks. Maximum corrected
+matrix absolute error was `3.126e-13` for `float64` (`rtol=1e-8`,
+`atol=1e-10`), `3.822e-5` for `mixed`, and `4.955e-5` for `float32` (both
+checked with `atol=1e-4`). Small synthetic inputs are slower on GPU because
+CUDA startup and preprocessing dominate; use the resource benchmark below to
+determine the crossover point for a real dataset.
+
+### MouseBrain CPU/GPU resource benchmark (pre-optimization baseline)
+
+The table below records the original COO/fixed-batch implementation so the
+effect of the CSR optimization remains auditable. The existing 8-window CPU
+benchmark was paired with an RTX 4090 GPU run using
+the same `x=6000–20000`, `y=2000–15000`, 10,000-gene, 10,000-high-gene,
+`r2_threshold=0` configuration. GPU alpha estimation and correction process 512
+genes per batch, so the 71,476-cell maximum window remains well below 24 GB of
+VRAM. Times below exclude the shared one-time GEM loading step.
+
+| Run | DNBs | Cells | CPU (s) | GPU (s) | Speedup | GPU allocated peak | GPU reserved peak |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 58,381,645 | 71,476 | 1,192.1 | 1,329.4 | 0.90× | 3,215.9 MiB | 4,510 MiB |
+| 2 | 50,313,652 | 68,092 | 763.5 | 1,731.5 | 0.44× | 2,952.1 MiB | 4,278 MiB |
+| 3 | 38,032,645 | 56,539 | 472.6 | 392.3 | 1.20× | 2,553.5 MiB | 3,624 MiB |
+| 4 | 25,035,453 | 39,770 | 264.0 | 241.9 | 1.09× | 1,791.7 MiB | 2,548 MiB |
+| 5 | 15,087,630 | 25,384 | 137.2 | 52.1 | 2.63× | 1,145.8 MiB | 1,674 MiB |
+| 6 | 8,047,416 | 14,577 | 61.3 | 14.3 | 4.28× | 654.3 MiB | 960 MiB |
+| 7 | 3,409,044 | 6,804 | 25.8 | 4.2 | 6.17× | 302.6 MiB | 414 MiB |
+| 8 | 893,581 | 1,831 | 8.7 | 1.0 | 8.69× | 81.5 MiB | 128 MiB |
+
+CPU and GPU selected the same lambda in all eight runs. GPU acceleration is
+strongest here for the 1,831–25,384-cell windows; the two largest/high-density
+windows are slower on the RTX 4090 because CPU-side preprocessing, float64
+sparse kernels, transfers, and 512-gene batching dominate. Consequently the
+sum across all windows is 2,925.2 seconds on CPU versus 3,766.7 seconds on GPU
+(0.78× overall), even though six individual windows are faster or near parity.
+Use the measured crossover rather than assuming GPU is always faster.
+
+The paired results and plots are stored in
+`evaluation/reports/resource_benchmark_mousebrain_cpu_gpu.csv` and
+`evaluation/reports/resource_benchmark_{runtime,gpu_speedup,memory}.png`.
+
+### MouseBrain benchmark after the six GPU optimizations (before preprocessing fix)
+
+The same eight windows were rerun in strict `float64` mode after introducing
+one-time distance topology construction, one-time GPU graph transfer, GPU CSR,
+adaptive gene batches, selectable precision, and stage/nnz diagnostics.
+
+| Run | Cells | CPU (s) | Old GPU (s) | Optimized GPU (s) | Optimized speedup | Adaptive batch | GPU allocated peak |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 71,476 | 1,192.1 | 1,329.4 | 927.7 | 1.29× | 1,568 | 7,120.2 MiB |
+| 2 | 68,092 | 763.5 | 1,731.5 | 546.5 | 1.40× | 1,760 | 8,261.8 MiB |
+| 3 | 56,539 | 472.6 | 392.3 | 262.6 | 1.80× | 2,240 | 7,730.7 MiB |
+| 4 | 39,770 | 264.0 | 241.9 | 124.0 | 2.13× | 3,232 | 6,257.5 MiB |
+| 5 | 25,384 | 137.2 | 52.1 | 51.4 | 2.67× | 5,056 | 8,151.4 MiB |
+| 6 | 14,577 | 61.3 | 14.3 | 13.4 | 4.57× | 8,928 | 4,569.4 MiB |
+| 7 | 6,804 | 25.8 | 4.2 | 4.4 | 5.85× | 9,984 | 2,305.9 MiB |
+| 8 | 1,831 | 8.7 | 1.0 | 1.0 | 8.24× | 9,984 | 686.6 MiB |
+
+All lambda choices match CPU. Total GPU runtime fell from 3,766.7 to 1,931.0
+seconds (48.7% reduction), giving a 1.51× aggregate speedup over the 2,925.2
+second CPU baseline. Small windows are essentially unchanged because launch
+and preprocessing overhead dominate; the largest gains occur where the old
+implementation repeatedly rebuilt/transferred graphs or split 10,000 genes
+into many 512-gene batches.
+
+The stage diagnostics showed that empty-DNB binning consumed 1,768.9 of
+1,927.8 measured pipeline seconds across the eight GPU runs. Alpha estimation
+and correction consumed 42.6 and 53.8 seconds respectively, while both graph
+build stages plus lambda search consumed 7.1 seconds. This identified the
+remaining CPU-side preprocessing bottleneck, addressed below.
+Adaptive batching trades more VRAM (up to 8,261.8 MiB allocated and 10,798 MiB
+reserved here) for fewer launches; set `gpu_gene_batch_size` explicitly when
+memory must be capped.
+
+The optimized CSV is
+`evaluation/reports/resource_benchmark_mousebrain_cpu_gpu_optimized.csv`.
+
+### Vectorized empty-DNB preprocessing
+
+The previous implementation materialized each bin with
+`empty_indices[inverse == bin_id]`, scanning every empty DNB once per bin. It
+has been replaced by one aligned `(DNB index, bin index)` mapping and direct
+sparse-matrix construction. Bin areas and centroids now use `bincount`, making
+assignment linear in the number of empty DNBs instead of approximately
+`O(n_empty_DNBs × n_bins)`.
+
+The complete strict-float64 MouseBrain benchmark was rerun for both backends
+after this change, using the same 8 windows and parameters:
+
+| Run | Cells | Old empty binning (s) | New empty binning (s) | New CPU (s) | New GPU (s) | GPU speedup |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 71,476 | 885.3 | 6.87 | 132.0 | 49.3 | 2.68× |
+| 2 | 68,092 | 507.8 | 5.39 | 92.0 | 44.5 | 2.07× |
+| 3 | 56,539 | 229.6 | 3.74 | 77.8 | 36.6 | 2.13× |
+| 4 | 39,770 | 101.5 | 2.36 | 53.3 | 24.6 | 2.16× |
+| 5 | 25,384 | 37.5 | 1.43 | 31.9 | 15.1 | 2.11× |
+| 6 | 14,577 | 5.86 | 0.73 | 17.3 | 8.2 | 2.11× |
+| 7 | 6,804 | 1.20 | 0.29 | 6.6 | 3.5 | 1.91× |
+| 8 | 1,831 | 0.11 | 0.04 | 1.7 | 1.0 | 1.68× |
+
+Across all windows, empty preprocessing fell from 1,768.9 to 20.9 seconds
+(98.8% reduction). Current CPU runtime is 412.6 seconds versus 2,925.2 seconds
+before the preprocessing fix (7.1× faster). Current GPU runtime is 182.8
+seconds versus 1,931.0 seconds before the fix (10.6× faster), and is 2.26×
+faster than the current CPU under the same code. Lambda and corrected-gene
+counts are unchanged in every window.
+
+The detailed current results are stored in
+`evaluation/reports/resource_benchmark_mousebrain_cpu_preprocessing_optimized.csv`
+and
+`evaluation/reports/resource_benchmark_mousebrain_cpu_gpu_preprocessing_optimized.csv`.
+
+```bash
+# Numerical reliability (use --require-gpu on a GPU node/CI worker)
+conda run -n scvi python evaluation/scripts/compare_sparkle_cpu_gpu.py \
+    --require-gpu
+
+# Paired current CPU/GPU runtime, process RSS, and peak CUDA memory on MouseBrain
+conda run -n scvi python evaluation/scripts/benchmark_resource.py \
+    --x-range 6000 20000 --y-range 2000 15000 \
+    --n-genes 10000 --n-high-genes 10000 --r2-threshold 0 \
+    --n-runs 8 --backends cpu gpu --require-gpu --plot \
+    --gpu-dtype float64 \
+    --output evaluation/reports/resource_benchmark_mousebrain_cpu_gpu_final.csv
+```
+
 ## Loading Data
 
 SPARKLE provides convenience loaders that return a standard dictionary with
@@ -196,6 +359,9 @@ Spatial SoupX (bin-level, global ρ, spatial kernel) achieves 89.9% RMSE↓ on s
 | `use_local_density` | `False` | β modulation (disabled — harmful) |
 | `use_expr_weight` | `False` | EWAP (experimental) |
 | `per_gene_lambda` | `False` | Per-gene λ (rejected — unstable) |
+| `use_gpu` | `False` | Use PyTorch CUDA in the cell-based pipeline; automatically fall back to CPU |
+| `gpu_dtype` | `'float64'` | GPU precision: `'float64'`, `'mixed'`, or `'float32'` |
+| `gpu_gene_batch_size` | `None` | Genes per GPU batch; `None` adapts to free VRAM |
 
 ### Methods
 
@@ -252,7 +418,7 @@ python evaluation/scripts/final_comparison.py \
 # Synthetic
 python evaluation/scripts/final_comparison.py \
     --dataset synthetic --all-scenarios \
-    --methods sparkle,spatial_soupx,soupx,decontx
+    --methods sparkle,spatial_soupx,soupx,decontx --use-gpu
 ```
 
 > **Note on Visium HD segmentation:** the `visiumhd`/`ovarian` loaders read cell labels from `segmentations/cell_segmentation_mask` embedded in the feature_slice.h5. Some Visium HD samples (e.g. Human Colon Cancer P1) ship a feature_slice.h5 *without* an embedded `segmentations` group; those cannot be evaluated unless the corresponding 10x segmented outputs (cell_segmentations.geojson) are available. The loader raises a clear error in that case.
@@ -265,7 +431,8 @@ python evaluation/scripts/final_comparison.py \
 
 - **`evaluation/scripts/evaluate_mousebrain_h5ad.py`** — post-hoc evaluation of corrected MouseBrain h5ad files: cell-subclass correlation heatmaps, silhouette score, and comparison against an snRNA-seq reference.
 - **`evaluation/scripts/prepare_mousebrain_snrna_reference.R`** — extract `cell_subclass` pseudobulk profiles from the provided Seurat RDS reference for the script above.
-- **`evaluation/scripts/benchmark_resource.py`** — benchmark runtime and peak RSS memory of all methods across synthetic data sizes while keeping gene count constant.
+- **`evaluation/scripts/compare_sparkle_cpu_gpu.py`** — verify CPU/GPU lambda, alpha, R², and corrected-expression consistency on deterministic synthetic data.
+- **`evaluation/scripts/benchmark_resource.py`** — paired CPU/GPU SPARKLE benchmark across shrinking MouseBrain windows. Reports runtime, speedup, host RSS, CUDA peak allocated/reserved memory, and produces runtime/speedup/memory plots.
 
 Run any script with `--help` for detailed options.
 
