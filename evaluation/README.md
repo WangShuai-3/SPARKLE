@@ -183,71 +183,74 @@ python evaluation/scripts/reference_marker_localization.py \
 
 ## CRC 双 segmentation + RCTD + 单细胞 reference 评估
 
+完整结果与条件内解释见 [`crc_tumor_analysis.md`](crc_tumor_analysis.md)。
+
 CRC 的 `proseg` 和 `stardist` 输入共享相同的 18,085 genes × 470,416 spots
 表达矩阵及坐标，只有 spot-to-cell label map 不同，因此作为两个独立条件平行比较。
 注册后的全切片范围为 x=**13967.49–15338.95 µm**、
 y=**2464.03–3835.49 µm**。
 
-推荐快速窗口 `x=14300–14900, y=2850–3450`（600 × 600 µm）：共有 90,036
-spots 和 1,294,639 UMI；Proseg 包含 2,466 cells（58,254 cell spots、31,782
-empty spots），StarDist 包含 2,421 cells（16,237 cell spots、73,799 empty
-spots）。窗口约占全切片 spots 的 19%，同时保留足够多的细胞供 20 类 RCTD。
+本次报告使用扩大的 `x=14200–15000, y=2750–3550` 窗口（800 × 800 µm）：
+共有 160,064 spots 和 2,471,982 UMI，占全切片 spots 的 34.0%。Proseg
+包含 4,503 cells（107,013 cell spots、53,051 empty spots），StarDist 包含
+4,440 cells（30,326 cell spots、129,738 empty spots）。两个条件使用相同的
+spots、表达矩阵和全部 18,085 个基因；差异只来自 segmentation label map。
 
 ```bash
 # 1. 同一窗口内生成两个 segmentation 条件的 h5ad
 python evaluation/scripts/final_comparison.py --dataset crc \
     --crc-segmentation both \
-    --x-range 14300 14900 --y-range 2850 3450 \
-    --n-genes 2000 --n-high-genes 2000 --cut-genes \
+    --x-range 14200 15000 --y-range 2750 3550 \
+    --n-genes 18085 --n-high-genes 18085 --no-cut-genes \
     --lambda-grid 10 20 30 50 70 100 150 200 --max-radius 200 \
-    --methods sparkle,spatial_soupx
+    --methods sparkle,spatial_soupx,soupx,decontx
 
-# 完整 baseline 可改为 sparkle,spatial_soupx,soupx,decontx；其中
-# SoupX/DecontX 的高维 cell clustering 是该窗口的主要耗时步骤。
+# SoupX/DecontX 保持仓库中的原始实现和默认参数；在全部基因上运行时，
+# SoupX 的全维 KMeans 与标量后验循环是主要耗时步骤。
 
 # 2. 构建平衡的 Pelka ClusterMidway reference（同时输出 RCTD counts 和 pseudobulk）
 python evaluation/scripts/prepare_crc_scrna_reference.py --max-cells-per-type 500
 
 # 3. RCTD doublet mode；两种条件写入独立目录，可同时启动
 CRC_SEGMENTATION=proseg \
-RCTD_DATASET_TAG=crc_proseg_x14300-14900_y2850-3450 \
+RCTD_DATASET_TAG=crc_proseg_x14200-15000_y2750-3550 \
 RCTD_MAX_CORES=16 Rscript evaluation/scripts/run_rctd_crc.R
 
 CRC_SEGMENTATION=stardist \
-RCTD_DATASET_TAG=crc_stardist_x14300-14900_y2850-3450 \
+RCTD_DATASET_TAG=crc_stardist_x14200-15000_y2750-3550 \
 RCTD_MAX_CORES=16 Rscript evaluation/scripts/run_rctd_crc.R
 
 # 禁止本地 PSOCK 端口的沙箱/集群节点使用 RCTD_MAX_CORES=1。
 
 # 4. 用 RAW RCTD first_type 给所有方法回填固定注释，隔离表达校正效应
 python evaluation/scripts/inject_rctd_annotations.py \
-    --tag crc_proseg_x14300-14900_y2850-3450 \
+    --tag crc_proseg_x14200-15000_y2750-3550 \
     --input-dir evaluation/reports/h5ad \
     --first-type-dir evaluation/reports/rctd_crc/proseg/first_type \
-    --output-dir evaluation/reports/h5ad_crc_proseg_annotated \
+    --output-dir evaluation/reports/h5ad_crc_proseg_annotated_x14200-15000_y2750-3550 \
     --annotation-method RAW
 
 python evaluation/scripts/inject_rctd_annotations.py \
-    --tag crc_stardist_x14300-14900_y2850-3450 \
+    --tag crc_stardist_x14200-15000_y2750-3550 \
     --input-dir evaluation/reports/h5ad \
     --first-type-dir evaluation/reports/rctd_crc/stardist/first_type \
-    --output-dir evaluation/reports/h5ad_crc_stardist_annotated \
+    --output-dir evaluation/reports/h5ad_crc_stardist_annotated_x14200-15000_y2750-3550 \
     --annotation-method RAW
 
 # 5. 两个条件分别与同一个 ClusterMidway pseudobulk reference 做相关分析
 python evaluation/scripts/evaluate_mousebrain_h5ad.py \
-    --tag crc_proseg_x14300-14900_y2850-3450 \
-    --input-dir evaluation/reports/h5ad_crc_proseg_annotated \
+    --tag crc_proseg_x14200-15000_y2750-3550 \
+    --input-dir evaluation/reports/h5ad_crc_proseg_annotated_x14200-15000_y2750-3550 \
     --snrna-ref evaluation/data/CRC/scrna_reference/prepared_cluster_midway/crc_cluster_midway_pseudobulk.csv \
-    --output-dir evaluation/reports/crc_eval/proseg \
-    --methods RAW,SPARKLE,SpatialSoupX
+    --output-dir evaluation/reports/crc_eval_full/proseg \
+    --methods RAW,SPARKLE,SpatialSoupX,SoupX,DecontX
 
 python evaluation/scripts/evaluate_mousebrain_h5ad.py \
-    --tag crc_stardist_x14300-14900_y2850-3450 \
-    --input-dir evaluation/reports/h5ad_crc_stardist_annotated \
+    --tag crc_stardist_x14200-15000_y2750-3550 \
+    --input-dir evaluation/reports/h5ad_crc_stardist_annotated_x14200-15000_y2750-3550 \
     --snrna-ref evaluation/data/CRC/scrna_reference/prepared_cluster_midway/crc_cluster_midway_pseudobulk.csv \
-    --output-dir evaluation/reports/crc_eval/stardist \
-    --methods RAW,SPARKLE,SpatialSoupX
+    --output-dir evaluation/reports/crc_eval_full/stardist \
+    --methods RAW,SPARKLE,SpatialSoupX,SoupX,DecontX
 ```
 
 CRC 注册坐标带有小角度旋转。loader 用注册后的物理坐标筛选窗口并保存 cell

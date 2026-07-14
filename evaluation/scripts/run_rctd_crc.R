@@ -15,9 +15,9 @@
 # absent.  Cell coordinates come from h5ad obs x/y, where final_comparison.py
 # stores centroids computed from the exact cropped segmentation labels.
 #
-# Example (chosen 600 x 600 um evaluation window):
+# Example (expanded 800 x 800 um evaluation window used in the CRC report):
 #   CRC_SEGMENTATION=proseg \
-#   RCTD_DATASET_TAG=crc_proseg_x14300-14900_y2850-3450 \
+#   RCTD_DATASET_TAG=crc_proseg_x14200-15000_y2750-3550 \
 #   RCTD_MAX_CORES=16 Rscript evaluation/scripts/run_rctd_crc.R
 
 suppressPackageStartupMessages({
@@ -42,7 +42,10 @@ SEGMENTATION <- tolower(Sys.getenv("CRC_SEGMENTATION", "proseg"))
 if (!SEGMENTATION %in% c("proseg", "stardist")) {
   stop("CRC_SEGMENTATION must be 'proseg' or 'stardist'")
 }
-DEFAULT_TAG <- sprintf("crc_%s_x14300-14900_y2850-3450", SEGMENTATION)
+# Keep the no-argument default aligned with the tracked CRC report.  The tag is
+# still overridable so older windows remain reproducible and are never silently
+# mixed with this expanded-window analysis.
+DEFAULT_TAG <- sprintf("crc_%s_x14200-15000_y2750-3550", SEGMENTATION)
 DATASET_TAG <- Sys.getenv("RCTD_DATASET_TAG", DEFAULT_TAG)
 MAX_CORES <- as.integer(Sys.getenv("RCTD_MAX_CORES", "16"))
 
