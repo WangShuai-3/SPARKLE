@@ -1,5 +1,6 @@
 # Manuscript (local only, removed from remote)
 Manuscript/
+/manuscript/
 
 # Data files
 *.h5ad
