@@ -212,11 +212,27 @@ python evaluation/scripts/reference_marker_localization.py \
     --input-dir evaluation/reports/h5ad_ovarian_annotated \
     --output-dir evaluation/reports/ovarian_eval \
     --snrna-ref evaluation/data/ovarian/scrna_celltype_pseudobulk.csv
+
+# 6. Spatial CellChat v2；先做跨方法零文库/有限值预检，再完整重算
+/home/shuaiwang/miniconda3/envs/r-env/bin/Rscript \
+    evaluation/scripts/run_cellchat_spatial_ovarian.R --preflight-only
+/home/shuaiwang/miniconda3/envs/r-env/bin/Rscript \
+    evaluation/scripts/run_cellchat_spatial_ovarian.R
+#   -> ovarian_eval/cellchat_spatial/cellchat_spatial_{input_qc,cell_qc}.csv
+#   -> ovarian_eval/cellchat_spatial/{Method}_cellchat_spatial.csv
+#   -> ovarian_eval/cellchat_spatial/cellchat_spatial_summary.csv
+
+# 7. 从已验证的四方法结果重绘 Figure 05/05b（interaction n 动态计算）
+python evaluation/scripts/plot_ovarian_spatial_cellchat.py
+#   -> ovarian_eval/figures/fig05_spatial_cellchat_v2.{png,pdf,svg}
+#   -> ovarian_eval/figures/fig05b_cellchatv2_average_strength.{png,pdf,svg}
 ```
 
 > RCTD 环境需 `spacexr`, `Seurat`, `hdf5r`（已装于 `r-env`）。RCTD 通过
 > `segmentations/cell_segmentation_mask` 计算每个 cell 的 (x,y)，通过 `cell_id`
-> 与 h5ad 对应。
+> 与 h5ad 对应。`final_comparison.py` 会把每个方法的零文库统计写入 metrics JSON；
+> Spatial CellChat 会统一剔除任一方法中的零文库细胞，并在归一化前后拒绝 NaN/Inf，
+> 避免把不可估计的流程失败写成全零生物学结果。
 
 ## CRC 双 segmentation + RCTD + 单细胞 reference 评估
 

@@ -11,6 +11,9 @@
 #   /home/shuaiwang/miniconda3/envs/r-env/bin/Rscript \
 #     evaluation/scripts/run_cellchat_spatial_ovarian.R \
 #     > evaluation/logs/cellchat_spatial_ovarian.log 2>&1
+# Preflight only (library/finite-value audit, no CellChat inference):
+#   /home/shuaiwang/miniconda3/envs/r-env/bin/Rscript \
+#     evaluation/scripts/run_cellchat_spatial_ovarian.R --preflight-only
 ###############################################################################
 
 suppressPackageStartupMessages({
@@ -20,10 +23,21 @@ suppressPackageStartupMessages({
 })
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-MTX_DIR      <- "evaluation/reports/rctd_ovarian/mtx"
-FIRST_TYPE   <- "evaluation/reports/rctd_ovarian/first_type/RAW_first_type.csv"
-COORDS_FILE  <- "evaluation/reports/rctd_ovarian/cell_spatial_coords.csv"
-OUT_DIR      <- "evaluation/reports/ovarian_eval/cellchat_spatial"
+args <- commandArgs(trailingOnly = FALSE)
+script_arg <- args[grep("^--file=", args)]
+if (length(script_arg) > 0) {
+  script_path <- normalizePath(sub("^--file=", "", script_arg))
+  PROJECT_ROOT <- normalizePath(file.path(dirname(script_path), "..", ".."))
+} else {
+  PROJECT_ROOT <- normalizePath(".")
+}
+trailing_args <- commandArgs(trailingOnly = TRUE)
+PREFLIGHT_ONLY <- "--preflight-only" %in% trailing_args
+
+MTX_DIR      <- file.path(PROJECT_ROOT, "evaluation", "reports", "rctd_ovarian", "mtx")
+FIRST_TYPE   <- file.path(PROJECT_ROOT, "evaluation", "reports", "rctd_ovarian", "first_type", "RAW_first_type.csv")
+COORDS_FILE  <- file.path(PROJECT_ROOT, "evaluation", "reports", "rctd_ovarian", "cell_spatial_coords.csv")
+OUT_DIR      <- file.path(PROJECT_ROOT, "evaluation", "reports", "ovarian_eval", "cellchat_spatial")
 dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
 
 STEM_MAP <- c(
@@ -59,44 +73,38 @@ coord_map <- setNames(
   as.character(coord_df$cell_id)
 )
 
-# ── Compute common cell set from RAW (used for all methods) ──────────────────
-cat("[setup] determining common cell set from RAW …\n")
+# ── Helpers: load and validate counts ────────────────────────────────────────
+input_paths <- function(stem) {
+  list(
+    mtx = file.path(MTX_DIR,
+      sprintf("ovarian_x1000-1800_y300-1100_%s_counts.mtx", stem)),
+    var = file.path(MTX_DIR,
+      sprintf("ovarian_x1000-1800_y300-1100_%s_var.csv", stem)),
+    obs = file.path(MTX_DIR,
+      sprintf("ovarian_x1000-1800_y300-1100_%s_obs.csv", stem))
+  )
+}
 
-# Read RAW obs to get cell_name <-> cell_id mapping
-raw_obs <- read.csv(file.path(MTX_DIR, "ovarian_x1000-1800_y300-1100_raw_obs.csv"),
-                    stringsAsFactors = FALSE)
+assert_finite_matrix <- function(x, method_name, stage) {
+  values <- if (is(x, "sparseMatrix")) x@x else as.numeric(x)
+  n_bad <- sum(!is.finite(values))
+  if (n_bad > 0) {
+    stop(sprintf(
+      "[%s] %s contains %d NaN/Inf values; refusing to write placeholder outputs",
+      method_name, stage, n_bad
+    ))
+  }
+  invisible(TRUE)
+}
 
-# Cells with annotation AND coordinates
-cells_with_annot <- ft$cell_id     # integer
-cells_with_coord <- coord_df$cell_id
+load_counts <- function(stem, cell_ids, canonical_cell_names = NULL) {
+  paths <- input_paths(stem)
+  missing_paths <- unlist(paths)[!file.exists(unlist(paths))]
+  if (length(missing_paths) > 0) {
+    stop(sprintf("[%s] missing input files: %s", stem,
+                 paste(missing_paths, collapse = ", ")))
+  }
 
-common_cell_ids <- intersect(cells_with_annot, cells_with_coord)
-cat(sprintf("[setup] common cells (annot + coords): %d\n", length(common_cell_ids)))
-
-# Map cell_id → cell_name for the common set
-id_to_name <- setNames(raw_obs$cell_name, raw_obs$cell_id)
-common_cell_names <- id_to_name[as.character(common_cell_ids)]
-# Remove any NA (shouldn't happen)
-common_cell_ids   <- common_cell_ids[!is.na(common_cell_names)]
-common_cell_names <- common_cell_names[!is.na(common_cell_names)]
-cat(sprintf("[setup] final common cell set: %d\n", length(common_cell_ids)))
-
-# Build first_type vector (mapped by cell_id) for the common set
-ft_lookup <- setNames(ft$first_type, ft$cell_id)
-common_types <- ft_lookup[as.character(common_cell_ids)]
-
-# Build coordinates matrix (rows = cells, columns = x, y) for common set
-coord_mat <- do.call(rbind, coord_map[as.character(common_cell_ids)])
-colnames(coord_mat) <- c("x", "y")
-rownames(coord_mat) <- common_cell_names
-
-# Report coordinate range
-cat(sprintf("[setup] coord x range: %.0f–%.0f um, y range: %.0f–%.0f um\n",
-            min(coord_mat[,1]), max(coord_mat[,1]),
-            min(coord_mat[,2]), max(coord_mat[,2])))
-
-# ── Helper: load counts for a method, subset to common cells ─────────────────
-load_counts <- function(stem, cells) {
   mtx_file <- file.path(MTX_DIR,
     sprintf("ovarian_x1000-1800_y300-1100_%s_counts.mtx", stem))
   var_file <- file.path(MTX_DIR,
@@ -108,6 +116,14 @@ load_counts <- function(stem, cells) {
   obs_df  <- read.csv(obs_file, stringsAsFactors = FALSE)
   counts  <- readMM(mtx_file)
 
+  if (nrow(counts) != nrow(var_df) || ncol(counts) != nrow(obs_df)) {
+    stop(sprintf(
+      "[%s] matrix dimensions %d x %d do not match var/obs rows %d/%d",
+      stem, nrow(counts), ncol(counts), nrow(var_df), nrow(obs_df)
+    ))
+  }
+  assert_finite_matrix(counts, stem, "raw count matrix")
+
   # Clip negatives
   if (any(counts@x < 0)) {
     n_neg <- sum(counts@x < 0)
@@ -118,13 +134,141 @@ load_counts <- function(stem, cells) {
   rownames(counts) <- make.names(var_df$gene_name, unique = TRUE)
   colnames(counts) <- obs_df$cell_name
 
-  # Subset to common cells (in order)
-  idx <- match(cells, colnames(counts))
+  # Subset by stable cell_id rather than assuming cell_name is identical in all
+  # converted files.  Assign RAW names afterwards as canonical CellChat names.
+  idx <- match(cell_ids, obs_df$cell_id)
   if (any(is.na(idx))) {
     stop(sprintf("[%s] missing %d cells from count matrix", stem, sum(is.na(idx))))
   }
   counts <- counts[, idx, drop = FALSE]
+  if (!is.null(canonical_cell_names)) {
+    colnames(counts) <- canonical_cell_names
+  }
+  counts <- drop0(counts)
   counts
+}
+
+# ── Build a cross-method valid cell set ──────────────────────────────────────
+cat("[setup] determining cells shared by annotation, coordinates, and all methods …\n")
+if (anyDuplicated(ft$cell_id)) stop("first_type contains duplicated cell_id values")
+if (anyDuplicated(coord_df$cell_id)) stop("coordinate table contains duplicated cell_id values")
+
+method_obs <- lapply(names(STEM_MAP), function(stem) {
+  path <- input_paths(stem)$obs
+  if (!file.exists(path)) stop(sprintf("[%s] missing obs file: %s", stem, path))
+  obs <- read.csv(path, stringsAsFactors = FALSE)
+  if (anyDuplicated(obs$cell_id)) stop(sprintf("[%s] obs has duplicated cell_id values", stem))
+  obs
+})
+names(method_obs) <- names(STEM_MAP)
+
+shared_id_sets <- c(
+  list(ft$cell_id, coord_df$cell_id),
+  lapply(method_obs, function(obs) obs$cell_id)
+)
+shared_ids <- Reduce(intersect, shared_id_sets)
+# Preserve the annotation order for deterministic matrices and outputs.
+candidate_cell_ids <- unique(ft$cell_id[ft$cell_id %in% shared_ids])
+raw_obs <- method_obs[["raw"]]
+id_to_name <- setNames(raw_obs$cell_name, raw_obs$cell_id)
+candidate_cell_names <- unname(id_to_name[as.character(candidate_cell_ids)])
+if (any(is.na(candidate_cell_names))) {
+  stop("RAW obs is missing names for candidate cells")
+}
+
+ft_lookup <- setNames(ft$first_type, ft$cell_id)
+candidate_types <- unname(ft_lookup[as.character(candidate_cell_ids)])
+cat(sprintf("[setup] candidate common cells before library QC: %d\n",
+            length(candidate_cell_ids)))
+
+# Audit every method independently, then remove the union of zero-library cells
+# from every method so the benchmark uses exactly the same biological units.
+library_sizes <- list()
+qc_rows <- list()
+for (stem in names(STEM_MAP)) {
+  method_name <- STEM_MAP[[stem]]
+  cat(sprintf("[preflight] auditing %s libraries …\n", method_name))
+  counts_qc <- load_counts(stem, candidate_cell_ids, candidate_cell_names)
+  sizes <- as.numeric(colSums(counts_qc))
+  if (any(!is.finite(sizes))) {
+    stop(sprintf("[%s] library sizes contain NaN/Inf", method_name))
+  }
+  zero <- sizes <= 0
+  zero_type_counts <- sort(table(candidate_types[zero]), decreasing = TRUE)
+  zero_type_text <- if (length(zero_type_counts)) {
+    paste(sprintf("%s:%d", names(zero_type_counts), as.integer(zero_type_counts)),
+          collapse = "; ")
+  } else {
+    ""
+  }
+  library_sizes[[method_name]] <- sizes
+  qc_rows[[method_name]] <- data.frame(
+    method = method_name,
+    n_candidate_cells = length(sizes),
+    n_zero_library_cells = sum(zero),
+    zero_library_cell_ids = paste(candidate_cell_ids[zero], collapse = ";"),
+    zero_library_cell_types = zero_type_text,
+    total_counts = sum(sizes),
+    min_cell_counts = min(sizes),
+    median_cell_counts = median(sizes),
+    max_cell_counts = max(sizes),
+    stringsAsFactors = FALSE
+  )
+  rm(counts_qc)
+  gc(verbose = FALSE)
+}
+
+zero_matrix <- do.call(cbind, lapply(library_sizes, function(x) x <= 0))
+colnames(zero_matrix) <- names(library_sizes)
+excluded <- rowSums(zero_matrix) > 0
+zero_methods <- apply(zero_matrix, 1, function(x) {
+  paste(colnames(zero_matrix)[x], collapse = ";")
+})
+
+cell_qc <- data.frame(
+  cell_id = candidate_cell_ids,
+  cell_name = candidate_cell_names,
+  first_type = candidate_types,
+  included_in_cellchat = !excluded,
+  exclusion_reason = ifelse(excluded,
+                            paste0("zero_library:", zero_methods), ""),
+  stringsAsFactors = FALSE
+)
+for (method_name in names(library_sizes)) {
+  cell_qc[[paste0(method_name, "_library_size")]] <- library_sizes[[method_name]]
+}
+
+qc_summary <- do.call(rbind, qc_rows)
+qc_summary$n_shared_analyzed_cells <- sum(!excluded)
+write.csv(qc_summary, file.path(OUT_DIR, "cellchat_spatial_input_qc.csv"),
+          row.names = FALSE)
+write.csv(cell_qc, file.path(OUT_DIR, "cellchat_spatial_cell_qc.csv"),
+          row.names = FALSE)
+
+cat(sprintf("[preflight] excluded %d/%d cells with a zero library in any method\n",
+            sum(excluded), length(excluded)))
+print(qc_summary[, c("method", "n_candidate_cells", "n_zero_library_cells",
+                     "n_shared_analyzed_cells")], row.names = FALSE)
+
+common_cell_ids <- candidate_cell_ids[!excluded]
+common_cell_names <- candidate_cell_names[!excluded]
+common_types <- candidate_types[!excluded]
+if (length(common_cell_ids) == 0) stop("No cells remain after cross-method library QC")
+
+# Build coordinates matrix (rows = cells, columns = x, y) for the final set.
+coord_mat <- do.call(rbind, coord_map[as.character(common_cell_ids)])
+colnames(coord_mat) <- c("x", "y")
+rownames(coord_mat) <- common_cell_names
+if (any(!is.finite(coord_mat))) stop("Final coordinate matrix contains NaN/Inf")
+
+cat(sprintf("[setup] final common cell set: %d\n", length(common_cell_ids)))
+cat(sprintf("[setup] coord x range: %.0f–%.0f um, y range: %.0f–%.0f um\n",
+            min(coord_mat[,1]), max(coord_mat[,1]),
+            min(coord_mat[,2]), max(coord_mat[,2])))
+
+if (PREFLIGHT_ONLY) {
+  cat(sprintf("[preflight] complete; QC files written to %s\n", OUT_DIR))
+  quit(save = "no", status = 0)
 }
 
 # ── Run CellChat pipeline ─────────────────────────────────────────────────────
@@ -132,9 +276,24 @@ run_cellchat_spatial <- function(method_name, counts, cells, types, coords, out_
 
   cat(sprintf("\n========== [%s] Starting CellChat spatial pipeline ==========\n", method_name))
 
+  if (ncol(counts) != length(cells) || length(types) != length(cells) ||
+      nrow(coords) != length(cells)) {
+    stop(sprintf("[%s] counts/meta/coordinate cell dimensions are not aligned", method_name))
+  }
+  assert_finite_matrix(counts, method_name, "CellChat input counts")
+  library_size <- as.numeric(colSums(counts))
+  if (any(!is.finite(library_size)) || any(library_size <= 0)) {
+    bad <- which(!is.finite(library_size) | library_size <= 0)
+    stop(sprintf(
+      "[%s] %d non-positive/non-finite libraries reached normalization: %s",
+      method_name, length(bad), paste(cells[bad], collapse = ", ")
+    ))
+  }
+
   # Normalize (log-normalized library-size)
   cat(sprintf("  [%s] normalizing …\n", method_name))
   data_input <- normalizeData(counts)
+  assert_finite_matrix(data_input, method_name, "normalized expression")
 
   # Meta data frame
   meta <- data.frame(labels = types, row.names = cells, stringsAsFactors = FALSE)
@@ -167,24 +326,13 @@ run_cellchat_spatial <- function(method_name, counts, cells, types, coords, out_
   cat(sprintf("  [%s] identifyOverExpressedInteractions …\n", method_name))
   cellchat <- identifyOverExpressedInteractions(cellchat)
 
-  # Edge case: zero significant LR pairs (e.g. DecontX with near-zero expression)
+  # A zero-LR result is non-estimable for this benchmark.  Fail explicitly
+  # instead of encoding a pipeline failure as an empty table plus zero matrices.
   if (nrow(cellchat@LR$LRsig) == 0) {
-    cat(sprintf("  [%s] WARNING: 0 significant LR pairs — returning empty result\n", method_name))
-    empty_df <- data.frame(
-      source=character(), target=character(), ligand=character(), receptor=character(),
-      prob=numeric(), pval=numeric(), interaction_name=character(),
-      interaction_name_2=character(), pathway_name=character(),
-      annotation=character(), evidence=character(),
-      stringsAsFactors=FALSE
-    )
-    write.csv(empty_df, file.path(out_dir, sprintf("%s_cellchat_spatial.csv", method_name)), row.names=FALSE)
-    # Write empty aggregate matrices too
-    ug <- sort(unique(types))
-    write.csv(matrix(0,length(ug),length(ug),dimnames=list(ug,ug)),
-              file.path(out_dir, sprintf("%s_agg_count.csv", method_name)))
-    write.csv(matrix(0,length(ug),length(ug),dimnames=list(ug,ug)),
-              file.path(out_dir, sprintf("%s_agg_weight.csv", method_name)))
-    return(empty_df)
+    stop(sprintf(paste0(
+      "[%s] identifyOverExpressedInteractions retained 0 LR pairs; ",
+      "no placeholder outputs were written"
+    ), method_name))
   }
 
   # ── SPATIAL communication inference (KEY STEP) ──
@@ -230,6 +378,8 @@ run_cellchat_spatial <- function(method_name, counts, cells, types, coords, out_
 
 # ── Run pipeline for each method ─────────────────────────────────────────────
 all_results <- list()
+summary_path <- file.path(OUT_DIR, "cellchat_spatial_summary.csv")
+if (file.exists(summary_path)) unlink(summary_path)
 
 for (stem in names(STEM_MAP)) {
   method_name <- STEM_MAP[[stem]]
@@ -237,7 +387,16 @@ for (stem in names(STEM_MAP)) {
   cat(sprintf("# Method: %s (stem=%s)\n", method_name, stem))
   cat(sprintf("############################################################\n"))
 
-  counts <- load_counts(stem, common_cell_names)
+  # Remove stale per-method artifacts before starting.  If this run fails, a
+  # previous empty/zero result cannot be mistaken for the new analysis.
+  stale_outputs <- file.path(OUT_DIR, c(
+    sprintf("%s_cellchat_spatial.csv", method_name),
+    sprintf("%s_agg_count.csv", method_name),
+    sprintf("%s_agg_weight.csv", method_name)
+  ))
+  unlink(stale_outputs[file.exists(stale_outputs)])
+
+  counts <- load_counts(stem, common_cell_ids, common_cell_names)
   df_net <- run_cellchat_spatial(method_name, counts, common_cell_names,
                                  common_types, coord_mat, OUT_DIR)
   all_results[[method_name]] <- df_net

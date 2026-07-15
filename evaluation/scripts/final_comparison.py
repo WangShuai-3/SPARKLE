@@ -11,7 +11,7 @@ Note: CellBender is excluded because its VAE fails on spatial DNB data
 import sys, os, time, argparse, gzip, numpy as np
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from scipy.sparse import csr_matrix, lil_matrix
+from scipy.sparse import csr_matrix, issparse, lil_matrix
 from scipy.stats import ttest_ind
 import anndata as ad
 from stambient import SPARKLE
@@ -1481,8 +1481,23 @@ def run_decontx_method(sub, verbose=True):
         corrected = corrected.toarray()
     corrected = corrected.T  # [genes × cells]
     contamination = float(adata.obs['decontX_contamination'].values.mean())
+    library_qc = summarize_cell_libraries(corrected, cell_ids)
+    if library_qc["n_zero_library_cells"]:
+        zero_ids = library_qc["zero_library_cell_ids"]
+        preview = ", ".join(str(cid) for cid in zero_ids[:10])
+        if len(zero_ids) > 10:
+            preview += ", ..."
+        print(
+            "    WARNING: DecontX produced "
+            f"{library_qc['n_zero_library_cells']} zero-library cells "
+            f"after integer rounding (cell IDs: {preview})"
+        )
     print(f"    Done in {elapsed:.1f}s, mean contamination={contamination:.3f}")
-    return corrected, {'runtime': elapsed, 'contamination': contamination}
+    return corrected, {
+        'runtime': elapsed,
+        'contamination': contamination,
+        'library_qc': library_qc,
+    }
 
 
 def compute_cell_expr(dnb_expr, dnb_labels, n_cells):
@@ -1499,6 +1514,82 @@ def compute_cell_expr(dnb_expr, dnb_labels, n_cells):
     )
     raw = (dnb_expr @ C).toarray() if hasattr(dnb_expr @ C, 'toarray') else np.asarray(dnb_expr @ C)
     return raw
+
+
+def _cell_library_sizes(expr, clip_negative=True, row_chunk_size=512):
+    """Return per-cell library sizes for a genes-by-cells matrix.
+
+    Downstream ovarian R workflows clip negative corrected values before using
+    them as counts.  ``clip_negative=True`` mirrors that behavior without
+    densifying sparse matrices or copying an entire dense ovarian matrix.
+    Non-finite values are rejected because a library-size summary containing
+    NaN/Inf is not meaningful and would poison downstream normalization.
+    """
+    if len(expr.shape) != 2:
+        raise ValueError(f"expr must be two-dimensional, got shape {expr.shape}")
+
+    n_cells = expr.shape[1]
+    totals = np.zeros(n_cells, dtype=np.float64)
+    n_negative = 0
+
+    if issparse(expr):
+        values = expr.data
+        n_nonfinite = int(np.count_nonzero(~np.isfinite(values)))
+        if n_nonfinite:
+            raise ValueError(f"expression matrix contains {n_nonfinite} non-finite values")
+        n_negative = int(np.count_nonzero(values < 0))
+        matrix = expr
+        if clip_negative and n_negative:
+            matrix = expr.copy()
+            matrix.data[matrix.data < 0] = 0
+            matrix.eliminate_zeros()
+        totals = np.asarray(matrix.sum(axis=0), dtype=np.float64).ravel()
+    else:
+        array = np.asarray(expr)
+        for start in range(0, array.shape[0], row_chunk_size):
+            block = np.asarray(array[start:start + row_chunk_size], dtype=np.float64)
+            n_nonfinite = int(np.count_nonzero(~np.isfinite(block)))
+            if n_nonfinite:
+                raise ValueError(
+                    "expression matrix contains non-finite values "
+                    f"(at least {n_nonfinite} in rows {start}:"
+                    f"{min(start + row_chunk_size, array.shape[0])})"
+                )
+            negative = block < 0
+            n_negative += int(np.count_nonzero(negative))
+            if clip_negative and np.any(negative):
+                block = block.copy()
+                block[negative] = 0
+            totals += block.sum(axis=0)
+
+    if not np.all(np.isfinite(totals)):
+        raise ValueError("computed cell library sizes contain non-finite values")
+    return totals, n_negative
+
+
+def summarize_cell_libraries(expr, cell_ids=None, clip_negative=True):
+    """Build a compact, JSON-safe QC summary for cell library sizes."""
+    totals, n_negative = _cell_library_sizes(expr, clip_negative=clip_negative)
+    if cell_ids is None:
+        cell_ids = np.arange(len(totals))
+    cell_ids = np.asarray(cell_ids)
+    if len(cell_ids) != len(totals):
+        raise ValueError(
+            f"cell_ids has length {len(cell_ids)}, expected {len(totals)}"
+        )
+
+    zero_mask = totals <= 0
+    zero_ids = cell_ids[zero_mask]
+    return {
+        "n_cells": int(len(totals)),
+        "n_zero_library_cells": int(zero_mask.sum()),
+        "zero_library_cell_ids": zero_ids.tolist(),
+        "n_negative_values_clipped_for_qc": int(n_negative if clip_negative else 0),
+        "total_counts": float(totals.sum()),
+        "min_cell_counts": float(totals.min()) if len(totals) else None,
+        "median_cell_counts": float(np.median(totals)) if len(totals) else None,
+        "max_cell_counts": float(totals.max()) if len(totals) else None,
+    }
 
 
 def _reports_root():
@@ -2276,11 +2367,12 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
     save_result_h5ad(raw_cell, sub['gene_names'], cell_ids, ann_map,
                      reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW",
                      save_h5ad=save_h5ad, cell_coords=cell_coords)
+    raw_library_qc = summarize_cell_libraries(raw_cell, cell_ids)
     metrics = {
         "dataset": tag,
         "n_cells": int(raw_cell.shape[1]),
         "n_genes": int(raw_cell.shape[0]),
-        "raw": {},
+        "raw": {"library_qc": raw_library_qc},
         "methods": {},
     }
     for method_name, r in results.items():
@@ -2293,8 +2385,18 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
                              save_h5ad=save_h5ad,
                              var_data=var_data,
                              cell_coords=cell_coords)
+            library_qc = r.get('diag', {}).get('library_qc')
+            if library_qc is None:
+                library_qc = summarize_cell_libraries(corrected, cell_ids)
+            if library_qc["n_zero_library_cells"]:
+                print(
+                    f"    WARNING: {method_name} has "
+                    f"{library_qc['n_zero_library_cells']} zero-library cells; "
+                    "downstream cross-method analyses must exclude their union."
+                )
             metrics["methods"][method_name] = {
                 "runtime": r['diag'].get('runtime', 0),
+                "library_qc": library_qc,
             }
     save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
 
