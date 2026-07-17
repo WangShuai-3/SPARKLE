@@ -28,9 +28,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from evaluation.synthetic.scenarios import SCENARIOS
 
-METHOD_ORDER = ["SPARKLE", "SoupX", "DecontX"]
+METHOD_ORDER = ["SPARKLE", "SpotClean-bg", "SpotClean", "SoupX", "DecontX"]
 METHOD_COLORS = {
     "SPARKLE": "#e74c3c",
+    "SpotClean-bg": "#f39c12",
+    "SpotClean": "#9b59b6",
     "SoupX": "#3498db",
     "DecontX": "#2ecc71",
     "RAW": "#7f8c8d",
@@ -111,7 +113,7 @@ def plot_rmse_subplots(method_df, raw_df, output_path, figsize=(20, 8)):
         axes[idx].set_visible(False)
 
     handles, labels = _legend_handles()
-    fig.legend(handles, labels, loc="upper right", ncol=4, title="Method", fontsize=10)
+    fig.legend(handles, labels, loc="upper right", ncol=6, title="Method", fontsize=10)
     fig.suptitle("RMSE per synthetic scenario (S1–S10)", fontsize=14)
     plt.tight_layout()
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
@@ -155,7 +157,7 @@ def plot_relative_rmse_subplots(method_df, raw_df, output_path, figsize=(20, 8))
         axes[idx].set_visible(False)
 
     handles, labels = _legend_handles()
-    fig.legend(handles, labels, loc="upper right", ncol=4, title="Method", fontsize=10)
+    fig.legend(handles, labels, loc="upper right", ncol=6, title="Method", fontsize=10)
     fig.suptitle("Relative RMSE per synthetic scenario (S1–S10)\n<1 means better than RAW", fontsize=14)
     plt.tight_layout()
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
@@ -268,6 +270,7 @@ def print_summary(method_df, raw_df):
     print(pivot["rmse"].round(3).to_string())
     print("\nReduction vs RAW (%):")
     print(pivot["reduction_pct"].round(2).to_string())
+    return merged
 
 
 def main():
@@ -295,7 +298,10 @@ def main():
     if method_df.empty:
         raise FileNotFoundError(f"No synthetic_S*_metrics.json found in {args.metrics_dir}")
 
-    print_summary(method_df, raw_df)
+    summary = print_summary(method_df, raw_df)
+    summary_path = out_dir / "synthetic_rmse_summary.csv"
+    summary.to_csv(summary_path, index=False)
+    print(f"Saved RMSE summary: {summary_path}")
 
     plot_rmse_bars(
         method_df,
