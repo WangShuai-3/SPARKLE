@@ -28,10 +28,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from evaluation.synthetic.scenarios import SCENARIOS
 
-METHOD_ORDER = ["SPARKLE", "SpotClean-bg", "SpotClean", "SoupX", "DecontX"]
+METHOD_ORDER = ["SPARKLE", "SpotClean", "SoupX", "DecontX"]
 METHOD_COLORS = {
     "SPARKLE": "#e74c3c",
-    "SpotClean-bg": "#f39c12",
     "SpotClean": "#9b59b6",
     "SoupX": "#3498db",
     "DecontX": "#2ecc71",

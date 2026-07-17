@@ -20,7 +20,7 @@ evaluation/
 ├── baselines/             # 对比方法
 │   ├── soupx.py           # 原始 SoupX
 │   ├── spatial_soupx.py   # Spatial SoupX (bin 级空间核)
-│   ├── spotclean.py       # SpotClean cell-only / cell + empty-bin 两种适配
+│   ├── spotclean_official.py # 官方 SpotClean 的输入聚合与 R 调度适配
 │   └── standalone_decontx.py / decontx.py  # DecontX (per-gene contamination)
 ├── data/                  # 数据
 │   ├── axolotl/           # Axolotl 真实数据
@@ -67,8 +67,8 @@ spots，将固定网格内的 empty DNB 聚合为 background spots；两类 spot
 Bioconductor 包的 `SpotClean::createSlide()` 和 `SpotClean::spotclean()` 完成。
 
 真实数据默认复现 Axolotl、MouseBrain、Ovarian 的 final-comparison 窗口及
-候选半径。结果命名为 `*_SpotCleanOfficial.h5ad`，避免和早期 Python 近似实现
-混淆。官方实现会构造 all-spot 的稠密距离/核矩阵；驱动脚本会记录内存估计，
+候选半径。结果命名为 `*_SpotCleanOfficial.h5ad`。官方实现会构造 all-spot
+的稠密距离/核矩阵；驱动脚本会记录内存估计，
 并默认跳过明显不安全的窗口（仅可通过 `--force-memory` 强制执行）。
 
 ```bash
@@ -88,9 +88,9 @@ python evaluation/scripts/evaluate_synthetic_cell_r2.py
 # 单个合成数据场景
 python evaluation/scripts/final_comparison.py --dataset synthetic --scenario S1
 
-# 全部 10 个合成数据场景（含 SpotClean 两种输入方案）
+# 全部 10 个合成数据场景（官方 SpotClean 由独立包装器运行）
 python evaluation/scripts/final_comparison.py --dataset synthetic --all-scenarios \
-    --methods sparkle,spatial_soupx,soupx,decontx,spotclean,spotclean_bg
+    --methods sparkle,spatial_soupx,soupx,decontx
 
 # CPU/GPU 数值一致性与运行时间检查（无 GPU 时验证 fallback）
 conda run -n scvi python evaluation/scripts/compare_sparkle_cpu_gpu.py
@@ -140,41 +140,6 @@ python evaluation/scripts/benchmark_resource.py \
     --gpu-dtype float64 \
     --output evaluation/reports/resource_benchmark_mousebrain_cpu_gpu_final.csv
 ```
-
-合成数据中同时评估两种 SpotClean 适配：
-
-- `spotclean`（结果名 `SpotClean`）：每个分割细胞视为一个 tissue
-  spot，空 DNB/bin 完全不进入。由于没有 background spots 时全局
-  bleeding/distal rate 不可辨识，两者默认固定为 0.10（可通过
-  `--spotclean-bleed-rate` 和 `--spotclean-distal-rate` 修改）。
-- `spotclean_bg`（结果名 `SpotClean-bg`）：将细胞矩阵与 empty-bin
-  矩阵拼接，细胞作为 tissue/source spots，empty bins 作为 background
-  receiver spots，用总计数估计 bleeding rate、distal rate 和 Gaussian
-  bandwidth，再用 EM 将计数重分配回细胞。默认 empty bin 边长为 25 µm
-  （`--spotclean-empty-bin-size`）。为满足 SpotClean 各 spot 捕获曝光可比的假设，
-  empty-bin 计数按“中位细胞 DNB 面积 / bin 的 empty-DNB 数”归一化。
-  若要完全按原始计数矩阵直接拼接，使用
-  `--no-spotclean-normalize-empty-exposure`。
-
-两者都使用 SpotClean 的 Gaussian/uniform swapping 模型和 EM 表达重分配，
-但是独立 Python 适配，不是对官方 R 包的调用。metrics JSON 会明确保存
-`background_used`、参数识别方式和 empty-bin 曝光归一化信息。该对比只修改
-评估基线和脚本，不修改 `evaluation/synthetic/generator.py` 或任何模拟场景参数。
-
-若只需为已完成 final comparison 的真实数据窗口补充 cell-only
-SpotClean h5ad，而不重跑或覆盖其他方法和 metrics：
-
-```bash
-python evaluation/scripts/run_spotclean_real.py \
-    --datasets axolotl mousebrain ovarian
-```
-
-脚本固定使用已有的三个 final-comparison 窗口，直接复用已有 RAW
-h5ad 的细胞、基因、计数和顺序，只从 segmentation/scGEM 恢复细胞质心。
-为避免 MouseBrain 27,681 个细胞的全连接矩阵，Gaussian 局部项使用
-32-nearest-neighbor 稀疏图，uniform distal 项保持精确；使用 top 50 高计数
-基因选 bandwidth，然后对全部基因执行 3 次分批 EM。输出仅新增
-`evaluation/reports/h5ad/*_SpotClean.h5ad`。
 
 资源比较默认对每个空间窗口依次运行 CPU 和 GPU，并在 CSV 中保存
 `cpu_runtime_sec`、`gpu_runtime_sec`、`gpu_speedup`、两种后端的 host RSS，

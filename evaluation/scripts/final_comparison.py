@@ -16,10 +16,6 @@ from scipy.stats import ttest_ind
 import anndata as ad
 from stambient import SPARKLE
 from evaluation.baselines.spatial_soupx import run_spatial_soupx
-from evaluation.baselines.spotclean import (
-    run_spotclean,
-    run_spotclean_with_background,
-)
 try:
     from evaluation.baselines.soupx import run_soupx
 except ImportError as exc:
@@ -137,17 +133,10 @@ def run_synthetic_comparison(
     save_h5ad=True,
     max_radius=None,
     use_gpu=False,
-    spotclean_bleed_rate=0.10,
-    spotclean_distal_rate=0.10,
-    spotclean_empty_bin_size=25.0,
-    spotclean_normalize_empty_exposure=True,
 ):
     """Run methods on a synthetic scenario and report RMSE reduction vs raw."""
     if methods is None:
-        methods = [
-            "sparkle", "spatial_soupx", "soupx", "decontx", "spotclean",
-            "spotclean_bg",
-        ]
+        methods = ["sparkle", "spatial_soupx", "soupx", "decontx"]
     methods = [m.lower().strip() for m in methods]
 
     dnb_expr = data["dnb_expr"]
@@ -283,71 +272,6 @@ def run_synthetic_comparison(
                   f"contamination={dx_diag.get('contamination', 'N/A'):.3f}, time={dx_t:.1f}s")
             results["DecontX"] = {"rmse": rmse_dx, "reduction": reduc_dx, "runtime": dx_t}
 
-    # 5. Cell-adapted SpotClean.  Each segmented cell is one tissue spot;
-    # empty DNBs are excluded, as requested for this synthetic comparison.
-    if "spotclean" in methods:
-        print(f"\n[SpotClean: cells as spots, no background bins]")
-        t0 = time.time()
-        sc_corr, sc_diag = run_spotclean(
-            dnb_expr,
-            dnb_coords,
-            dnb_labels,
-            candidate_bandwidths=lambda_grid_sp,
-            bleed_rate=spotclean_bleed_rate,
-            distal_rate=spotclean_distal_rate,
-            verbose=False,
-        )
-        sc_t = time.time() - t0
-        rmse_sc = _rmse(sc_corr, true_expr)
-        reduc_sc = (rmse_raw - rmse_sc) / rmse_raw * 100.0
-        print(
-            f"  RMSE={rmse_sc:.4f}, reduction={reduc_sc:.1f}%, "
-            f"bleed={sc_diag['bleeding_rate']:.3f}, "
-            f"distal={sc_diag['distal_rate']:.3f}, "
-            f"bandwidth={sc_diag['contamination_bandwidth']:.0f}µm, "
-            f"time={sc_t:.1f}s"
-        )
-        results["SpotClean"] = {
-            "rmse": rmse_sc,
-            "reduction": reduc_sc,
-            "runtime": sc_t,
-            "diag": sc_diag,
-        }
-
-    # 6. Background-aware adaptation: cells are tissue spots and binned empty
-    # DNBs are background spots.  Empty-bin exposure is normalized to the
-    # median cell DNB area because SpotClean assumes comparable spot areas.
-    if "spotclean_bg" in methods:
-        print(f"\n[SpotClean-bg: cells + empty bins]")
-        t0 = time.time()
-        scbg_corr, scbg_diag = run_spotclean_with_background(
-            dnb_expr,
-            dnb_coords,
-            dnb_labels,
-            empty_bin_size=spotclean_empty_bin_size,
-            normalize_empty_exposure=spotclean_normalize_empty_exposure,
-            candidate_bandwidths=lambda_grid_sp,
-            verbose=False,
-        )
-        scbg_t = time.time() - t0
-        rmse_scbg = _rmse(scbg_corr, true_expr)
-        reduc_scbg = (rmse_raw - rmse_scbg) / rmse_raw * 100.0
-        print(
-            f"  RMSE={rmse_scbg:.4f}, reduction={reduc_scbg:.1f}%, "
-            f"bleed={scbg_diag['bleeding_rate']:.3f}, "
-            f"distal={scbg_diag['distal_rate']:.3f}, "
-            f"bandwidth={scbg_diag['contamination_bandwidth']:.0f}µm, "
-            f"empty_bins={scbg_diag['n_empty_bins']}, "
-            f"exposure={'normalized' if scbg_diag['empty_exposure_normalized'] else 'raw'}, "
-            f"time={scbg_t:.1f}s"
-        )
-        results["SpotClean-bg"] = {
-            "rmse": rmse_scbg,
-            "reduction": reduc_scbg,
-            "runtime": scbg_t,
-            "diag": scbg_diag,
-        }
-
     # Save cell-based h5ad and metrics
     print(f"\n  {'='*60}")
     print(f"  Saving results")
@@ -377,10 +301,6 @@ def run_synthetic_comparison(
             corrected = sx_corr
         elif method_name == "DecontX" and 'dx_corr' in locals():
             corrected = dx_corr
-        elif method_name == "SpotClean" and 'sc_corr' in locals():
-            corrected = sc_corr
-        elif method_name == "SpotClean-bg" and 'scbg_corr' in locals():
-            corrected = scbg_corr
         if corrected is not None:
             var_data = r.get('diag', {}).get('var_data') if method_name == 'SPARKLE' else None
             save_result_h5ad(corrected, data['gene_names'], data['cell_ids'], None,
@@ -393,23 +313,6 @@ def run_synthetic_comparison(
             "reduction_pct": r['reduction'],
             "runtime": r['runtime'],
         }
-        if method_name in {"SpotClean", "SpotClean-bg"}:
-            metrics["methods"][method_name].update({
-                "adaptation": r["diag"]["adaptation"],
-                "background_used": r["diag"]["background_used"],
-                "bleeding_rate": r["diag"]["bleeding_rate"],
-                "distal_rate": r["diag"]["distal_rate"],
-                "contamination_bandwidth": r["diag"]["contamination_bandwidth"],
-                "parameter_identification": r["diag"]["parameter_identification"],
-            })
-        if method_name == "SpotClean-bg":
-            metrics["methods"][method_name].update({
-                "n_empty_bins": r["diag"]["n_empty_bins"],
-                "empty_bin_size": r["diag"]["empty_bin_size"],
-                "empty_exposure_normalized": r["diag"]["empty_exposure_normalized"],
-                "empty_exposure_target_dnb_area": r["diag"]["empty_exposure_target_dnb_area"],
-                "optimizer_converged": r["diag"]["optimizer_converged"],
-            })
     save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
 
     # Summary table
@@ -432,10 +335,6 @@ def run_all_synthetic_scenarios(
     save_h5ad=True,
     max_radius=None,
     use_gpu=False,
-    spotclean_bleed_rate=0.10,
-    spotclean_distal_rate=0.10,
-    spotclean_empty_bin_size=25.0,
-    spotclean_normalize_empty_exposure=True,
 ):
     """Run all S1–S10 scenarios and print a consolidated benchmark table."""
     from evaluation.synthetic.scenarios import list_scenarios
@@ -459,10 +358,6 @@ def run_all_synthetic_scenarios(
             save_h5ad=save_h5ad,
             max_radius=max_radius,
             use_gpu=use_gpu,
-            spotclean_bleed_rate=spotclean_bleed_rate,
-            spotclean_distal_rate=spotclean_distal_rate,
-            spotclean_empty_bin_size=spotclean_empty_bin_size,
-            spotclean_normalize_empty_exposure=spotclean_normalize_empty_exposure,
         )
         all_results[sid] = summary
         if not method_names:
@@ -2582,26 +2477,7 @@ def main():
                         help="Cut gene matrix to top N genes in subsample_data (default: False)")
     parser.add_argument("--methods", type=str,
                         default=None,
-                        help=("Comma-separated methods to run. Synthetic default: "
-                              "sparkle,spatial_soupx,soupx,decontx,spotclean,spotclean_bg; "
-                              "other datasets omit spotclean."))
-    parser.add_argument("--spotclean-bleed-rate", type=float, default=0.10,
-                        help=("Fixed bleeding rate for the no-background, cell-adapted "
-                              "SpotClean synthetic baseline (default: 0.10)"))
-    parser.add_argument("--spotclean-distal-rate", type=float, default=0.10,
-                        help=("Fixed distal rate for the no-background, cell-adapted "
-                              "SpotClean synthetic baseline (default: 0.10)"))
-    parser.add_argument("--spotclean-empty-bin-size", type=float, default=25.0,
-                        help=("Empty-bin side length in um for the background-aware "
-                              "SpotClean synthetic baseline (default: 25)"))
-    parser.add_argument(
-        "--spotclean-normalize-empty-exposure",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=("Scale empty-bin counts to the median cell DNB area before "
-              "concatenation (default: True; use --no-spotclean-normalize-empty-exposure "
-              "for literal raw-matrix concatenation)"),
-    )
+                        help="Comma-separated methods to run")
     parser.add_argument("--annotation-level", type=str, default="cell_group",
                         choices=["cell_class", "cell_subclass", "cell_group"],
                         help="MouseBrain annotation level to use (default: cell_group)")
@@ -2611,8 +2487,6 @@ def main():
     y_range = tuple(args.y_range) if args.y_range else None
     if args.methods is None:
         default_methods = "sparkle,spatial_soupx,soupx,decontx"
-        if args.dataset == "synthetic":
-            default_methods += ",spotclean,spotclean_bg"
         methods = default_methods.split(",")
     else:
         methods = [m.strip().lower() for m in args.methods.split(',')]
@@ -2692,10 +2566,6 @@ def main():
                 save_h5ad=save_h5ad,
                 max_radius=max_radius,
                 use_gpu=args.use_gpu,
-                spotclean_bleed_rate=args.spotclean_bleed_rate,
-                spotclean_distal_rate=args.spotclean_distal_rate,
-                spotclean_empty_bin_size=args.spotclean_empty_bin_size,
-                spotclean_normalize_empty_exposure=args.spotclean_normalize_empty_exposure,
             )
         else:
             data = load_synthetic_scenario_data(args.scenario, seed=42)
@@ -2708,10 +2578,6 @@ def main():
                 save_h5ad=save_h5ad,
                 max_radius=max_radius,
                 use_gpu=args.use_gpu,
-                spotclean_bleed_rate=args.spotclean_bleed_rate,
-                spotclean_distal_rate=args.spotclean_distal_rate,
-                spotclean_empty_bin_size=args.spotclean_empty_bin_size,
-                spotclean_normalize_empty_exposure=args.spotclean_normalize_empty_exposure,
             )
 
 

@@ -505,9 +505,6 @@ def run_synthetic(scenario_id: str, args) -> dict:
         "distal_rate": float(r_diag["distal_rate"]),
         "contamination_radius": float(r_diag["contamination_radius"]),
     }
-    # This key represented the superseded Python approximation, not a second
-    # official method, and would otherwise be misleading in the comparison plot.
-    metrics["methods"].pop("SpotClean-bg", None)
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     print(
