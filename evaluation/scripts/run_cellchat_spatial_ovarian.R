@@ -45,8 +45,22 @@ STEM_MAP <- c(
   SPARKLE      = "SPARKLE",
   SpatialSoupX = "SpatialSoupX",
   SoupX        = "SoupX",
-  DecontX      = "DecontX"
+  DecontX      = "DecontX",
+  SpotCleanOfficial = "SpotClean"
 )
+requested_methods <- trimws(strsplit(Sys.getenv("CELLCHAT_METHODS", ""), ",")[[1]])
+requested_methods <- requested_methods[nzchar(requested_methods)]
+partial_run <- length(requested_methods) > 0
+if (partial_run) {
+  missing_requested <- setdiff(requested_methods, unname(STEM_MAP))
+  if (length(missing_requested) > 0) {
+    stop(sprintf("Requested CellChat methods not found: %s",
+                 paste(missing_requested, collapse = ", ")))
+  }
+  RUN_STEMS <- names(STEM_MAP)[STEM_MAP %in% requested_methods]
+} else {
+  RUN_STEMS <- names(STEM_MAP)
+}
 
 # ── Global params ────────────────────────────────────────────────────────────
 NB    <- 20       # lower nboot for speed (documented in output)
@@ -379,9 +393,9 @@ run_cellchat_spatial <- function(method_name, counts, cells, types, coords, out_
 # ── Run pipeline for each method ─────────────────────────────────────────────
 all_results <- list()
 summary_path <- file.path(OUT_DIR, "cellchat_spatial_summary.csv")
-if (file.exists(summary_path)) unlink(summary_path)
+if (!partial_run && file.exists(summary_path)) unlink(summary_path)
 
-for (stem in names(STEM_MAP)) {
+for (stem in RUN_STEMS) {
   method_name <- STEM_MAP[[stem]]
   cat(sprintf("\n############################################################\n"))
   cat(sprintf("# Method: %s (stem=%s)\n", method_name, stem))
@@ -462,9 +476,15 @@ for (method_name in names(all_results)) {
 summary_df <- do.call(rbind, summary_rows)
 rownames(summary_df) <- NULL
 
-write.csv(summary_df,
-          file.path(OUT_DIR, "cellchat_spatial_summary.csv"),
-          row.names = FALSE)
+if (partial_run && file.exists(summary_path)) {
+  previous_summary <- read.csv(summary_path, stringsAsFactors = FALSE)
+  previous_summary <- previous_summary[
+    !previous_summary$Method %in% names(all_results), , drop = FALSE
+  ]
+  summary_df <- rbind(previous_summary, summary_df)
+}
+
+write.csv(summary_df, summary_path, row.names = FALSE)
 
 # ── Print comparison table ───────────────────────────────────────────────────
 cat("\n--- Per-method summary ---\n")

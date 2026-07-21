@@ -40,12 +40,14 @@ from sklearn.metrics import silhouette_score
 
 def find_h5ad_files(input_dir, tag, methods):
     """Return dict method_name -> h5ad path for existing files."""
+    method_suffixes = {
+        "RAW": "raw",
+        "SpotClean": "SpotCleanOfficial",
+    }
     files = {}
     for method in methods:
-        path = Path(input_dir) / f"{tag}_{method}.h5ad"
-        # final_comparison.py saves the RAW file as *_raw.h5ad (lowercase)
-        if not path.exists() and method.lower() == "raw":
-            path = Path(input_dir) / f"{tag}_raw.h5ad"
+        suffix = method_suffixes.get(method, method)
+        path = Path(input_dir) / f"{tag}_{suffix}.h5ad"
         if path.exists():
             files[method] = path
         else:
@@ -393,7 +395,12 @@ def main():
         "--r2-threshold", type=float, default=None,
         help="If set, filter SPARKLE-corrected genes by sparkle_r2 >= threshold "
              "instead of using the boolean sparkle_corrected column. "
-             "Implies --use-sparkle-corrected-genes.",
+        "Implies --use-sparkle-corrected-genes.",
+    )
+    parser.add_argument(
+        "--incremental", action="store_true",
+        help="Evaluate only --methods and merge them into an existing output "
+             "directory, preserving metrics for methods evaluated previously.",
     )
     args = parser.parse_args()
 
@@ -460,14 +467,52 @@ def main():
             if hvg_gene_set is not None:
                 print(f"Restricting analysis to {len(hvg_gene_set)} HVGs")
 
-    metrics = {
-        "tag": args.tag,
-        "methods": {},
-        "snrna_comparison": {},
-    }
-    summary_rows = []
+    json_path = output_dir / f"{args.tag}_metrics.json"
+    csv_path = output_dir / f"{args.tag}_summary.csv"
+    per_ct_path = output_dir / f"{args.tag}_snrna_corr_per_celltype.csv"
+
+    if args.incremental and json_path.exists():
+        with open(json_path) as f:
+            metrics = json.load(f)
+        metrics["tag"] = args.tag
+        metrics.setdefault("methods", {})
+        metrics.setdefault("snrna_comparison", {})
+    else:
+        metrics = {
+            "tag": args.tag,
+            "methods": {},
+            "snrna_comparison": {},
+        }
+
+    if args.incremental and csv_path.exists():
+        previous_summary = pd.read_csv(csv_path)
+        previous_summary = previous_summary[
+            ~previous_summary["method"].isin(files.keys())
+        ]
+        previous_summary = previous_summary.drop(
+            columns=["contamination_reduction_vs_raw"], errors="ignore"
+        )
+        summary_rows = previous_summary.to_dict("records")
+    else:
+        summary_rows = []
     per_method_corr = {}
     raw_pb_df = None
+    if args.incremental and snrna_ref is not None and not any(
+        method.lower() == "raw" for method in files
+    ):
+        raw_path = find_h5ad_files(input_dir, args.tag, ["RAW"]).get("RAW")
+        if raw_path is not None:
+            print("Loading RAW pseudobulk only for paired contamination deltas ...")
+            raw_adata = normalize_adata(
+                sc.read_h5ad(raw_path), use_sctransform=args.use_sctransform
+            )
+            if hvg_gene_set is not None:
+                shared_hvgs = raw_adata.var_names.intersection(hvg_gene_set)
+                raw_adata = raw_adata[:, shared_hvgs].copy()
+            raw_pb_df = compute_pseudobulk(
+                raw_adata, group_key="annotation", min_cells=3
+            )
+            del raw_adata
 
     for method, path in files.items():
         print(f"\nProcessing {method} ...")
@@ -583,12 +628,25 @@ def main():
             for ct, val in per_sub.items():
                 per_ct_rows.append({"method": method, "cell_group": ct, "corr": val})
         per_ct_df = pd.DataFrame(per_ct_rows)
-        per_ct_path = output_dir / f"{args.tag}_snrna_corr_per_celltype.csv"
+        if args.incremental and per_ct_path.exists():
+            old_per_ct = pd.read_csv(per_ct_path)
+            old_per_ct = old_per_ct[~old_per_ct["method"].isin(files.keys())]
+            key = ["method", "cell_group"]
+            spreads = old_per_ct.groupby(key, dropna=False)["corr"].agg(
+                lambda values: values.max() - values.min()
+            )
+            if (spreads.fillna(0) > 1e-12).any():
+                raise ValueError(
+                    "Existing per-celltype CSV has conflicting duplicate rows."
+                )
+            old_per_ct = old_per_ct.drop_duplicates(key, keep="first")
+            per_ct_df = pd.concat([old_per_ct, per_ct_df], ignore_index=True)
+        if per_ct_df.duplicated(["method", "cell_group"]).any():
+            raise ValueError("Per-celltype output keys are not unique.")
         per_ct_df.to_csv(per_ct_path, index=False)
         print(f"Saved per-celltype snRNA correlations: {per_ct_path}")
 
     # Save JSON and summary CSV
-    json_path = output_dir / f"{args.tag}_metrics.json"
     with open(json_path, "w") as f:
         json.dump(metrics, f, indent=2, default=lambda x: float(x) if isinstance(x, (np.floating, np.integer)) else str(x))
     print(f"Saved metrics JSON: {json_path}")
@@ -596,8 +654,13 @@ def main():
     summary_df = pd.DataFrame(summary_rows)
 
     # Contamination reduction vs RAW
-    if snrna_ref is not None and "RAW" in metrics["methods"]:
-        raw_contam = metrics["methods"]["RAW"].get("mean_contamination", np.nan)
+    raw_method = next(
+        (m for m in metrics["methods"] if m.lower() == "raw"), None
+    )
+    if snrna_ref is not None and raw_method is not None:
+        raw_contam = metrics["methods"][raw_method].get(
+            "mean_contamination", np.nan
+        )
         if not np.isnan(raw_contam):
             reductions = []
             for row in summary_rows:
@@ -620,7 +683,6 @@ def main():
             for _, r in reduc_df.iterrows():
                 print(f"  {r['method']}: {r['contamination_reduction_vs_raw']:.4f}")
 
-    csv_path = output_dir / f"{args.tag}_summary.csv"
     summary_df.to_csv(csv_path, index=False)
     print(f"Saved summary CSV: {csv_path}")
 

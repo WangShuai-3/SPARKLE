@@ -28,12 +28,21 @@ if str(PROJECT_ROOT) not in sys.path:
 from evaluation.scripts.final_comparison import compute_neighbor_stats, load_axolotl_data_windowed
 
 SST_GENE = "AMEX60DD003175"
-METHOD_ORDER = ["RAW", "SPARKLE", "SoupX", "DecontX"]
+METHOD_ORDER = ["RAW", "SPARKLE", "SoupX", "DecontX", "SpotClean"]
+CATEGORY_ORDER = ["sstIN", "Neighbor", "Other"]
+METHOD_SUFFIX = {
+    "RAW": "raw",
+    "SPARKLE": "SPARKLE",
+    "SoupX": "SoupX",
+    "DecontX": "DecontX",
+    "SpotClean": "SpotCleanOfficial",
+}
 METHOD_COLORS = {
     "RAW": "#7f8c8d",
     "SPARKLE": "#e74c3c",
     "SoupX": "#3498db",
     "DecontX": "#2ecc71",
+    "SpotClean": "#9b59b6",
 }
 
 
@@ -115,10 +124,8 @@ def build_dataframe(tag, input_dir, cache_path=None):
 
     rows = []
     for method in METHOD_ORDER:
-        suffix = "raw" if method == "RAW" else method
+        suffix = METHOD_SUFFIX[method]
         path = Path(input_dir) / f"{tag}_{suffix}.h5ad"
-        if not path.exists() and method == "RAW":
-            path = Path(input_dir) / f"{tag}_raw.h5ad"
         if not path.exists():
             raise FileNotFoundError(f"Missing h5ad for {method}: {path}")
 
@@ -144,7 +151,7 @@ def build_dataframe(tag, input_dir, cache_path=None):
 
 def plot_boxplots(df, output_path, figsize=(14, 5)):
     """Three subplots (sstIN / Neighbor / Other) with one box per method."""
-    categories = ["sstIN", "Neighbor", "Other"]
+    categories = CATEGORY_ORDER
     fig, axes = plt.subplots(1, 3, figsize=figsize, sharey=False)
 
     for ax, cat in zip(axes, categories):
@@ -153,15 +160,18 @@ def plot_boxplots(df, output_path, figsize=(14, 5)):
             data=sub,
             x="method",
             y="sst_log1p",
+            hue="method",
             order=METHOD_ORDER,
+            hue_order=METHOD_ORDER,
             palette=METHOD_COLORS,
             ax=ax,
+            legend=False,
             showfliers=False,  # cleaner; outliers still visible via whiskers
         )
         ax.set_title(f"{cat} cells", fontsize=12)
         ax.set_xlabel("")
         ax.set_ylabel("log1p(SST expression)" if cat == "sstIN" else "")
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right")
+        plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
         ax.grid(axis="y", linestyle="--", alpha=0.3)
 
     fig.suptitle("log1p(SST expression) by cell category (Axolotl)", fontsize=14)
@@ -179,6 +189,7 @@ def plot_grouped_boxplot(df, output_path, figsize=(10, 6)):
         x="category",
         y="sst_log1p",
         hue="method",
+        order=CATEGORY_ORDER,
         hue_order=METHOD_ORDER,
         palette=METHOD_COLORS,
         ax=ax,
@@ -187,7 +198,6 @@ def plot_grouped_boxplot(df, output_path, figsize=(10, 6)):
     ax.set_title("log1p(SST expression) by cell category and method (Axolotl)", fontsize=13)
     ax.set_xlabel("Cell category", fontsize=12)
     ax.set_ylabel("log1p(SST expression)", fontsize=12)
-    ax.set_xticklabels(ax.get_xticklabels(), rotation=0)
     ax.legend(title="Method", loc="upper right")
     ax.grid(axis="y", linestyle="--", alpha=0.3)
     plt.tight_layout()
@@ -205,7 +215,7 @@ def plot_method_grouped_boxplot(df, output_path, figsize=(10, 6)):
         y="sst_log1p",
         hue="category",
         order=METHOD_ORDER,
-        hue_order=["sstIN", "Neighbor", "Other"],
+        hue_order=CATEGORY_ORDER,
         palette={"sstIN": "#e74c3c", "Neighbor": "#f39c12", "Other": "#3498db"},
         ax=ax,
         showfliers=False,
@@ -213,7 +223,7 @@ def plot_method_grouped_boxplot(df, output_path, figsize=(10, 6)):
     ax.set_title("log1p(SST expression) grouped by method (Axolotl)", fontsize=13)
     ax.set_xlabel("Method", fontsize=12)
     ax.set_ylabel("log1p(SST expression)", fontsize=12)
-    ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right")
+    plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
     ax.legend(title="Cell category", loc="upper right")
     ax.grid(axis="y", linestyle="--", alpha=0.3)
     plt.tight_layout()
@@ -224,7 +234,7 @@ def plot_method_grouped_boxplot(df, output_path, figsize=(10, 6)):
 
 def plot_violins(df, output_path, figsize=(14, 5)):
     """Three violin subplots (sstIN / Neighbor / Other) with one violin per method."""
-    categories = ["sstIN", "Neighbor", "Other"]
+    categories = CATEGORY_ORDER
     fig, axes = plt.subplots(1, 3, figsize=figsize, sharey=False)
 
     for ax, cat in zip(axes, categories):
@@ -233,16 +243,19 @@ def plot_violins(df, output_path, figsize=(14, 5)):
             data=sub,
             x="method",
             y="sst_log1p",
+            hue="method",
             order=METHOD_ORDER,
+            hue_order=METHOD_ORDER,
             palette=METHOD_COLORS,
             ax=ax,
+            legend=False,
             inner="box",
             cut=0,
         )
         ax.set_title(f"{cat} cells", fontsize=12)
         ax.set_xlabel("")
         ax.set_ylabel("log1p(SST expression)" if cat == "sstIN" else "")
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right")
+        plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
         ax.grid(axis="y", linestyle="--", alpha=0.3)
 
     fig.suptitle("log1p(SST expression) distribution by cell category (Axolotl)", fontsize=14)
@@ -261,7 +274,7 @@ def plot_method_grouped_violin(df, output_path, figsize=(10, 6)):
         y="sst_log1p",
         hue="category",
         order=METHOD_ORDER,
-        hue_order=["sstIN", "Neighbor", "Other"],
+        hue_order=CATEGORY_ORDER,
         palette={"sstIN": "#e74c3c", "Neighbor": "#f39c12", "Other": "#3498db"},
         ax=ax,
         inner="box",
@@ -270,7 +283,7 @@ def plot_method_grouped_violin(df, output_path, figsize=(10, 6)):
     ax.set_title("log1p(SST expression) distribution grouped by method (Axolotl)", fontsize=13)
     ax.set_xlabel("Method", fontsize=12)
     ax.set_ylabel("log1p(SST expression)", fontsize=12)
-    ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right")
+    plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
     ax.legend(title="Cell category", loc="upper right")
     ax.grid(axis="y", linestyle="--", alpha=0.3)
     plt.tight_layout()
@@ -301,7 +314,7 @@ def plot_logfc(df, output_path, figsize=(10, 5)):
     ax.set_xticklabels(METHOD_ORDER, rotation=30, ha="right")
     ax.set_ylabel("log2 FC", fontsize=12)
     ax.set_title("SST signal-to-noise ratios (Axolotl)\nhigher = better separation", fontsize=13)
-    ax.legend(title="Comparison", loc="upper right")
+    ax.legend(title="Comparison", loc="upper left", bbox_to_anchor=(1.01, 1.0))
     ax.grid(axis="y", linestyle="--", alpha=0.3)
     plt.tight_layout()
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
@@ -309,14 +322,38 @@ def plot_logfc(df, output_path, figsize=(10, 5)):
     print(f"Saved logFC plot: {output_path}")
 
 
-def print_summary(df):
-    """Print mean/median SST expression per method and category."""
-    summary = df.groupby(["category", "method"])["sst_expression"].agg(["mean", "median", "count"])
-    summary = summary.loc[[("sstIN", m) for m in METHOD_ORDER]
-                         + [("Neighbor", m) for m in METHOD_ORDER]
-                         + [("Other", m) for m in METHOD_ORDER]]
+def build_summary(df):
+    """Return one comparison row per method with SST expression and separation."""
+    grouped = df.groupby(["method", "category"])["sst_expression"]
+    means = grouped.mean().unstack().reindex(METHOD_ORDER)
+    medians = grouped.median().unstack().reindex(METHOD_ORDER)
+    counts = grouped.count().unstack().reindex(METHOD_ORDER)
+    eps = 1e-6
+    summary = pd.DataFrame({
+        "method": METHOD_ORDER,
+        "sstin_mean": means["sstIN"].to_numpy(),
+        "neighbor_mean": means["Neighbor"].to_numpy(),
+        "other_mean": means["Other"].to_numpy(),
+        "sstin_median": medians["sstIN"].to_numpy(),
+        "neighbor_median": medians["Neighbor"].to_numpy(),
+        "other_median": medians["Other"].to_numpy(),
+        "n_sstin": counts["sstIN"].to_numpy(dtype=int),
+        "n_neighbor": counts["Neighbor"].to_numpy(dtype=int),
+        "n_other": counts["Other"].to_numpy(dtype=int),
+        "log2fc_sstin_vs_neighbor": np.log2(
+            (means["sstIN"].to_numpy() + eps) / (means["Neighbor"].to_numpy() + eps)
+        ),
+        "log2fc_neighbor_vs_other": np.log2(
+            (means["Neighbor"].to_numpy() + eps) / (means["Other"].to_numpy() + eps)
+        ),
+    })
+    return summary
+
+
+def print_summary(summary):
+    """Print the compact method-level SST comparison."""
     print("\nSST expression summary:")
-    print(summary.round(2).to_string())
+    print(summary.round(3).to_string(index=False))
 
 
 def main():
@@ -355,7 +392,11 @@ def main():
     cache_path = out_dir / f"{args.tag}_cell_masks_cache.pkl"
     df = build_dataframe(args.tag, args.input_dir, cache_path=cache_path)
     df["sst_log1p"] = np.log1p(df["sst_expression"])
-    print_summary(df)
+    summary = build_summary(df)
+    print_summary(summary)
+    summary_path = out_dir / f"{args.tag}_sst_summary.csv"
+    summary.to_csv(summary_path, index=False)
+    print(f"Saved SST summary: {summary_path}")
 
     plot_boxplots(df, out_dir / f"{args.tag}_sst_boxplots.png")
     plot_grouped_boxplot(df, out_dir / f"{args.tag}_sst_grouped_boxplot.png")

@@ -14,8 +14,17 @@ PROJECT_ROOT <- file.path(dirname(normalizePath(
 )), "..", "..")
 if (!dir.exists(file.path(PROJECT_ROOT, "evaluation"))) PROJECT_ROOT <- "."
 
-RCTD_CSV <- file.path(PROJECT_ROOT, "evaluation", "reports", "rctd_mousebrain",
-                      "rctd_Cell_subclass_doublet_results.csv")
+DATASET_TAG <- Sys.getenv(
+  "RCTD_DATASET_TAG", "mousebrain_x12500-20000_y2000-10000"
+)
+REFERENCE_LEVEL <- Sys.getenv("RCTD_REFERENCE_LEVEL", "Cell_subclass")
+requested_methods <- trimws(strsplit(Sys.getenv("RCTD_METHODS", ""), ",")[[1]])
+requested_methods <- requested_methods[nzchar(requested_methods)]
+
+RCTD_CSV <- file.path(
+  PROJECT_ROOT, "evaluation", "reports", "rctd_mousebrain",
+  paste0("rctd_", REFERENCE_LEVEL, "_doublet_results.csv")
+)
 FIRST_DIR <- file.path(PROJECT_ROOT, "evaluation", "reports", "rctd_mousebrain",
                        "first_type")
 
@@ -23,13 +32,21 @@ stopifnot(file.exists(RCTD_CSV))
 dir.create(FIRST_DIR, recursive=TRUE, showWarnings=FALSE)
 
 all <- fread(RCTD_CSV)
+if (length(requested_methods) > 0) {
+  missing_requested <- setdiff(requested_methods, unique(all$method))
+  if (length(missing_requested) > 0) {
+    stop(sprintf("Requested methods absent from RCTD results: %s",
+                 paste(missing_requested, collapse=", ")))
+  }
+  all <- all[method %in% requested_methods]
+}
 message(sprintf("Read %d rows from %s", nrow(all), RCTD_CSV))
 message("Methods found: ", paste(sort(unique(all$method)), collapse=", "))
 
 # H5ad cell_name -> cell_id mapping (use RAW obs)
 obs <- fread(file.path(PROJECT_ROOT, "evaluation", "reports",
                        "rctd_mousebrain", "mtx",
-                       "mousebrain_x12500-17500_y2000-5000_raw_obs.csv"))
+                       paste0(DATASET_TAG, "_raw_obs.csv")))
 cell_name_id <- setNames(obs$cell_id, obs$cell_name)
 
 for (m in sort(unique(all$method))) {

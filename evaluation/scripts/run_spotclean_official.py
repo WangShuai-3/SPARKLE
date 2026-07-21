@@ -71,6 +71,11 @@ REAL_CONFIG = {
         "candidate_radius": (10, 20, 30, 50, 70, 100, 150, 200, 300),
         "empty_bin_size": 50.0,
         "coordinate_scale": 0.5,
+        # Run nine spatial cores sequentially. Each core receives a halo equal
+        # to the largest candidate radius, and only core cells are retained
+        # during stitching. No cell or background bin is randomly discarded.
+        "tile_grid": (3, 3),
+        "tile_halo": 300.0,
     },
     "ovarian": {
         "x_range": (1000, 1800),
@@ -224,6 +229,405 @@ def _write_real_h5ad(
         raise
 
 
+def _make_spatial_tile_specs(
+    spot_coords: np.ndarray,
+    tissue: np.ndarray,
+    config: dict,
+) -> list[dict]:
+    """Return deterministic core/halo membership for a tiled official run."""
+    n_x, n_y = config["tile_grid"]
+    scale = float(config["coordinate_scale"])
+    x_edges = np.linspace(
+        config["x_range"][0] * scale,
+        config["x_range"][1] * scale,
+        n_x + 1,
+    )
+    y_edges = np.linspace(
+        config["y_range"][0] * scale,
+        config["y_range"][1] * scale,
+        n_y + 1,
+    )
+    halo = float(config["tile_halo"])
+    tissue_indices = np.flatnonzero(tissue == 1)
+    tissue_coords = spot_coords[tissue_indices]
+    if np.any(tissue_coords[:, 0] < x_edges[0]) or np.any(
+        tissue_coords[:, 0] > x_edges[-1]
+    ):
+        raise ValueError("Tissue centroids fall outside MouseBrain x tile bounds")
+    if np.any(tissue_coords[:, 1] < y_edges[0]) or np.any(
+        tissue_coords[:, 1] > y_edges[-1]
+    ):
+        raise ValueError("Tissue centroids fall outside MouseBrain y tile bounds")
+
+    x_membership = np.searchsorted(x_edges[1:-1], tissue_coords[:, 0], side="right")
+    y_membership = np.searchsorted(y_edges[1:-1], tissue_coords[:, 1], side="right")
+    assigned = np.zeros(len(tissue_indices), dtype=np.int8)
+    specs: list[dict] = []
+    for row in range(n_y):
+        for column in range(n_x):
+            core_local = (x_membership == column) & (y_membership == row)
+            assigned += core_local.astype(np.int8)
+            core_tissue_indices = tissue_indices[core_local]
+            x0, x1 = float(x_edges[column]), float(x_edges[column + 1])
+            y0, y1 = float(y_edges[row]), float(y_edges[row + 1])
+            context = (
+                (spot_coords[:, 0] >= x0 - halo)
+                & (spot_coords[:, 0] <= x1 + halo)
+                & (spot_coords[:, 1] >= y0 - halo)
+                & (spot_coords[:, 1] <= y1 + halo)
+            )
+            context_indices = np.flatnonzero(context)
+            if len(core_tissue_indices) == 0:
+                raise ValueError(f"MouseBrain tile r{row}c{column} has no core cells")
+            if not np.all(np.isin(core_tissue_indices, context_indices)):
+                raise ValueError(f"MouseBrain tile r{row}c{column} core is outside its halo")
+            if not np.any(tissue[context_indices] == 0):
+                raise ValueError(f"MouseBrain tile r{row}c{column} has no background spots")
+            specs.append(
+                {
+                    "tile_id": f"r{row}c{column}",
+                    "row": row,
+                    "column": column,
+                    "core_bounds": [x0, x1, y0, y1],
+                    "halo": halo,
+                    "context_indices": context_indices,
+                    "core_tissue_indices": core_tissue_indices,
+                }
+            )
+    if not np.all(assigned == 1):
+        raise ValueError("Every MouseBrain tissue cell must belong to exactly one tile core")
+    return specs
+
+
+def _write_tiled_real_h5ad(
+    raw_path: Path,
+    output_path: Path,
+    tiles_dir: Path,
+    tile_records: list[dict],
+    diagnostics: dict,
+    *,
+    overwrite: bool,
+) -> None:
+    """Stitch core-only tissue outputs from spatial tiles into the RAW template."""
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(f"Output exists; pass --overwrite: {output_path}")
+    template_cells, template_genes, template_shape = _read_template_ids(raw_path)
+    expected_barcodes = np.asarray([f"cell_{value}" for value in template_cells])
+    barcode_to_row = {barcode: row for row, barcode in enumerate(expected_barcodes)}
+    gene_to_column = {gene: column for column, gene in enumerate(template_genes)}
+    covered = np.zeros(len(template_cells), dtype=bool)
+
+    temporary = output_path.with_name(f".{output_path.name}.tmp")
+    if temporary.exists():
+        temporary.unlink()
+    shutil.copy2(raw_path, temporary)
+    try:
+        with h5py.File(temporary, "r+") as target:
+            if target["X"].shape != template_shape:
+                raise ValueError("RAW h5ad X shape is inconsistent with AnnData metadata")
+            for record in tile_records:
+                tile_dir = tiles_dir / record["tile_id"]
+                official_dir = tile_dir / "output"
+                output_genes = np.asarray(
+                    (official_dir / "genes.tsv").read_text(encoding="utf-8").splitlines()
+                )
+                output_barcodes = np.asarray(
+                    (official_dir / "tissue_barcodes.tsv")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                )
+                core_barcodes = np.asarray(
+                    (tile_dir / "core_tissue_barcodes.tsv")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                )
+                source_lookup = {
+                    barcode: row for row, barcode in enumerate(output_barcodes)
+                }
+                try:
+                    source_rows = np.asarray(
+                        [source_lookup[barcode] for barcode in core_barcodes], dtype=np.int64
+                    )
+                    target_rows = np.asarray(
+                        [barcode_to_row[barcode] for barcode in core_barcodes], dtype=np.int64
+                    )
+                    target_columns = np.asarray(
+                        [gene_to_column[gene] for gene in output_genes], dtype=np.int64
+                    )
+                except KeyError as exc:
+                    raise ValueError(
+                        f"Unknown barcode/gene while stitching {record['tile_id']}: {exc}"
+                    ) from exc
+                if np.any(covered[target_rows]):
+                    raise ValueError(f"Duplicate core cells while stitching {record['tile_id']}")
+                if np.any(np.diff(source_rows) <= 0) or np.any(np.diff(target_rows) <= 0):
+                    raise ValueError(f"Non-monotonic cell order in {record['tile_id']}")
+                if np.any(np.diff(target_columns) <= 0):
+                    raise ValueError(f"Non-monotonic gene order in {record['tile_id']}")
+
+                with h5py.File(official_dir / "decont.h5", "r") as source:
+                    if source["X"].shape != (len(output_barcodes), len(output_genes)):
+                        raise ValueError(
+                            f"Official corrected matrix has an unexpected shape in {record['tile_id']}"
+                        )
+                    batch = 128
+                    for start in range(0, len(output_genes), batch):
+                        end = min(start + batch, len(output_genes))
+                        columns = target_columns[start:end]
+                        values = source["X"][source_rows, start:end].astype(
+                            np.float32, copy=False
+                        )
+                        if np.array_equal(
+                            columns, np.arange(columns[0], columns[0] + len(columns))
+                        ):
+                            target["X"][target_rows, columns[0] : columns[-1] + 1] = values
+                        else:
+                            for offset, column in enumerate(columns):
+                                target["X"][target_rows, column] = values[:, offset]
+                covered[target_rows] = True
+
+            if not np.all(covered):
+                raise ValueError(f"Tiled stitching missed {np.sum(~covered)} MouseBrain cells")
+            _replace_string_dataset(target["uns"], "method", "SpotClean")
+            _replace_string_dataset(target["uns"], "implementation", "official_R_package")
+            _replace_string_dataset(
+                target["uns"],
+                "spotclean_diagnostics_json",
+                json.dumps(diagnostics, sort_keys=True),
+            )
+            target.flush()
+        os.replace(temporary, output_path)
+    except Exception:
+        if temporary.exists():
+            temporary.unlink()
+        raise
+
+
+def _run_mousebrain_tiled(args) -> dict:
+    """Run official SpotClean sequentially on 3x3 MouseBrain spatial tiles."""
+    name = "mousebrain"
+    config = REAL_CONFIG[name]
+    tag = _tag(name, config)
+    raw_path = REPORTS / "h5ad" / f"{tag}_raw.h5ad"
+    output_path = REPORTS / "h5ad" / f"{tag}_SpotCleanOfficial.h5ad"
+    if not raw_path.exists():
+        raise FileNotFoundError(f"Existing RAW final-comparison h5ad not found: {raw_path}")
+
+    print(f"\n{'=' * 78}\nOFFICIAL SPOTCLEAN TILED: {tag}\n{'=' * 78}", flush=True)
+    started = time.time()
+    work_dir = REPORTS / "spotclean_official" / tag
+    tiles_dir = work_dir / "tiles"
+    manifest_path = work_dir / "manifest.json"
+    diagnostics = None
+    if args.reuse_prepared_input and manifest_path.exists():
+        candidate = json.loads(manifest_path.read_text(encoding="utf-8"))
+        required = [
+            tiles_dir / record["tile_id"] / "input" / "counts_csc.h5"
+            for record in candidate.get("tiles", [])
+        ]
+        required.extend(
+            tiles_dir / record["tile_id"] / "core_tissue_barcodes.tsv"
+            for record in candidate.get("tiles", [])
+        )
+        if (
+            candidate.get("tiling_strategy") == "3x3_core_with_radius_halo"
+            and len(candidate.get("tiles", [])) == 9
+            and all(path.exists() for path in required)
+        ):
+            diagnostics = candidate
+            diagnostics.pop("reason", None)
+            diagnostics.pop("status", None)
+            print("Reusing nine validated MouseBrain tile inputs.", flush=True)
+
+    if diagnostics is None:
+        data = _load_real(name, config)
+        template_cells, template_genes, _ = _read_template_ids(raw_path)
+        if not np.array_equal(np.asarray(data["cell_ids"]), template_cells):
+            raise ValueError("mousebrain: loader cell order differs from existing RAW h5ad")
+        if not np.array_equal(
+            np.asarray(data["gene_names"], dtype=str), template_genes
+        ):
+            raise ValueError("mousebrain: loader gene order differs from existing RAW h5ad")
+        spot_expr, coords, tissue, barcodes, prep = prepare_spotclean_spots(
+            data["dnb_expr"],
+            data["dnb_coords"],
+            data["dnb_labels"],
+            data["cell_ids"],
+            empty_bin_size=config["empty_bin_size"],
+            coordinate_scale=config["coordinate_scale"],
+        )
+        specs = _make_spatial_tile_specs(coords, tissue, config)
+        tile_records = []
+        for spec in specs:
+            tile_dir = tiles_dir / spec["tile_id"]
+            selected = spec["context_indices"]
+            tile_tissue = tissue[selected]
+            tile_barcodes = barcodes[selected]
+            write_official_input(
+                tile_dir / "input",
+                spot_expr[:, selected],
+                coords[selected],
+                tile_tissue,
+                tile_barcodes,
+                template_genes,
+                None,
+            )
+            core_barcodes = barcodes[spec["core_tissue_indices"]]
+            (tile_dir / "core_tissue_barcodes.tsv").write_text(
+                "\n".join(core_barcodes) + "\n", encoding="utf-8"
+            )
+            n_all = int(len(selected))
+            n_tissue = int(np.sum(tile_tissue == 1))
+            record = {
+                "tile_id": spec["tile_id"],
+                "row": spec["row"],
+                "column": spec["column"],
+                "core_bounds": spec["core_bounds"],
+                "halo": spec["halo"],
+                "n_core_tissue_spots": int(len(core_barcodes)),
+                "n_all_spots": n_all,
+                "n_tissue_spots": n_tissue,
+                "n_background_spots": n_all - n_tissue,
+                "estimated_official_peak_memory_gb": _official_peak_memory_gb(
+                    n_all, n_tissue
+                ),
+                "estimated_crossprod_flops_lower_bound": _official_crossprod_flops(
+                    n_all, n_tissue, len(config["candidate_radius"])
+                ),
+                "status": "prepared",
+            }
+            tile_records.append(record)
+            print(
+                f"Prepared {record['tile_id']}: {n_all:,} context spots "
+                f"({n_tissue:,} tissue + {n_all - n_tissue:,} background), "
+                f"{record['n_core_tissue_spots']:,} core cells, "
+                f"~{record['estimated_official_peak_memory_gb']:.1f} GiB",
+                flush=True,
+            )
+        diagnostics = {
+            "dataset": tag,
+            "implementation": "official_R_package",
+            "r_wrapper": str(R_SCRIPT.relative_to(PROJECT_ROOT)),
+            "rscript": args.rscript,
+            "candidate_radius": list(config["candidate_radius"]),
+            "candidate_radius_units": "micrometres_via_unit_coordinate_slope",
+            "gene_keep_selection": "official_default_keepHighGene_per_tile",
+            "tiling_strategy": "3x3_core_with_radius_halo",
+            "tile_grid": list(config["tile_grid"]),
+            "tile_halo": float(config["tile_halo"]),
+            "tile_execution": "sequential",
+            "stitching": "retain_core_tissue_cells_only_in_original_order",
+            "n_input_genes": int(spot_expr.shape[0]),
+            "n_tissue_spots": prep["n_tissue_spots"],
+            "n_background_spots": prep["n_background_spots"],
+            "n_all_spots_full_window": prep["n_all_spots"],
+            "empty_bin_size_input_units": prep["empty_bin_size_input_units"],
+            "coordinate_scale": prep["coordinate_scale"],
+            "background_sampling_fraction": 1.0,
+            "tiles": tile_records,
+            "status": "prepared",
+        }
+        diagnostics["estimated_official_peak_memory_gb"] = max(
+            record["estimated_official_peak_memory_gb"] for record in tile_records
+        )
+        diagnostics["estimated_crossprod_flops_lower_bound"] = sum(
+            record["estimated_crossprod_flops_lower_bound"] for record in tile_records
+        )
+        work_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            json.dumps(diagnostics, indent=2, sort_keys=True), encoding="utf-8"
+        )
+        del data, spot_expr
+
+    max_official_spots = int(np.floor(np.sqrt(np.iinfo(np.int32).max)))
+    available = _available_memory_gb()
+    diagnostics["available_memory_before_R_gb"] = available
+    diagnostics["official_dense_distance_max_spots"] = max_official_spots
+    too_large = [
+        record["tile_id"]
+        for record in diagnostics["tiles"]
+        if int(record["n_all_spots"]) > max_official_spots
+    ]
+    if too_large:
+        raise RuntimeError(f"Official integer distance limit exceeded in tiles: {too_large}")
+    peak = float(diagnostics["estimated_official_peak_memory_gb"])
+    if args.prepare_only:
+        diagnostics["status"] = "prepared_only"
+        manifest_path.write_text(
+            json.dumps(diagnostics, indent=2, sort_keys=True), encoding="utf-8"
+        )
+        print(
+            f"Prepared nine tiles; max estimated peak {peak:.1f} GiB, "
+            f"total lower-bound work {diagnostics['estimated_crossprod_flops_lower_bound']:.2e} FLOPs.",
+            flush=True,
+        )
+        return diagnostics
+    if peak > available * args.memory_fraction and not args.force_memory:
+        diagnostics["status"] = "skipped_memory_guard"
+        diagnostics["reason"] = (
+            f"Largest tile needs an estimated {peak:.1f} GiB, above the configured "
+            "safe fraction of available memory."
+        )
+        manifest_path.write_text(
+            json.dumps(diagnostics, indent=2, sort_keys=True), encoding="utf-8"
+        )
+        print(f"SKIPPED by memory guard: {diagnostics['reason']}", flush=True)
+        return diagnostics
+
+    for record in diagnostics["tiles"]:
+        tile_dir = tiles_dir / record["tile_id"]
+        official_dir = tile_dir / "output"
+        completed_files = [
+            official_dir / "decont.h5",
+            official_dir / "diagnostics.tsv",
+            official_dir / "genes.tsv",
+            official_dir / "tissue_barcodes.tsv",
+        ]
+        if args.reuse_prepared_input and not args.overwrite and all(
+            path.exists() for path in completed_files
+        ):
+            print(f"Reusing completed {record['tile_id']} output.", flush=True)
+            record["status"] = "completed"
+            continue
+        if args.overwrite:
+            for stale in completed_files:
+                if stale.exists():
+                    stale.unlink()
+        print(f"Running official SpotClean for {record['tile_id']} ...", flush=True)
+        tile_started = time.time()
+        run_official_r(
+            tile_dir / "input",
+            official_dir,
+            r_script=R_SCRIPT,
+            candidate_radius=config["candidate_radius"],
+            maxit=args.maxit,
+            tol=args.tol,
+            rscript=args.rscript,
+        )
+        record.update(read_key_value_tsv(official_dir / "diagnostics.tsv"))
+        record["tile_end_to_end_runtime_seconds"] = time.time() - tile_started
+        record["status"] = "completed"
+        manifest_path.write_text(
+            json.dumps(diagnostics, indent=2, sort_keys=True), encoding="utf-8"
+        )
+
+    diagnostics["status"] = "completed"
+    diagnostics["end_to_end_runtime_seconds"] = time.time() - started
+    _write_tiled_real_h5ad(
+        raw_path,
+        output_path,
+        tiles_dir,
+        diagnostics["tiles"],
+        diagnostics,
+        overwrite=args.overwrite,
+    )
+    manifest_path.write_text(
+        json.dumps(diagnostics, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    print(f"Saved stitched official result: {output_path}", flush=True)
+    return diagnostics
+
+
 def _load_real(name: str, config: dict):
     if name == "axolotl":
         return load_axolotl_data_windowed(config["x_range"], config["y_range"])
@@ -237,6 +641,8 @@ def _load_real(name: str, config: dict):
 
 
 def run_real(name: str, args) -> dict:
+    if name == "mousebrain" and "tile_grid" in REAL_CONFIG[name]:
+        return _run_mousebrain_tiled(args)
     config = REAL_CONFIG[name]
     tag = _tag(name, config)
     raw_path = REPORTS / "h5ad" / f"{tag}_raw.h5ad"
@@ -336,6 +742,23 @@ def run_real(name: str, args) -> dict:
             len(config["candidate_radius"]),
         ),
     )
+
+    # stats::as.matrix.dist() in the official implementation forms size^2
+    # with a 32-bit integer. Fail clearly before entering R if preprocessing
+    # ever produces more spots than that routine can address.
+    max_official_spots = int(np.floor(np.sqrt(np.iinfo(np.int32).max)))
+    diagnostics["official_dense_distance_max_spots"] = max_official_spots
+    if int(diagnostics["n_all_spots"]) > max_official_spots:
+        diagnostics["status"] = "blocked_official_integer_index_limit"
+        diagnostics["reason"] = (
+            "Official SpotClean calls as.matrix(dist(.)); its 32-bit size^2 "
+            f"index cannot represent {diagnostics['n_all_spots']:,} spots "
+            f"(maximum {max_official_spots:,})."
+        )
+        manifest_path.write_text(
+            json.dumps(diagnostics, indent=2, sort_keys=True), encoding="utf-8"
+        )
+        raise RuntimeError(diagnostics["reason"])
 
     if args.prepare_only:
         flops = float(diagnostics["estimated_crossprod_flops_lower_bound"])

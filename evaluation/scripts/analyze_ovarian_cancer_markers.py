@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
 """Analyze how well-known ovarian cancer markers are improved by SPARKLE correction.
 
-Reads h5ad files for a given spatial window, normalizes expression to log1p-CPM,
-and computes tumor-to-stromal fold-change metrics for three gene panels
-(epithelial/tumor, stromal/fibroblast, immune) across all methods.
+Reads h5ad files for a given spatial window, normalizes expression to log1p-CP10K,
+and computes tumor-to-non-tumor log2 fold-change metrics for three gene panels
+(epithelial/tumor, stromal/fibroblast, immune) across all methods.  The method-
+level summary intentionally excludes the unstable immune-panel aggregate.
 
 Outputs (under evaluation/reports/ovarian_eval/marker_analysis/):
-    - marker_foldchanges.csv          : per-gene × method fc, tumor_mean, stromal_mean
+    - marker_foldchanges.csv          : per-gene × method log2fc and expression means
+    - marker_log2fc_final_core.csv    : final 17 tumor + 9 stromal marker results
     - marker_summary.csv              : per-method aggregate metrics
-    - marker_foldchange_delta.csv     : per-gene fc delta vs RAW
+    - marker_foldchange_delta.csv     : per-gene log2fc delta vs RAW
 """
 
 import warnings
 from pathlib import Path
 
 import anndata as ad
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -26,7 +33,15 @@ TAG = "ovarian_x1000-1800_y300-1100"
 INPUT_DIR = Path("evaluation/reports/h5ad_ovarian_annotated")
 OUTPUT_DIR = Path("evaluation/reports/ovarian_eval/marker_analysis")
 
-METHODS = ["RAW", "SPARKLE", "SpatialSoupX", "SoupX", "DecontX"]
+METHODS = ["RAW", "SPARKLE", "SpatialSoupX", "SoupX", "DecontX", "SpotClean"]
+PLOT_METHOD_ORDER = ["RAW", "SPARKLE", "SpotClean", "SoupX", "SpatialSoupX", "DecontX"]
+METHOD_SUFFIXES = {
+    "RAW": "raw",
+    "SpotClean": "SpotCleanOfficial",
+}
+
+# Pseudocount in log1p-CP10K units, matching the detailed specificity analysis.
+LOG2FC_PSEUDOCOUNT = 0.01
 
 # Cell-type → category mapping  (16 cell types total)
 TUMOR_TYPES = {
@@ -80,7 +95,7 @@ for g in IMMUNE_MARKERS:
 # ── Utility functions ────────────────────────────────────────────────────────
 
 def normalize_adata(adata: ad.AnnData) -> np.ndarray:
-    """Normalize expression to log1p-CPM.
+    """Normalize expression to log1p-CP10K.
 
     Clips negative values to 0, scales each cell to 10 000 total counts,
     then applies log1p.  Returns a dense numpy array (cells × genes).
@@ -92,7 +107,7 @@ def normalize_adata(adata: ad.AnnData) -> np.ndarray:
 
     mat = np.maximum(mat, 0.0)
 
-    # CPM normalization (sum-to-1e4 per cell); avoid division by zero
+    # CP10K normalization (sum-to-1e4 per cell); avoid division by zero
     lib_sizes = mat.sum(axis=1)
     lib_sizes = np.where(lib_sizes == 0, 1.0, lib_sizes)
     mat = mat / lib_sizes[:, None] * 1e4
@@ -133,9 +148,131 @@ def compute_group_means(expr: np.ndarray, obs: pd.DataFrame,
     return pd.DataFrame(means, index=pd.RangeIndex(n_genes))
 
 
-def safe_divide(num, denom):
-    """Element-wise division with small epsilon to avoid div-by-zero."""
-    return num / (denom + 1e-6)
+def compute_log2fc(tumor_mean, non_tumor_mean):
+    """Tumor/non-tumor log2FC with a fixed log1p-CP10K pseudocount."""
+    return np.log2(
+        (tumor_mean + LOG2FC_PSEUDOCOUNT)
+        / (non_tumor_mean + LOG2FC_PSEUDOCOUNT)
+    )
+
+
+def save_figure(fig: plt.Figure, path_stem: Path) -> None:
+    fig.savefig(path_stem.with_suffix(".png"), dpi=240, bbox_inches="tight")
+    fig.savefig(path_stem.with_suffix(".pdf"), bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_marker_log2fc(
+    log2fc_df: pd.DataFrame,
+    output_dir: Path,
+    expression_label: str = "log1p-CP10K",
+) -> None:
+    """Plot signed per-marker log2FC as mean±SEM bars and boxplots."""
+    pseudocounts = log2fc_df["log2fc_pseudocount"].drop_duplicates()
+    if len(pseudocounts) != 1:
+        raise ValueError("Plot input must use one shared log2FC pseudocount")
+    pseudocount = float(pseudocounts.iloc[0])
+    panel_order = ["epithelial_tumor", "stromal_fibroblast"]
+    panel_labels = {
+        "epithelial_tumor": "Tumor markers (n=17)",
+        "stromal_fibroblast": "Stromal markers (n=9)",
+    }
+    panel_colors = {
+        "epithelial_tumor": "#4477AA",
+        "stromal_fibroblast": "#CC6677",
+    }
+    core = log2fc_df[log2fc_df["panel"].isin(panel_order)].copy()
+    core["panel_label"] = core["panel"].map(panel_labels)
+
+    stats = (
+        core.groupby(["method", "panel"], observed=True)["log2fc"]
+        .agg(mean="mean", std="std", n="size")
+        .reset_index()
+    )
+    stats["sem"] = stats["std"] / np.sqrt(stats["n"])
+
+    x = np.arange(len(PLOT_METHOD_ORDER))
+    width = 0.36
+    fig, ax = plt.subplots(figsize=(10.5, 5.8))
+    for index, panel in enumerate(panel_order):
+        values = stats[stats["panel"] == panel].set_index("method").reindex(
+            PLOT_METHOD_ORDER
+        )
+        positions = x + (index - 0.5) * width
+        bars = ax.bar(
+            positions, values["mean"], width,
+            yerr=values["sem"], capsize=4,
+            color=panel_colors[panel], edgecolor="#333333", linewidth=0.7,
+            label=panel_labels[panel],
+        )
+        for bar, mean in zip(bars, values["mean"]):
+            offset = 0.045 if mean >= 0 else -0.065
+            ax.text(
+                bar.get_x() + bar.get_width() / 2, mean + offset,
+                f"{mean:+.2f}", ha="center",
+                va="bottom" if mean >= 0 else "top", fontsize=8,
+            )
+    ax.axhline(0, color="#333333", linewidth=0.9)
+    ax.set_xticks(x, PLOT_METHOD_ORDER, rotation=20, ha="right")
+    ax.set_xlabel("")
+    ax.set_ylabel("Tumor vs non-tumor log2FC")
+    ax.set_title(
+        f"Ovarian marker log2FC by correction method: mean ± SEM ({expression_label})",
+        pad=58,
+    )
+    ax.legend(
+        frameon=False, ncol=2, loc="lower center", bbox_to_anchor=(0.5, 1.01)
+    )
+    ax.grid(axis="y", color="#DDDDDD", linewidth=0.7, alpha=0.7)
+    ax.set_axisbelow(True)
+    fig.text(
+        0.5, -0.015,
+        f"Each observation is one marker; pseudocount={pseudocount:g} {expression_label}. "
+        "Positive is expected for tumor markers and negative for stromal markers.",
+        ha="center", fontsize=9,
+    )
+    fig.tight_layout()
+    save_figure(fig, output_dir / "marker_log2fc_mean_sem_bar")
+
+    fig, ax = plt.subplots(figsize=(10.5, 6.0))
+    hue_order = [panel_labels[panel] for panel in panel_order]
+    label_palette = {
+        panel_labels[panel]: panel_colors[panel] for panel in panel_order
+    }
+    sns.boxplot(
+        data=core, x="method", y="log2fc", hue="panel_label",
+        order=PLOT_METHOD_ORDER, hue_order=hue_order, palette=label_palette,
+        width=0.72, showfliers=False, linewidth=1.0, ax=ax,
+    )
+    sns.stripplot(
+        data=core, x="method", y="log2fc", hue="panel_label",
+        order=PLOT_METHOD_ORDER, hue_order=hue_order, palette=label_palette,
+        dodge=True, jitter=0.16, size=3.2, alpha=0.58,
+        edgecolor="white", linewidth=0.25, legend=False, ax=ax,
+    )
+    ax.axhline(0, color="#333333", linewidth=0.9)
+    ax.set_xlabel("")
+    ax.set_ylabel("Tumor vs non-tumor log2FC")
+    ax.set_title(
+        f"Ovarian marker log2FC distributions by correction method ({expression_label})",
+        pad=58,
+    )
+    ax.tick_params(axis="x", rotation=20)
+    for label in ax.get_xticklabels():
+        label.set_ha("right")
+    ax.legend(
+        frameon=False, ncol=2, loc="lower center", bbox_to_anchor=(0.5, 1.01)
+    )
+    ax.grid(axis="y", color="#DDDDDD", linewidth=0.7, alpha=0.7)
+    ax.set_axisbelow(True)
+    fig.text(
+        0.5, -0.015,
+        "Boxes show median and IQR; whiskers use 1.5×IQR; points are individual markers. "
+        f"Pseudocount={pseudocount:g} {expression_label}.",
+        ha="center", fontsize=9,
+    )
+    fig.tight_layout()
+    save_figure(fig, output_dir / "marker_log2fc_boxplot")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -146,13 +283,13 @@ def main():
     # ── 1. Load and normalize all h5ad files ─────────────────────────────────
     methods_data = {}   # method → (expr, obs, var_names)
     sparkle_corrected_genes = None
+    reference_obs_names = None
+    reference_var_names = None
+    reference_annotations = None
 
     for method in METHODS:
-        path = INPUT_DIR / f"{TAG}_{method}.h5ad"
-        if method == "RAW":
-            alt = INPUT_DIR / f"{TAG}_raw.h5ad"
-            if not path.exists() and alt.exists():
-                path = alt
+        suffix = METHOD_SUFFIXES.get(method, method)
+        path = INPUT_DIR / f"{TAG}_{suffix}.h5ad"
 
         if not path.exists():
             warnings.warn(f"File not found: {path}")
@@ -169,8 +306,22 @@ def main():
             )
             print(f"  SPARKLE-corrected genes: {len(sparkle_corrected_genes)}")
 
-        var_names = adata.var_names
+        var_names = adata.var_names.copy()
         obs = adata.obs[["annotation"]].copy()
+
+        if reference_obs_names is None:
+            reference_obs_names = adata.obs_names.copy()
+            reference_var_names = var_names.copy()
+            reference_annotations = obs["annotation"].astype(str).to_numpy()
+        else:
+            if not adata.obs_names.equals(reference_obs_names):
+                raise ValueError(f"{method}: cell order differs from RAW")
+            if not var_names.equals(reference_var_names):
+                raise ValueError(f"{method}: gene order differs from RAW")
+            if not np.array_equal(
+                obs["annotation"].astype(str).to_numpy(), reference_annotations
+            ):
+                raise ValueError(f"{method}: annotations differ from RAW")
 
         # Print cell-type counts
         print(f"  Total cells: {adata.n_obs}")
@@ -185,6 +336,7 @@ def main():
         # Normalize
         expr = normalize_adata(adata)
         methods_data[method] = (expr, obs, var_names)
+        adata.file.close()
 
     if len(methods_data) == 0:
         raise FileNotFoundError(f"No h5ad files found for tag {TAG}")
@@ -212,12 +364,12 @@ def main():
         IMMUNE_MARKERS
     )
 
-    fc_rows = []       # for marker_foldchanges.csv
+    log2fc_rows = []   # for marker_foldchanges.csv
     summary_rows = []  # for marker_summary.csv
     delta_rows = []    # for marker_foldchange_delta.csv
 
-    # Store RAW fc for delta computation
-    raw_fc = {}
+    # Store RAW log2FC for delta computation
+    raw_log2fc = {}
 
     for method in METHODS:
         if method not in methods_data:
@@ -230,10 +382,9 @@ def main():
         t_mask = np.isin(groups, list(TUMOR_TYPES))
         s_mask = np.isin(groups, list(STROMAL_TYPES))
 
-        # Per-gene fold change for the marker panel
-        epi_fcs = []
-        stromal_fcs = []
-        immune_fcs = []
+        # Per-gene signed tumor/non-tumor log2FC for the marker panel.
+        epi_log2fcs = []
+        stromal_log2fcs = []
 
         for gene in all_genes:
             try:
@@ -245,9 +396,9 @@ def main():
 
             tumor_mean = float(expr[t_mask, gidx].mean())
             stromal_mean = float(expr[s_mask, gidx].mean())
-            fc = safe_divide(tumor_mean, stromal_mean)
+            log2fc = float(compute_log2fc(tumor_mean, stromal_mean))
 
-            fc_rows.append({
+            log2fc_rows.append({
                 "method": method,
                 "gene": gene,
                 "panel": (
@@ -258,62 +409,62 @@ def main():
                 "direction": GENE_DIRECTION[gene],
                 "tumor_mean": tumor_mean,
                 "stromal_mean": stromal_mean,
-                "fold_change": fc,
+                "log2fc": log2fc,
+                "log2fc_pseudocount": LOG2FC_PSEUDOCOUNT,
             })
 
             if method == "RAW":
-                raw_fc[gene] = fc
+                raw_log2fc[gene] = log2fc
 
-            # Collect per-panel FCs for summary
+            # The method summary deliberately excludes the immune panel.
             if gene in EPITHELIAL_TUMOR_MARKERS:
-                epi_fcs.append(fc)
+                epi_log2fcs.append(log2fc)
             elif gene in STROMAL_FIBROBLAST_MARKERS:
-                stromal_fcs.append(fc)
-            else:
-                immune_fcs.append(fc)
+                stromal_log2fcs.append(log2fc)
 
         # Summary metrics
-        tumor_marker_mean_fc = np.mean(epi_fcs) if epi_fcs else np.nan
-        stromal_marker_mean_fc = np.mean(stromal_fcs) if stromal_fcs else np.nan
-        immune_marker_mean_fc = np.mean(immune_fcs) if immune_fcs else np.nan
-        contrast = (
-            tumor_marker_mean_fc / (stromal_marker_mean_fc + 1e-6)
-            if stromal_marker_mean_fc and stromal_marker_mean_fc > 0
-            else np.nan
+        tumor_marker_mean_log2fc = (
+            float(np.mean(epi_log2fcs)) if epi_log2fcs else np.nan
         )
+        stromal_marker_mean_log2fc = (
+            float(np.mean(stromal_log2fcs)) if stromal_log2fcs else np.nan
+        )
+        # Tumor markers should be positive and stromal markers negative, so
+        # their difference is an expected-direction separation score.
+        contrast = tumor_marker_mean_log2fc - stromal_marker_mean_log2fc
 
         summary_rows.append({
             "method": method,
-            "tumor_marker_mean_fc": tumor_marker_mean_fc,
-            "stromal_marker_mean_fc": stromal_marker_mean_fc,
-            "immune_marker_mean_fc": immune_marker_mean_fc,
+            "tumor_marker_mean_log2fc": tumor_marker_mean_log2fc,
+            "stromal_marker_mean_log2fc": stromal_marker_mean_log2fc,
             "tumor_stromal_contrast": contrast,
+            "log2fc_pseudocount": LOG2FC_PSEUDOCOUNT,
         })
 
-        print(f"\n{method}: tumor_marker_fc={tumor_marker_mean_fc:.3f}, "
-              f"stromal_marker_fc={stromal_marker_mean_fc:.3f}, "
-              f"immune_marker_fc={immune_marker_mean_fc:.3f}, "
+        print(f"\n{method}: tumor_marker_mean_log2fc={tumor_marker_mean_log2fc:.3f}, "
+              f"stromal_marker_mean_log2fc={stromal_marker_mean_log2fc:.3f}, "
               f"contrast={contrast:.3f}")
 
     # ── 3b. Delta vs RAW ─────────────────────────────────────────────────────
-    fc_df = pd.DataFrame(fc_rows)
-    raw_fc_df = fc_df[fc_df["method"] == "RAW"].set_index("gene")["fold_change"]
+    log2fc_df = pd.DataFrame(log2fc_rows)
+    raw_log2fc_df = log2fc_df[
+        log2fc_df["method"] == "RAW"
+    ].set_index("gene")["log2fc"]
 
     for method in METHODS:
         if method == "RAW" or method not in methods_data:
             continue
-        m_df = fc_df[fc_df["method"] == method].set_index("gene")
-        common = m_df.index.intersection(raw_fc_df.index)
+        m_df = log2fc_df[log2fc_df["method"] == method].set_index("gene")
+        common = m_df.index.intersection(raw_log2fc_df.index)
         for gene in common:
-            fc_raw = raw_fc_df.loc[gene]
-            fc_method = m_df.loc[gene, "fold_change"]
+            log2fc_raw = raw_log2fc_df.loc[gene]
+            log2fc_method = m_df.loc[gene, "log2fc"]
             direction = GENE_DIRECTION[gene]
-            abs_delta = fc_method - fc_raw
-            pct_delta = (fc_method - fc_raw) / (abs(fc_raw) + 1e-6) * 100
+            log2fc_delta = log2fc_method - log2fc_raw
             # For "up" markers, positive delta is improvement
             # For "down" markers, negative delta is improvement
-            improved = (direction == "up" and abs_delta > 0) or \
-                       (direction == "down" and abs_delta < 0)
+            improved = (direction == "up" and log2fc_delta > 0) or \
+                       (direction == "down" and log2fc_delta < 0)
 
             delta_rows.append({
                 "method": method,
@@ -324,10 +475,9 @@ def main():
                     "immune"
                 ),
                 "direction": direction,
-                "fc_raw": fc_raw,
-                "fc_method": fc_method,
-                "fc_delta": abs_delta,
-                "fc_pct_delta": pct_delta,
+                "log2fc_raw": log2fc_raw,
+                "log2fc_method": log2fc_method,
+                "log2fc_delta": log2fc_delta,
                 "improved": improved,
             })
 
@@ -357,14 +507,14 @@ def main():
         raw_tmask = np.isin(raw_groups_arr, list(TUMOR_TYPES))
         raw_smask = np.isin(raw_groups_arr, list(STROMAL_TYPES))
 
-        # Compute tumor/stromal FC for all SPARKLE-corrected genes
+        # Compute tumor/non-tumor log2FC for all SPARKLE-corrected genes
         sp_tumor_mean = sc_expr_sp[sp_tmask].mean(axis=0)
         sp_stromal_mean = sc_expr_sp[sp_smask].mean(axis=0)
-        sp_fc = sp_tumor_mean / (sp_stromal_mean + 1e-6)
+        sp_log2fc = compute_log2fc(sp_tumor_mean, sp_stromal_mean)
 
         raw_tumor_mean = sc_expr_raw[raw_tmask].mean(axis=0)
         raw_stromal_mean = sc_expr_raw[raw_smask].mean(axis=0)
-        raw_fc_all = raw_tumor_mean / (raw_stromal_mean + 1e-6)
+        raw_log2fc_all = compute_log2fc(raw_tumor_mean, raw_stromal_mean)
 
         # Top 40 tumor markers: highest RAW tumor expression
         tumor_rank = np.argsort(raw_tumor_mean)[::-1]  # descending
@@ -375,13 +525,14 @@ def main():
             "gene": top40_tumor_genes,
             "raw_tumor_mean": raw_tumor_mean[top40_tumor_idx],
             "raw_stromal_mean": raw_stromal_mean[top40_tumor_idx],
-            "raw_fc": raw_fc_all[top40_tumor_idx],
+            "raw_log2fc": raw_log2fc_all[top40_tumor_idx],
             "sparkle_tumor_mean": sp_tumor_mean[top40_tumor_idx],
             "sparkle_stromal_mean": sp_stromal_mean[top40_tumor_idx],
-            "sparkle_fc": sp_fc[top40_tumor_idx],
+            "sparkle_log2fc": sp_log2fc[top40_tumor_idx],
         })
-        tumor_specificity["fc_delta"] = (
-            tumor_specificity["sparkle_fc"] - tumor_specificity["raw_fc"]
+        tumor_specificity["log2fc_delta"] = (
+            tumor_specificity["sparkle_log2fc"]
+            - tumor_specificity["raw_log2fc"]
         )
         tumor_path = OUTPUT_DIR / "sparkle_top40_tumor_specificity.csv"
         tumor_specificity.to_csv(tumor_path, index=False)
@@ -396,23 +547,36 @@ def main():
             "gene": bottom40_stromal_genes,
             "raw_tumor_mean": raw_tumor_mean[bottom40_stromal_idx],
             "raw_stromal_mean": raw_stromal_mean[bottom40_stromal_idx],
-            "raw_fc": raw_fc_all[bottom40_stromal_idx],
+            "raw_log2fc": raw_log2fc_all[bottom40_stromal_idx],
             "sparkle_tumor_mean": sp_tumor_mean[bottom40_stromal_idx],
             "sparkle_stromal_mean": sp_stromal_mean[bottom40_stromal_idx],
-            "sparkle_fc": sp_fc[bottom40_stromal_idx],
+            "sparkle_log2fc": sp_log2fc[bottom40_stromal_idx],
         })
-        stromal_specificity["fc_delta"] = (
-            stromal_specificity["sparkle_fc"] - stromal_specificity["raw_fc"]
+        stromal_specificity["log2fc_delta"] = (
+            stromal_specificity["sparkle_log2fc"]
+            - stromal_specificity["raw_log2fc"]
         )
         stromal_path = OUTPUT_DIR / "sparkle_top40_stromal_specificity.csv"
         stromal_specificity.to_csv(stromal_path, index=False)
         print(f"  Saved top-40 stromal-specific SPARKLE genes → {stromal_path}")
 
     # ── 5. Save outputs ──────────────────────────────────────────────────────
-    fc_df = pd.DataFrame(fc_rows)
+    log2fc_df = pd.DataFrame(log2fc_rows)
     fc_path = OUTPUT_DIR / "marker_foldchanges.csv"
-    fc_df.to_csv(fc_path, index=False)
+    log2fc_df.to_csv(fc_path, index=False)
     print(f"\nSaved → {fc_path}")
+    final_core = log2fc_df[log2fc_df["panel"].isin([
+        "epithelial_tumor", "stromal_fibroblast"
+    ])].copy()
+    final_core_path = OUTPUT_DIR / "marker_log2fc_final_core.csv"
+    final_core.to_csv(final_core_path, index=False)
+    print(f"Saved → {final_core_path}")
+    plot_marker_log2fc(log2fc_df, OUTPUT_DIR)
+    print(
+        "Saved → "
+        f"{OUTPUT_DIR / 'marker_log2fc_mean_sem_bar.png'} and "
+        f"{OUTPUT_DIR / 'marker_log2fc_boxplot.png'}"
+    )
 
     summary_df = pd.DataFrame(summary_rows)
     summary_path = OUTPUT_DIR / "marker_summary.csv"
@@ -426,13 +590,12 @@ def main():
 
     # ── 6. Print formatted summary table ─────────────────────────────────────
     print(f"\n{'='*70}")
-    print("SUMMARY: Marker Fold-Change Comparison")
+    print("SUMMARY: Marker log2FC Comparison")
     print(f"{'='*70}")
     header = (
         f"{'Method':<16s}"
-        f"{'Tumor FC':>10s}"
-        f"{'Stromal FC':>11s}"
-        f"{'Immune FC':>10s}"
+        f"{'Tumor log2FC':>15s}"
+        f"{'Stromal log2FC':>17s}"
         f"{'Contrast':>10s}"
     )
     print(header)
@@ -446,16 +609,15 @@ def main():
         marker = " ← RAW" if method == "RAW" else ""
         print(
             f"{method:<16s}"
-            f"{row['tumor_marker_mean_fc']:>10.3f}"
-            f"{row['stromal_marker_mean_fc']:>11.3f}"
-            f"{row['immune_marker_mean_fc']:>10.3f}"
+            f"{row['tumor_marker_mean_log2fc']:>15.3f}"
+            f"{row['stromal_marker_mean_log2fc']:>17.3f}"
             f"{row['tumor_stromal_contrast']:>10.3f}"
             f"{marker}"
         )
 
     # ── 7. Highlight top improvers and worseners ─────────────────────────────
     print(f"\n{'='*70}")
-    print("FC IMPROVEMENT ANALYSIS (>20% change vs RAW)")
+    print("log2FC IMPROVEMENT ANALYSIS (|delta| > 0.1 vs RAW)")
     print(f"{'='*70}")
 
     for method in METHODS:
@@ -466,39 +628,39 @@ def main():
         # Improved genes
         improved = m_delta[
             (m_delta["improved"]) &
-            (m_delta["fc_pct_delta"].abs() > 20)
-        ].sort_values("fc_pct_delta", ascending=False, key=abs)
+            (m_delta["log2fc_delta"].abs() > 0.1)
+        ].sort_values("log2fc_delta", ascending=False, key=abs)
 
         # Worsened genes
         worsened = m_delta[
             (~m_delta["improved"]) &
-            (m_delta["fc_pct_delta"].abs() > 20)
-        ].sort_values("fc_pct_delta", ascending=True, key=abs)
+            (m_delta["log2fc_delta"].abs() > 0.1)
+        ].sort_values("log2fc_delta", ascending=True, key=abs)
 
         print(f"\n--- {method} ---")
         if len(improved) > 0:
-            print(f"  Improved ({len(improved)} genes with >20% |Δ|):")
+            print(f"  Improved ({len(improved)} genes with |delta| > 0.1):")
             for _, r in improved.iterrows():
                 direction = "↑" if r["direction"] == "up" else "↓"
                 print(
                     f"    {r['gene']:<20s} {direction}  "
-                    f"RAW={r['fc_raw']:.3f} → {method}={r['fc_method']:.3f}  "
-                    f"Δ={r['fc_pct_delta']:+.1f}%"
+                    f"RAW={r['log2fc_raw']:.3f} → {method}={r['log2fc_method']:.3f}  "
+                    f"delta={r['log2fc_delta']:+.3f}"
                 )
         else:
-            print("  No genes improved >20%.")
+            print("  No genes improved with |delta| > 0.1.")
 
         if len(worsened) > 0:
-            print(f"  Worsened ({len(worsened)} genes with >20% |Δ|):")
+            print(f"  Worsened ({len(worsened)} genes with |delta| > 0.1):")
             for _, r in worsened.iterrows():
                 direction = "↑" if r["direction"] == "up" else "↓"
                 print(
                     f"    {r['gene']:<20s} {direction}  "
-                    f"RAW={r['fc_raw']:.3f} → {method}={r['fc_method']:.3f}  "
-                    f"Δ={r['fc_pct_delta']:+.1f}%"
+                    f"RAW={r['log2fc_raw']:.3f} → {method}={r['log2fc_method']:.3f}  "
+                    f"delta={r['log2fc_delta']:+.3f}"
                 )
         else:
-            print("  No genes worsened >20%.")
+            print("  No genes worsened with |delta| > 0.1.")
 
     print(f"\n{'='*70}")
     print("DONE. All outputs in:", OUTPUT_DIR.resolve())

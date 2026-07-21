@@ -5,8 +5,8 @@ Chart contract
 --------------
 Question: how do aggregate and interaction-level communication probabilities
 change after ambient-RNA correction?
-Takeaway: SPARKLE lowers aggregate strength while retaining most interactions;
-the repaired DecontX analysis is reduced but non-zero.
+Takeaway: ambient-RNA correction changes aggregate and interaction-level
+communication strength, with all evaluated methods shown on matched cells.
 Surface: standalone Matplotlib PNG/PDF/SVG exports.
 Grain: one aggregate estimate per method/metric in Figure 05, and the shared
 union of source-target-ligand-receptor keys in Figure 05b.
@@ -30,12 +30,16 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_INPUT = PROJECT_ROOT / "evaluation" / "reports" / "ovarian_eval" / "cellchat_spatial"
 DEFAULT_OUTPUT = PROJECT_ROOT / "evaluation" / "reports" / "ovarian_eval" / "figures"
-METHOD_ORDER = ("RAW", "SoupX", "DecontX", "SPARKLE")
+METHOD_ORDER = (
+    "RAW", "SpatialSoupX", "SoupX", "DecontX", "SPARKLE", "SpotClean"
+)
 METHOD_COLORS = {
     "RAW": "#80858c",
+    "SpatialSoupX": "#8f6aa8",
     "SoupX": "#bc8e36",
     "DecontX": "#457f78",
     "SPARKLE": "#1c456e",
+    "SpotClean": "#b64d57",
 }
 INTERACTION_KEYS = ["source", "target", "ligand", "receptor"]
 
@@ -58,7 +62,7 @@ def prepare_spatial_cellchat_data(input_dir: Path) -> dict[str, pd.DataFrame]:
     ).rename(columns={"Method": "method"})
     summary = summary.loc[summary["method"].isin(METHOD_ORDER)].copy()
     if set(summary["method"]) != set(METHOD_ORDER):
-        raise ValueError("Spatial summary does not contain all four plotting methods")
+        raise ValueError("Spatial summary does not contain all plotting methods")
 
     indexed = summary.set_index("method")
     raw = indexed.loc["RAW"]
@@ -137,7 +141,7 @@ def _clean_axis(ax: plt.Axes) -> None:
 
 def figure_05(data: dict[str, pd.DataFrame]) -> plt.Figure:
     """Aggregate RAW-to-SPARKLE effects with all-method context."""
-    fig = plt.figure(figsize=(7.2, 3.15))
+    fig = plt.figure(figsize=(8.6, 3.35))
     grid = fig.add_gridspec(1, 2, width_ratios=[1.1, 1.65])
     left = fig.add_subplot(grid[0, 0])
     right_grid = grid[0, 1].subgridspec(1, 3, wspace=0.42)
@@ -176,8 +180,8 @@ def figure_05(data: dict[str, pd.DataFrame]) -> plt.Figure:
         x = np.arange(len(METHOD_ORDER))
         axis.bar(x, values, color=[METHOD_COLORS[m] for m in METHOD_ORDER],
                  width=0.72, edgecolor="none")
-        axis.set_xticks(x, METHOD_ORDER, rotation=55, ha="right")
-        axis.tick_params(axis="x", labelsize=4.7, pad=1)
+        axis.set_xticks(x, METHOD_ORDER, rotation=58, ha="right")
+        axis.tick_params(axis="x", labelsize=4.4, pad=1)
         axis.set_title(title, fontsize=6.3, pad=4)
         axis.set_ylim(0, float(values.max()) * 1.10)
         if idx == 0:
@@ -188,7 +192,7 @@ def figure_05(data: dict[str, pd.DataFrame]) -> plt.Figure:
              ha="center", fontsize=6.4, color="#4D5257")
     fig.suptitle("Spatial CellChat v2 communication probability", x=0.06,
                  ha="left", fontsize=8.4, fontweight="bold")
-    fig.subplots_adjust(left=0.13, right=0.99, bottom=0.30, top=0.74, wspace=0.50)
+    fig.subplots_adjust(left=0.11, right=0.99, bottom=0.34, top=0.74, wspace=0.50)
     return fig
 
 
@@ -205,7 +209,7 @@ def figure_05b(data: dict[str, pd.DataFrame]) -> plt.Figure:
         raise ValueError("Methods do not have the same matched interaction count")
 
     positions = np.arange(len(METHOD_ORDER), dtype=float) * 0.62
-    fig, axis = plt.subplots(figsize=(3.85, 3.10))
+    fig, axis = plt.subplots(figsize=(5.15, 3.20))
     boxes = axis.boxplot(
         values, positions=positions, widths=0.34, patch_artist=True,
         showfliers=False,

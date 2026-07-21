@@ -112,6 +112,7 @@ def main():
         "spatial_soupx": "SpatialSoupX",
         "soupx": "SoupX",
         "decontx": "DecontX",
+        "spotcleanofficial": "SpotClean",
     }
 
     # ------------------------------------------------------------------

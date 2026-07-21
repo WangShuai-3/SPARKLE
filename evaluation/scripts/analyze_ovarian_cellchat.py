@@ -41,6 +41,7 @@ METHODS = {
     "SpatialSoupX": "SpatialSoupX",
     "SoupX": "SoupX",
     "DecontX": "DecontX",
+    "SpotClean": "SpotCleanOfficial",
 }
 
 TUMOR_TYPES = {
@@ -213,10 +214,21 @@ def summarise(method, adata, df):
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
 
+    requested = [
+        value.strip() for value in os.environ.get("LIANA_METHODS", "").split(",")
+        if value.strip()
+    ]
+    missing = sorted(set(requested) - set(METHODS))
+    if missing:
+        raise ValueError(f"Unknown LIANA methods: {missing}")
+    selected_methods = requested or list(METHODS)
+    partial_run = bool(requested)
+
     summary_rows = []
     directional_rows = []
 
-    for method, suffix in METHODS.items():
+    for method in selected_methods:
+        suffix = METHODS[method]
         adata, df = run_method(method, suffix)
         row, directional = summarise(method, adata, df)
         summary_rows.append(row)
@@ -231,10 +243,23 @@ def main():
     summary = pd.DataFrame(summary_rows).set_index("method")
     directional_df = pd.DataFrame(directional_rows)
 
-    summary.to_csv(os.path.join(OUT_DIR, "cellchat_summary.csv"))
-    directional_df.to_csv(
-        os.path.join(OUT_DIR, "cellchat_tumor_directional.csv"), index=False
-    )
+    summary_path = os.path.join(OUT_DIR, "cellchat_summary.csv")
+    directional_path = os.path.join(OUT_DIR, "cellchat_tumor_directional.csv")
+    if partial_run and os.path.isfile(summary_path):
+        previous = pd.read_csv(summary_path, index_col="method")
+        previous = previous.loc[~previous.index.isin(selected_methods)]
+        summary = pd.concat([previous, summary], axis=0)
+    if partial_run and os.path.isfile(directional_path):
+        previous_directional = pd.read_csv(directional_path)
+        previous_directional = previous_directional.loc[
+            ~previous_directional["method"].isin(selected_methods)
+        ]
+        directional_df = pd.concat(
+            [previous_directional, directional_df], ignore_index=True
+        )
+
+    summary.to_csv(summary_path)
+    directional_df.to_csv(directional_path, index=False)
 
     # ------------------------------------------------------------------
     # Comparison table (RAW baseline, % change)

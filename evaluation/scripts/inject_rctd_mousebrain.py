@@ -16,6 +16,8 @@ METH_MAP = {
     "raw": "RAW", "sparkle": "SPARKLE", 
     "soupx": "SOUPX", "SoupX": "SOUPX",
     "decontx": "DECONTX", "DecontX": "DECONTX",
+    "spotcleanofficial": "SpotClean",
+    "spatialsoupx": "SPATIALSOUPX",
 }
 
 prefix = f"{TAG}_"

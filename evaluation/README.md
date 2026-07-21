@@ -71,6 +71,13 @@ Bioconductor 包的 `SpotClean::createSlide()` 和 `SpotClean::spotclean()` 完�
 的稠密距离/核矩阵；驱动脚本会记录内存估计，
 并默认跳过明显不安全的窗口（仅可通过 `--force-memory` 强制执行）。
 
+MouseBrain 保持与 Axolotl 相同的 `empty_bin_size=50`，不抽样 background。
+由于完整窗口的 50,168 spots 超过官方 `as.matrix(dist(.))` 的整数维度上限，
+驱动脚本在完成全窗口细胞/empty-bin 聚合后，按质心划分 3×3 core。每块加入
+300 μm halo（最大候选半径）作为上下文，九块顺序运行官方包，最后只保留各块
+core 细胞并按 RAW h5ad 顺序拼接。`--prepare-only` 可先生成并审核九块输入；
+正式运行时使用 `--reuse-prepared-input`，失败后用相同命令可复用已经完成的块。
+
 ```bash
 python evaluation/scripts/run_spotclean_official.py --overwrite
 ```
@@ -233,14 +240,24 @@ python evaluation/scripts/evaluate_mousebrain_h5ad.py \
     --output-dir evaluation/reports/ovarian_eval \
     --methods RAW,SPARKLE,SpatialSoupX,SoupX,DecontX
 
-# 5.（可选）参考 marker 定位准确率（RAW vs SPARKLE）
+# 5. 最终癌症 marker 主分析：17 tumor + 9 stromal，逐细胞 log1p-CP10K 后展示 log2FC
+python evaluation/scripts/analyze_ovarian_cancer_markers.py
+python evaluation/scripts/analyze_ovarian_marker_specificity_detailed.py
+python evaluation/scripts/analyze_ovarian_markers_vs_scrna.py
+#   -> ovarian_eval/marker_analysis/{marker_summary.csv,marker_log2fc_final_core.csv,marker_log2fc_mean_sem_bar.png,marker_log2fc_boxplot.png}
+
+# 6.（敏感性）用 scRNA 独立发现 tumor/stroma DE genes，再评价六方法的空间对比度变化
+python evaluation/scripts/analyze_ovarian_scrna_de_contrast.py
+#   -> ovarian_eval/marker_analysis/scrna_de_contrast/
+
+# 7.（可选）参考 marker 定位准确率（RAW vs SPARKLE）
 python evaluation/scripts/reference_marker_localization.py \
     --tag ovarian_x1000-1800_y300-1100 \
     --input-dir evaluation/reports/h5ad_ovarian_annotated \
     --output-dir evaluation/reports/ovarian_eval \
     --snrna-ref evaluation/data/ovarian/scrna_celltype_pseudobulk.csv
 
-# 6. Spatial CellChat v2；先做跨方法零文库/有限值预检，再完整重算
+# 8. Spatial CellChat v2；先做跨方法零文库/有限值预检，再完整重算
 /home/shuaiwang/miniconda3/envs/r-env/bin/Rscript \
     evaluation/scripts/run_cellchat_spatial_ovarian.R --preflight-only
 /home/shuaiwang/miniconda3/envs/r-env/bin/Rscript \
@@ -249,7 +266,7 @@ python evaluation/scripts/reference_marker_localization.py \
 #   -> ovarian_eval/cellchat_spatial/{Method}_cellchat_spatial.csv
 #   -> ovarian_eval/cellchat_spatial/cellchat_spatial_summary.csv
 
-# 7. 从已验证的四方法结果重绘 Figure 05/05b（interaction n 动态计算）
+# 9. 从已验证的四方法结果重绘 Figure 05/05b（interaction n 动态计算）
 python evaluation/scripts/plot_ovarian_spatial_cellchat.py
 #   -> ovarian_eval/figures/fig05_spatial_cellchat_v2.{png,pdf,svg}
 #   -> ovarian_eval/figures/fig05b_cellchatv2_average_strength.{png,pdf,svg}

@@ -73,7 +73,8 @@ method_name_map <- list(
   soupx = "SoupX",
   SoupX = "SoupX",
   decontx = "DecontX",
-  DecontX = "DecontX"
+  DecontX = "DecontX",
+  SpotCleanOfficial = "SpotClean"
 )
 
 method_name_from_stem <- function(stem) {
@@ -96,6 +97,24 @@ method_stems <- ifelse(startsWith(method_stems, prefix),
                        method_stems)
 MTX_PREFIXES <- tools::file_path_sans_ext(h5ad_files)
 METHOD_NAMES <- sapply(method_stems, method_name_from_stem)
+
+# Optionally run only selected methods while preserving previously computed
+# aggregate CSV rows. This is useful when a new baseline is added later.
+requested_methods <- trimws(strsplit(Sys.getenv("RCTD_METHODS", ""), ",")[[1]])
+requested_methods <- requested_methods[nzchar(requested_methods)]
+partial_run <- length(requested_methods) > 0
+if (partial_run) {
+  keep <- METHOD_NAMES %in% requested_methods
+  missing_requested <- setdiff(requested_methods, METHOD_NAMES)
+  if (length(missing_requested) > 0) {
+    stop(sprintf("Requested RCTD methods not found: %s",
+                 paste(missing_requested, collapse = ", ")))
+  }
+  h5ad_files <- h5ad_files[keep]
+  method_stems <- method_stems[keep]
+  MTX_PREFIXES <- MTX_PREFIXES[keep]
+  METHOD_NAMES <- METHOD_NAMES[keep]
+}
 
 message(sprintf("Using dataset tag '%s'. Discovered %d methods: %s",
                 DATASET_TAG, length(METHOD_NAMES),
@@ -373,29 +392,32 @@ for (i in seq_along(h5ad_files)) {
 # 4. Shared-cell metrics
 # -----------------------------------------------------------------------------
 message("[4/5] Computing shared-cell metrics against RAW ...")
-raw_barcodes <- results_list[["RAW"]]$cell_barcode
 shared_metrics_list <- list()
+if ("RAW" %in% names(results_list)) {
+  raw_barcodes <- results_list[["RAW"]]$cell_barcode
+  for (method in METHOD_NAMES) {
+    method_barcodes <- results_list[[method]]$cell_barcode
+    shared_barcodes <- intersect(raw_barcodes, method_barcodes)
 
-for (method in METHOD_NAMES) {
-  method_barcodes <- results_list[[method]]$cell_barcode
-  shared_barcodes <- intersect(raw_barcodes, method_barcodes)
+    raw_res <- results_list[["RAW"]][cell_barcode %in% shared_barcodes]
+    method_res <- results_list[[method]][cell_barcode %in% shared_barcodes]
+    rownames(raw_res) <- raw_res$cell_barcode
+    rownames(method_res) <- method_res$cell_barcode
 
-  raw_res <- results_list[["RAW"]][cell_barcode %in% shared_barcodes]
-  method_res <- results_list[[method]][cell_barcode %in% shared_barcodes]
-  rownames(raw_res) <- raw_res$cell_barcode
-  rownames(method_res) <- method_res$cell_barcode
+    raw_entropy <- compute_entropy_from_weights(weights_list[["RAW"]], raw_res$cell_barcode)
+    method_entropy <- compute_entropy_from_weights(weights_list[[method]], method_res$cell_barcode)
 
-  raw_entropy <- compute_entropy_from_weights(weights_list[["RAW"]], raw_res$cell_barcode)
-  method_entropy <- compute_entropy_from_weights(weights_list[[method]], method_res$cell_barcode)
-
-  shared_metrics_list[[paste0("RAW_vs_", method)]] <- rbind(
-    data.table(method = "RAW_shared", compared_to = method, n_cells = nrow(raw_res),
-               pct_doublet = mean(raw_res$spot_class != "singlet") * 100,
-               mean_entropy = raw_entropy),
-    data.table(method = method, compared_to = method, n_cells = nrow(method_res),
-               pct_doublet = mean(method_res$spot_class != "singlet") * 100,
-               mean_entropy = method_entropy)
-  )
+    shared_metrics_list[[paste0("RAW_vs_", method)]] <- rbind(
+      data.table(method = "RAW_shared", compared_to = method, n_cells = nrow(raw_res),
+                 pct_doublet = mean(raw_res$spot_class != "singlet") * 100,
+                 mean_entropy = raw_entropy),
+      data.table(method = method, compared_to = method, n_cells = nrow(method_res),
+                 pct_doublet = mean(method_res$spot_class != "singlet") * 100,
+                 mean_entropy = method_entropy)
+    )
+  }
+} else {
+  message("  RAW was not requested; preserving existing shared-cell metrics.")
 }
 
 # -----------------------------------------------------------------------------
@@ -403,17 +425,41 @@ for (method in METHOD_NAMES) {
 # -----------------------------------------------------------------------------
 message("[5/5] Saving results ...")
 
-all_results <- rbindlist(results_list, use.names = TRUE, fill = TRUE)
-fwrite(all_results, file.path(OUT_DIR, "rctd_doublet_results.csv"))
-message(sprintf("  Per-cell results: %s", file.path(OUT_DIR, "rctd_doublet_results.csv")))
+merge_incremental <- function(new_data, output_file) {
+  if (partial_run && file.exists(output_file)) {
+    old_data <- fread(output_file)
+    if ("method" %in% names(old_data)) {
+      old_data <- old_data[!method %in% METHOD_NAMES]
+    }
+    return(rbindlist(list(old_data, new_data), use.names = TRUE, fill = TRUE))
+  }
+  new_data
+}
 
-summary_metrics <- rbindlist(metrics_list, use.names = TRUE, fill = TRUE)
-fwrite(summary_metrics, file.path(OUT_DIR, "rctd_summary_metrics.csv"))
-message(sprintf("  Summary metrics: %s", file.path(OUT_DIR, "rctd_summary_metrics.csv")))
+results_path <- file.path(OUT_DIR, "rctd_doublet_results.csv")
+all_results <- merge_incremental(
+  rbindlist(results_list, use.names = TRUE, fill = TRUE), results_path
+)
+fwrite(all_results, results_path)
+message(sprintf("  Per-cell results: %s", results_path))
 
-shared_metrics <- rbindlist(shared_metrics_list, use.names = TRUE, fill = TRUE)
-fwrite(shared_metrics, file.path(OUT_DIR, "rctd_shared_metrics.csv"))
-message(sprintf("  Shared-cell metrics: %s", file.path(OUT_DIR, "rctd_shared_metrics.csv")))
+summary_path <- file.path(OUT_DIR, "rctd_summary_metrics.csv")
+summary_metrics <- merge_incremental(
+  rbindlist(metrics_list, use.names = TRUE, fill = TRUE), summary_path
+)
+fwrite(summary_metrics, summary_path)
+message(sprintf("  Summary metrics: %s", summary_path))
+
+shared_path <- file.path(OUT_DIR, "rctd_shared_metrics.csv")
+if (length(shared_metrics_list) > 0) {
+  shared_metrics <- rbindlist(shared_metrics_list, use.names = TRUE, fill = TRUE)
+  fwrite(shared_metrics, shared_path)
+} else if (file.exists(shared_path)) {
+  shared_metrics <- fread(shared_path)
+} else {
+  shared_metrics <- data.table()
+}
+message(sprintf("  Shared-cell metrics: %s", shared_path))
 
 message("\nRCTD doublet-mode comparison (all retained cells):")
 print(summary_metrics)

@@ -8,6 +8,7 @@ from evaluation.baselines.spotclean_official import (
     prepare_spotclean_spots,
     write_official_input,
 )
+from evaluation.scripts.run_spotclean_official import _make_spatial_tile_specs
 
 
 def test_official_adapter_uses_cell_and_empty_bin_centroids_without_scaling(tmp_path):
@@ -65,3 +66,32 @@ def test_official_adapter_writes_csc_and_unit_slope_slide_metadata(tmp_path):
         "imagerow": "1.5",
         "imagecol": "0.5",
     }
+
+
+def test_spatial_tiles_assign_each_tissue_core_once_and_keep_background_context():
+    coordinates = np.array(
+        [
+            [0.5, 0.5], [1.5, 0.5], [0.5, 1.5], [1.5, 1.5],
+            [0.6, 0.6], [1.6, 0.6], [0.6, 1.6], [1.6, 1.6],
+        ],
+        dtype=np.float64,
+    )
+    tissue = np.array([1, 1, 1, 1, 0, 0, 0, 0], dtype=np.int8)
+    config = {
+        "tile_grid": (2, 2),
+        "tile_halo": 0.0,
+        "coordinate_scale": 1.0,
+        "x_range": (0, 2),
+        "y_range": (0, 2),
+    }
+
+    specs = _make_spatial_tile_specs(coordinates, tissue, config)
+
+    assert [spec["tile_id"] for spec in specs] == ["r0c0", "r0c1", "r1c0", "r1c1"]
+    np.testing.assert_array_equal(
+        np.concatenate([spec["core_tissue_indices"] for spec in specs]),
+        [0, 1, 2, 3],
+    )
+    for spec in specs:
+        assert np.sum(tissue[spec["context_indices"]] == 1) == 1
+        assert np.sum(tissue[spec["context_indices"]] == 0) == 1

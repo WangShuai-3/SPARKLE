@@ -29,7 +29,9 @@ TUMOR_TYPES = {
     "Malignant Cells Lining Cyst",
 }
 
-SPATIAL_METHODS = ["RAW", "SPARKLE", "SpatialSoupX", "SoupX", "DecontX"]
+SPATIAL_METHODS = [
+    "RAW", "SPARKLE", "SpatialSoupX", "SoupX", "DecontX", "SpotClean"
+]
 
 
 # --------------------------------------------------------------------------

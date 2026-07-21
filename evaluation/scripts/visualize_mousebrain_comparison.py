@@ -37,7 +37,7 @@ SCENARIOS = {
     },
 }
 
-METHODS = ["raw", "SPARKLE", "SoupX", "DecontX"]  # exclude SpatialSoupX
+METHODS = ["raw", "SPARKLE", "SoupX", "DecontX", "SpotClean"]  # exclude SpatialSoupX
 
 
 def normalize_adata(adata):
@@ -77,7 +77,8 @@ def get_hvg_gene_set(raw_path, n_hvgs):
 
 
 def load_method_corr(tag, h5ad_dir, method, hvg_genes=None):
-    suffix = "raw" if method.lower() == "raw" else method
+    suffix_map = {"raw": "raw", "SpotClean": "SpotCleanOfficial"}
+    suffix = suffix_map.get(method, method)
     path = Path(h5ad_dir) / f"{tag}_{suffix}.h5ad"
     adata = sc.read_h5ad(path)
     adata = normalize_adata(adata)
