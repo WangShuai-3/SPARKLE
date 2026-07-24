@@ -18,6 +18,7 @@ Run with the base python (anndata/scanpy not required):
     python evaluation/scripts/analyze_ovarian_cellchat_proof.py
 """
 
+import argparse
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -34,7 +35,7 @@ OUT = ROOT / "reports" / "ovarian_eval" / "cellchat_spatial"
 OUT.mkdir(parents=True, exist_ok=True)
 
 
-def norm_log1p_cpm(X):
+def norm_log1p_cp10k(X):
     if hasattr(X, "toarray"):
         X = X.toarray()
     X = np.maximum(np.asarray(X, dtype=np.float64), 0)
@@ -43,14 +44,52 @@ def norm_log1p_cpm(X):
     return np.log1p(X / t * 1e4)
 
 
+def write_cellchat_prob() -> pd.DataFrame:
+    """Save all-tested RAW/SPARKLE COLLAGEN tumor-to-tumor probabilities."""
+    rawnet = pd.read_csv(CC / "RAW_cellchat_spatial_all_tested.csv")
+    spnet = pd.read_csv(CC / "SPARKLE_cellchat_spatial_all_tested.csv")
+    key = ["source", "target", "ligand", "receptor"]
+    for df in (rawnet, spnet):
+        df["k"] = df[key].astype(str).agg("|".join, axis=1)
+    ex = rawnet[(rawnet["pathway_name"] == "COLLAGEN")
+                & (rawnet["source"].str.contains("Tumor"))
+                & (rawnet["target"].str.contains("Tumor"))].copy()
+    ex = ex.merge(
+        spnet[["k", "prob", "pval"]],
+        on="k",
+        how="left",
+        suffixes=("_RAW", "_SPARKLE"),
+        validate="one_to_one",
+    )
+    ex = ex[[
+        "source", "target", "ligand", "receptor",
+        "prob_RAW", "pval_RAW", "prob_SPARKLE", "pval_SPARKLE",
+    ]]
+    ex.to_csv(OUT / "proof_collagen_cellchat_prob.csv", index=False)
+    print("\n=== CellChat COLLAGEN tumor->tumor prob (RAW vs SPARKLE) ===")
+    print(ex.to_string(index=False))
+    return ex
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--network-only",
+        action="store_true",
+        help="Refresh only the lightweight all-tested CellChat probability table.",
+    )
+    args = parser.parse_args()
+    if args.network_only:
+        write_cellchat_prob()
+        return
+
     raw = ad.read_h5ad(H5AD / f"{TAG}_raw.h5ad")
     sp = ad.read_h5ad(H5AD / f"{TAG}_SPARKLE.h5ad")
     ref = pd.read_csv(ROOT / "data" / "ovarian" / "scrna_celltype_pseudobulk.csv", index_col=0)
 
     ann = raw.obs["annotation"].values
     genes = list(raw.var_names)
-    Xr, Xs = norm_log1p_cpm(raw.X), norm_log1p_cpm(sp.X)
+    Xr, Xs = norm_log1p_cp10k(raw.X), norm_log1p_cp10k(sp.X)
 
     def stat(X, ct, g):
         gi = genes.index(g)
@@ -80,21 +119,8 @@ def main():
     tab.to_csv(OUT / "proof_collagen_expression.csv", index=False)
     print(tab.to_string(index=False))
 
-    # CellChat probabilities for the specific removed interactions
-    rawnet = pd.read_csv(CC / "RAW_cellchat_spatial.csv")
-    spnet = pd.read_csv(CC / "SPARKLE_cellchat_spatial.csv")
-    key = ["source", "target", "ligand", "receptor"]
-    for df in (rawnet, spnet):
-        df["k"] = df[key].astype(str).agg("|".join, axis=1)
-    ex = rawnet[(rawnet["pathway_name"] == "COLLAGEN")
-                & (rawnet["source"].str.contains("Tumor"))
-                & (rawnet["target"].str.contains("Tumor"))].copy()
-    ex = ex.merge(spnet[["k", "prob"]], on="k", how="left", suffixes=("_RAW", "_SPARKLE"))
-    ex["prob_SPARKLE"] = ex["prob_SPARKLE"].fillna(0)
-    ex = ex[["source", "target", "ligand", "receptor", "prob_RAW", "prob_SPARKLE"]]
-    ex.to_csv(OUT / "proof_collagen_cellchat_prob.csv", index=False)
-    print("\n=== CellChat COLLAGEN tumor->tumor prob (RAW vs SPARKLE) ===")
-    print(ex.to_string(index=False))
+    # CellChat probabilities for the specific tested interactions.
+    write_cellchat_prob()
 
     # ---- Figure: COL1A2 expression truth vs RAW vs SPARKLE ----
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
@@ -112,7 +138,7 @@ def main():
         ax.bar(x + w, spv, w, label="SPARKLE", color="#1f77b4")
         ax.set_xticks(x)
         ax.set_xticklabels(short)
-        ax.set_ylabel("mean log1p-CPM")
+        ax.set_ylabel("mean log1p-CP10K")
         ax.set_title(f"{g}: collagen is a fibroblast gene\n(tumour signal in RAW = ambient)")
         ax.legend()
     fig.suptitle("Why SPARKLE's COLLAGEN->SDC4 tumour communication drop is justified", fontweight="bold")

@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 ###############################################################################
 # run_cellchat_spatial_ovarian.R
-# Spatial CellChat v2 analysis on ovarian Visium HD data (RAW + 4 correction
+# Spatial CellChat v2 analysis on ovarian Visium HD data (RAW + 5 correction
 # methods), comparing whether cancer cell communication changes after ambient
 # RNA correction. Key difference from prior non-spatial liana run:
 #   computeCommunProb(distance.use=TRUE) — only spatially proximal cell types
@@ -368,9 +368,21 @@ run_cellchat_spatial <- function(method_name, counts, cells, types, coords, out_
   cat(sprintf("  [%s] filterCommunication …\n", method_name))
   cellchat <- filterCommunication(cellchat, min.cells = 10)
 
-  # Extract significant LR pairs
+  # Export every tested LR edge before applying the significance cutoff.  This
+  # preserves the probability of non-significant interactions instead of
+  # forcing downstream analyses to encode an absent row as numerical zero.
+  cat(sprintf("  [%s] exporting all tested interactions …\n", method_name))
+  df_all_tested <- subsetCommunication(cellchat, thresh = 1.01)
+  write.csv(
+    df_all_tested,
+    file.path(out_dir, sprintf("%s_cellchat_spatial_all_tested.csv", method_name)),
+    row.names = FALSE
+  )
+
+  # Extract significant LR pairs using CellChat's default strict p < 0.05
+  # cutoff.  With nboot=20, p-values are multiples of 0.05.
   cat(sprintf("  [%s] subsetCommunication …\n", method_name))
-  df_net <- subsetCommunication(cellchat)
+  df_net <- df_all_tested[df_all_tested$pval < 0.05, , drop = FALSE]
   cat(sprintf("  [%s] significant LR interactions: %d\n", method_name, nrow(df_net)))
 
   # Save

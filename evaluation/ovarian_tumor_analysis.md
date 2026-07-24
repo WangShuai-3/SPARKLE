@@ -314,13 +314,23 @@ marker 的主要来源，16 类型保留完整生物学覆盖但噪声较大，1
 
 | 互作方向 | 来源真实性 | RAW prob | SPARKLE prob | 处理 |
 |---------|-----------|:--:|:--:|------|
-| VEGFA+肿瘤 → VEGFA+肿瘤 | 假（ambient 自分泌）| 0.00376 | **0.000** | **完全清除** |
+| VEGFA+肿瘤 → VEGFA+肿瘤 | 假（ambient 自分泌）| 0.00376 | **0.000361（p=1.0，NS）** | **概率下降 90.4%，不再显著** |
 | 成纤维TAF → VEGFA+肿瘤 | 真（胶原确来自成纤维）| 0.00234 | 0.00117 | 保留（仅减半）|
 
-SPARKLE **精确清除肿瘤自分泌的 ambient 假信号（→0），却保留成纤维→肿瘤的真实旁分泌信号**。
-这证明第 6 节 −56% 的通讯概率下降主要来自去除 ambient 伪迹，而非破坏真实生物学。
+SPARKLE 将肿瘤自分泌的 ambient 假信号概率降低 90.4%，使其不再达到 CellChat 显著阈值；同时保留
+成纤维→肿瘤的真实旁分泌信号。全测试结果还显示，SpotClean 对该单条自分泌边的概率降低 36.2%
+（0.00240，p=1.0，NS），SoupX 仅降低 4.1%，DecontX 降低 44.2%。汇总全部肿瘤亚型的同型自分泌边后，
+SPARKLE、SpotClean、SoupX、DecontX 分别保留 RAW 的 13.8%、63.0%、97.6% 和 44.5%；对应的
+TAF→肿瘤旁分泌分别保留 50.6%、97.6%、99.1% 和 52.7%。因此 SPARKLE 的去除范围最广，SpotClean
+对原始单边的选择性更好，而 DecontX 同时压低真假信号。
+
+最终比较图的 B 图直接展示两条空间 CellChat v2 路径的估计概率，不再用透明度、斜线或 NS 标签强调
+显著性。C 图同样不按 p 值筛选、不标记 NS，使用相同路径结构展示单细胞参考：VEGFA+ 肿瘤自分泌 `lr_probs=0`，TAF→VEGFA+
+肿瘤旁分泌 `lr_probs=0.119656`。空间 probability 与单细胞 LIANA CellChat `lr_probs` 分面展示，
+不直接比较绝对数值大小。
 
 配套图表：`evaluation/reports/ovarian_eval/cellchat_spatial/proof_collagen_expression.png`
+和 `evaluation/reports/ovarian_eval/cellchat_spatial/col1a2_sdc4_method_comparison/col1a2_sdc4_method_comparison.png`。
 
 ---
 
