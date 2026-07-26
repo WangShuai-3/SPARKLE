@@ -266,7 +266,17 @@ python evaluation/scripts/reference_marker_localization.py \
 #   -> ovarian_eval/cellchat_spatial/{Method}_cellchat_spatial.csv
 #   -> ovarian_eval/cellchat_spatial/cellchat_spatial_summary.csv
 
-# 9. 从已验证的四方法结果重绘 Figure 05/05b（interaction n 动态计算）
+# 9. 官方 R CellChat 单细胞参考；与空间分析使用相同 truncatedMean，
+#    但关闭 dissociated scRNA 不适用的距离/接触权重
+/home/shuaiwang/miniconda3/envs/r-env/bin/Rscript \
+    evaluation/scripts/run_cellchat_ovarian_scrna_reference.R
+#   -> ovarian_eval/cellchat/official_reference/
+
+# 10. 绘制 COL1A2-SDC4 跨方法/单细胞参考比较
+python evaluation/scripts/plot_ovarian_col1a2_sdc4_comparison.py
+#   -> ovarian_eval/cellchat_spatial/col1a2_sdc4_method_comparison/
+
+# 11. 从已验证的四方法结果重绘 Figure 05/05b（interaction n 动态计算）
 python evaluation/scripts/plot_ovarian_spatial_cellchat.py
 #   -> ovarian_eval/figures/fig05_spatial_cellchat_v2.{png,pdf,svg}
 #   -> ovarian_eval/figures/fig05b_cellchatv2_average_strength.{png,pdf,svg}

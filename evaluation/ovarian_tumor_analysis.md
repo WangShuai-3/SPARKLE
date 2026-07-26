@@ -314,20 +314,22 @@ marker 的主要来源，16 类型保留完整生物学覆盖但噪声较大，1
 
 | 互作方向 | 来源真实性 | RAW prob | SPARKLE prob | 处理 |
 |---------|-----------|:--:|:--:|------|
-| VEGFA+肿瘤 → VEGFA+肿瘤 | 假（ambient 自分泌）| 0.00376 | **0.000361（p=1.0，NS）** | **概率下降 90.4%，不再显著** |
+| VEGFA+肿瘤 → VEGFA+肿瘤 | 单细胞中较弱，RAW 疑似 ambient 放大 | 0.00376 | **0.000361（p=1.0，NS）** | **概率下降 90.4%，不再显著** |
 | 成纤维TAF → VEGFA+肿瘤 | 真（胶原确来自成纤维）| 0.00234 | 0.00117 | 保留（仅减半）|
 
-SPARKLE 将肿瘤自分泌的 ambient 假信号概率降低 90.4%，使其不再达到 CellChat 显著阈值；同时保留
+SPARKLE 将 RAW 中相对旁分泌被过度放大的肿瘤自分泌成分降低 90.4%，使其不再达到 CellChat 显著阈值；同时保留
 成纤维→肿瘤的真实旁分泌信号。全测试结果还显示，SpotClean 对该单条自分泌边的概率降低 36.2%
 （0.00240，p=1.0，NS），SoupX 仅降低 4.1%，DecontX 降低 44.2%。汇总全部肿瘤亚型的同型自分泌边后，
 SPARKLE、SpotClean、SoupX、DecontX 分别保留 RAW 的 13.8%、63.0%、97.6% 和 44.5%；对应的
 TAF→肿瘤旁分泌分别保留 50.6%、97.6%、99.1% 和 52.7%。因此 SPARKLE 的去除范围最广，SpotClean
-对原始单边的选择性更好，而 DecontX 同时压低真假信号。
+对原始单边的选择性更好，而 DecontX 同时压低自分泌和旁分泌。
 
 最终比较图的 B 图直接展示两条空间 CellChat v2 路径的估计概率，不再用透明度、斜线或 NS 标签强调
-显著性。C 图同样不按 p 值筛选、不标记 NS，使用相同路径结构展示单细胞参考：VEGFA+ 肿瘤自分泌 `lr_probs=0`，TAF→VEGFA+
-肿瘤旁分泌 `lr_probs=0.119656`。空间 probability 与单细胞 LIANA CellChat `lr_probs` 分面展示，
-不直接比较绝对数值大小。
+显著性。C 图同样不按 p 值筛选、不标记 NS，并以官方 R CellChat v2 单细胞模式重新计算参考：
+VEGFA+ 肿瘤自分泌 probability=0.005432，TAF→VEGFA+ 肿瘤旁分泌 probability=0.116996，
+即单细胞中旁分泌约为自分泌的 21.5 倍。该结果不支持“肿瘤自分泌绝对为零”，但支持 RAW 将弱自分泌
+相对于强旁分泌过度放大的判断。单细胞参考与空间分析均使用 `truncatedMean, trim=0.1`；前者关闭空间
+距离/接触权重，因此两者分面展示，不直接比较绝对 probability 大小。
 
 配套图表：`evaluation/reports/ovarian_eval/cellchat_spatial/proof_collagen_expression.png`
 和 `evaluation/reports/ovarian_eval/cellchat_spatial/col1a2_sdc4_method_comparison/col1a2_sdc4_method_comparison.png`。
@@ -339,7 +341,7 @@ TAF→肿瘤旁分泌分别保留 50.6%、97.6%、99.1% 和 52.7%。因此 SPARK
 1. **细胞纯度**：RCTD singlet 比例 14.3%→27.5%（近翻倍）。
 2. **表达保真**：与单细胞参考的相关性最高（0.540），细胞类型可分性最好（组间相关 0.664）。
 3. **癌症 marker**：SPARKLE 提升部分关键 marker 的空间内部特异性，但其 scFFPE 支持率受低样本细胞类型影响较大（5/13 到 10/13）；SpotClean 在两个范围均较稳定（17/22、16/22）。SPARKLE 中 MUC16、COL1A2 得到支持，而 WFDC2 的二分特异性增益未恢复其完整细胞类型分布。
-4. **细胞通讯**：去除 ~23% 的（单细胞确认的）假阳性通讯并保留 ~82% 真阳性；空间 CellChat v2 中通讯概率降 55.9%、自分泌降 52.1%，且经 COLLAGEN 例子证明这些下降精确对应 ambient 伪迹。
+4. **细胞通讯**：去除 ~23% 的（单细胞确认的）假阳性通讯并保留 ~82% 真阳性；空间 CellChat v2 中通讯概率降 55.9%、自分泌降 52.1%。COL1A2–SDC4 例子进一步表明，SPARKLE 将 RAW 中自分泌相对旁分泌的异常优势向单细胞参考结构纠正，但不应解释为单细胞中该自分泌绝对不存在。
 5. **对照方法**：修复输入预处理后，DecontX 的空间通讯不再归零（总概率 −34.8%，显著互作 −20.8%）；其非空间分析仍显示较强真信号损失。SoupX 几乎无效；SpatialSoupX 病态膨胀、组间相关变差。
 
 > 数据说明：本窗口以肿瘤细胞为主（VEGFA+/MT-High 约占 89%），基质/免疫细胞相对少，旁分泌类别基于较少的基质细胞；相关分析结论以"减少虚假膨胀"而非"旁分泌绝对增强"来解读更稳妥。

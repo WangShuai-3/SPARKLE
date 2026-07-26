@@ -29,9 +29,13 @@ ROOT = Path(__file__).resolve().parents[2]
 TAG = "ovarian_x1000-1800_y300-1100"
 ANNOTATED_DIR = ROOT / "evaluation" / "reports" / "h5ad_ovarian_annotated"
 CELLCHAT_DIR = ROOT / "evaluation" / "reports" / "ovarian_eval" / "cellchat_spatial"
-SCRNA_CELLCHAT = (
+SCRNA_LIANA = (
     ROOT / "evaluation" / "reports" / "ovarian_eval" / "cellchat"
     / "scRNA_liana_cellchat.csv"
+)
+SCRNA_CELLCHAT_OFFICIAL = (
+    ROOT / "evaluation" / "reports" / "ovarian_eval" / "cellchat"
+    / "official_reference" / "scRNA_cellchat_official_all_tested.csv"
 )
 OUTPUT_DIR = CELLCHAT_DIR / "col1a2_sdc4_method_comparison"
 
@@ -63,8 +67,8 @@ TUMOR_TYPES = {
     "Malignant Cells Lining Cyst",
 }
 
-FALSE_COLOR = "#4C78A8"
-TRUE_COLOR = "#D39C2C"
+TUMOR_COLOR = "#4C78A8"
+TAF_COLOR = "#D39C2C"
 INK = "#252525"
 GRID = "#D9D9D9"
 
@@ -113,7 +117,7 @@ def load_expression_summary(qc: pd.DataFrame) -> pd.DataFrame:
     # The existing proof table contains the paired scFFPE reference means;
     # LIANA's ligand_props supplies the corresponding positive fraction.
     proof = pd.read_csv(CELLCHAT_DIR / "proof_collagen_expression.csv")
-    scrna_cellchat = pd.read_csv(SCRNA_CELLCHAT)
+    scrna_cellchat = pd.read_csv(SCRNA_LIANA)
     scrna_col1a2_props = (
         scrna_cellchat.loc[
             scrna_cellchat["ligand_complex"].eq("COL1A2"),
@@ -145,8 +149,8 @@ def load_cellchat_summary() -> tuple[pd.DataFrame, pd.DataFrame]:
     aggregate_rows: list[dict] = []
 
     route_definitions = [
-        (VEGFA_TUMOR, VEGFA_TUMOR, "VEGFA+ tumor self", "false autocrine"),
-        (TAF, VEGFA_TUMOR, "TAF to VEGFA+ tumor", "true paracrine"),
+        (VEGFA_TUMOR, VEGFA_TUMOR, "VEGFA+ tumor self", "tumor autocrine"),
+        (TAF, VEGFA_TUMOR, "TAF to VEGFA+ tumor", "fibroblast paracrine"),
     ]
 
     for method in METHODS:
@@ -187,27 +191,26 @@ def load_cellchat_summary() -> tuple[pd.DataFrame, pd.DataFrame]:
                 {
                     "method": method,
                     "aggregate_route": "Same-type tumor self",
-                    "route_class": "false autocrine",
+                    "route_class": "tumor autocrine",
                     "probability": float(same_type_self),
                     "score_scale": "spatial CellChat probability",
                 },
                 {
                     "method": method,
                     "aggregate_route": "TAF to all tumor types",
-                    "route_class": "true paracrine",
+                    "route_class": "fibroblast paracrine",
                     "probability": float(taf_to_tumor),
                     "score_scale": "spatial CellChat probability",
                 },
             ]
         )
 
-    # Append the non-spatial single-cell CellChat reference.  Its LIANA
-    # lr_probs are on a different absolute scale, so Panel C compares only the
-    # within-dataset autocrine/paracrine ratio, never raw score magnitudes.
-    scrna = pd.read_csv(SCRNA_CELLCHAT)
+    # Append the official non-spatial R CellChat reference. It uses the same
+    # truncated-mean estimator as the spatial analysis, with distance disabled.
+    scrna = pd.read_csv(SCRNA_CELLCHAT_OFFICIAL)
     scrna_lr = scrna.loc[
-        scrna["ligand_complex"].eq("COL1A2")
-        & scrna["receptor_complex"].eq("SDC4")
+        scrna["ligand"].eq("COL1A2")
+        & scrna["receptor"].eq("SDC4")
     ].copy()
     for source, target, route, route_class in route_definitions:
         selected = scrna_lr.loc[
@@ -220,12 +223,12 @@ def load_cellchat_summary() -> tuple[pd.DataFrame, pd.DataFrame]:
                 "target": target,
                 "route": route,
                 "route_class": route_class,
-                "probability": float(selected["lr_probs"].sum()),
+                "probability": float(selected["prob"].sum()),
                 "detected_significant": bool(
-                    len(selected) and selected["cellchat_pvals"].iloc[0] < 0.05
+                    len(selected) and selected["pval"].iloc[0] < 0.05
                 ),
                 "p_value": (
-                    float(selected["cellchat_pvals"].iloc[0])
+                    float(selected["pval"].iloc[0])
                     if len(selected)
                     else np.nan
                 ),
@@ -234,27 +237,27 @@ def load_cellchat_summary() -> tuple[pd.DataFrame, pd.DataFrame]:
     scrna_self = scrna_lr.loc[
         scrna_lr["source"].eq(scrna_lr["target"])
         & scrna_lr["source"].isin(TUMOR_TYPES),
-        "lr_probs",
+        "prob",
     ].sum()
     scrna_taf = scrna_lr.loc[
         scrna_lr["source"].eq(TAF) & scrna_lr["target"].isin(TUMOR_TYPES),
-        "lr_probs",
+        "prob",
     ].sum()
     aggregate_rows.extend(
         [
             {
                 "method": "scRNA reference",
                 "aggregate_route": "Same-type tumor self",
-                "route_class": "false autocrine",
+                "route_class": "tumor autocrine",
                 "probability": float(scrna_self),
-                "score_scale": "LIANA CellChat lr_probs",
+                "score_scale": "official non-spatial CellChat probability",
             },
             {
                 "method": "scRNA reference",
                 "aggregate_route": "TAF to all tumor types",
-                "route_class": "true paracrine",
+                "route_class": "fibroblast paracrine",
                 "probability": float(scrna_taf),
-                "score_scale": "LIANA CellChat lr_probs",
+                "score_scale": "official non-spatial CellChat probability",
             },
         ]
     )
@@ -279,7 +282,7 @@ def load_cellchat_summary() -> tuple[pd.DataFrame, pd.DataFrame]:
         )
         .assign(
             autocrine_paracrine_ratio=lambda frame: (
-                frame["false autocrine"] / frame["true paracrine"]
+                frame["tumor autocrine"] / frame["fibroblast paracrine"]
             )
         )["autocrine_paracrine_ratio"]
     )
@@ -326,7 +329,7 @@ def plot_figure(
         y_idx.ravel(),
         s=size_values,
         c=means,
-        cmap=sns.light_palette(FALSE_COLOR, as_cmap=True),
+        cmap=sns.light_palette(TUMOR_COLOR, as_cmap=True),
         vmin=0,
         vmax=max(5.2, float(np.nanmax(means))),
         edgecolor=INK,
@@ -386,8 +389,8 @@ def plot_figure(
     x = np.arange(len(METHODS))
     width = 0.36
     route_specs = [
-        ("VEGFA+ tumor self", "False: VEGFA+ tumor self", FALSE_COLOR, -width / 2),
-        ("TAF to VEGFA+ tumor", "True: TAF → VEGFA+ tumor", TRUE_COLOR, width / 2),
+        ("VEGFA+ tumor self", "VEGFA+ tumor self", TUMOR_COLOR, -width / 2),
+        ("TAF to VEGFA+ tumor", "TAF → VEGFA+ tumor", TAF_COLOR, width / 2),
     ]
     for route, label, color, offset in route_specs:
         selected = route_df.loc[route_df["route"].eq(route)].set_index("method").reindex(METHODS)
@@ -411,7 +414,7 @@ def plot_figure(
                 fontsize=9,
                 color=INK,
             )
-    ax_b.set_title("B  |  Original COL1A2–SDC4 routes", loc="left", weight="bold")
+    ax_b.set_title("B  |  Spatial COL1A2–SDC4 routes", loc="left", weight="bold")
     ax_b.set_ylabel("CellChat probability (×10⁻³)")
     ax_b.set_xlabel("")
     ax_b.set_xticks(x, METHODS, rotation=22, ha="right")
@@ -419,21 +422,21 @@ def plot_figure(
     ax_b.legend(frameon=False, fontsize=11, loc="upper right")
     ax_b.grid(axis="x", visible=False)
 
-    # Panel C: the same two routes in the scRNA reference, using all lr_probs
-    # without p-value filtering or significance styling. It mirrors Panel B,
-    # but keeps the LIANA CellChat score on its own axis because the absolute
-    # scale is not comparable with spatial CellChat v2 probabilities.
+    # Panel C: the same two routes in the official non-spatial R CellChat
+    # reference, using all probabilities without significance filtering or
+    # styling. It mirrors Panel B but keeps a separate axis because the spatial
+    # probabilities additionally include distance/contact weighting.
     scrna_routes = (
         route_df.loc[route_df["method"].eq("scRNA reference")]
         .set_index("route")
         .reindex([spec[0] for spec in route_specs])
     )
-    scrna_values = scrna_routes["probability"].to_numpy()
+    scrna_values = scrna_routes["probability"].to_numpy() * 1e3
     scrna_x = np.arange(len(route_specs))
     bars = ax_c.bar(
         scrna_x,
         scrna_values,
-        color=[FALSE_COLOR, TRUE_COLOR],
+        color=[TUMOR_COLOR, TAF_COLOR],
         edgecolor=INK,
         linewidth=0.8,
         width=0.62,
@@ -442,23 +445,23 @@ def plot_figure(
         ax_c.text(
             bar.get_x() + bar.get_width() / 2,
             value + max(scrna_values.max() * 0.035, 0.002),
-            f"{value:.3f}",
+            f"{value:.2f}",
             va="bottom",
             ha="center",
             fontsize=11,
         )
     ax_c.set_title(
-        "C  |  scRNA reference COL1A2–SDC4 routes",
+        "C  |  Official scRNA CellChat reference",
         loc="left",
         weight="bold",
     )
-    ax_c.set_ylabel("LIANA CellChat lr_probs")
+    ax_c.set_ylabel("CellChat probability (×10⁻³)")
     ax_c.set_xlabel("")
     ax_c.set_xticks(
         scrna_x,
         ["VEGFA+ tumor\nself", "TAF → VEGFA+\ntumor"],
     )
-    ax_c.set_ylim(0, max(float(scrna_values.max()) * 1.22, 0.14))
+    ax_c.set_ylim(0, max(float(scrna_values.max()) * 1.22, 1))
     ax_c.grid(axis="x", visible=False)
 
     fig.suptitle(
@@ -471,7 +474,7 @@ def plot_figure(
     fig.text(
         0.5,
         0.935,
-        "Same 16,198 spatial cells · shared RAW-RCTD annotations · CellChat range 250 µm · matched scRNA routes in C · SpatialSoupX excluded",
+        "Same 16,198 spatial cells · shared RAW-RCTD annotations · CellChat range 250 µm · 17,050-cell official scRNA reference in C · SpatialSoupX excluded",
         ha="center",
         fontsize=12,
         color="#555555",
@@ -479,9 +482,9 @@ def plot_figure(
     fig.text(
         0.07,
         0.035,
-        "B and C show all tested scores without significance filtering or styling. "
-        "B shows spatial CellChat v2 probabilities; C shows matching scRNA routes using LIANA CellChat lr_probs. "
-        "The separate axes reflect that spatial probabilities and scRNA scores are not directly comparable in magnitude.",
+        "B and C show all tested probabilities without significance filtering or styling. "
+        "Both use official R CellChat v2 with truncatedMean (trim=0.1); C disables spatial distance/contact weighting. "
+        "Separate axes are retained because spatial and dissociated-cell probabilities are not directly comparable in magnitude.",
         fontsize=10,
         color="#555555",
     )
