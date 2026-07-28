@@ -259,10 +259,10 @@ extracellular RNA biology.
 
 ## Evaluation
 
-The workflows used in the manuscript are documented in
-[`evaluation/README.md`](evaluation/README.md). That document describes the
-frozen datasets, methods and analysis stages without reproducing manuscript
-results.
+The workflows used in the manuscript are documented in the
+[evaluation guide](https://github.com/WangShuai-3/SPARKLE/blob/main/evaluation/README.md).
+That document describes the frozen datasets, methods and analysis stages
+without reproducing manuscript results.
 
 ## Citation
 
