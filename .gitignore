@@ -45,10 +45,10 @@ Thumbs.db
 
 # pytest cache
 .pytest_cache/
-evaluation/reports
 
 # Evaluation datasets (large raw data)
 evaluation/data/
+evaluation/reports
 
 # Log files
 evaluation/logs/
@@ -56,3 +56,7 @@ evaluation/logs/
 
 # Local virtualenvs
 .venv*/
+
+# agent
+.agents/
+.codex/
