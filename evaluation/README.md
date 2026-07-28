@@ -32,7 +32,6 @@ evaluation/
 │   └── scenarios.py                  # Definitions of S1–S10
 ├── baselines/
 │   ├── soupx.py
-│   ├── decontx.py
 │   └── spotclean_official.py         # Python adapter for the official R package
 ├── scripts/                          # Execution, summary, and plotting scripts
 ├── data/                             # Local inputs and single-cell references
@@ -239,6 +238,11 @@ python evaluation/scripts/evaluate_mousebrain_h5ad.py \
   --methods RAW,SPARKLE,SoupX,DecontX,SpotClean
 ```
 
+Generate the curated tumour/stromal marker comparison used in the manuscript:
+
+```bash
+python evaluation/scripts/analyze_ovarian_cancer_markers.py
+```
 
 Run spatial CellChat and the non-spatial scRNA-seq CellChat reference
 separately:

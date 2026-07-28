@@ -8,7 +8,6 @@ The figure links three levels of evidence on the same 16,198 CellChat cells:
    TAF-to-VEGFA+ tumor paracrine signaling.
 3. The same two COL1A2-SDC4 routes in the non-spatial scRNA CellChat reference.
 
-SpatialSoupX is deliberately excluded from this focused comparison.
 """
 
 from __future__ import annotations
@@ -474,7 +473,7 @@ def plot_figure(
     fig.text(
         0.5,
         0.935,
-        "Same 16,198 spatial cells · shared RAW-RCTD annotations · CellChat range 250 µm · 17,050-cell official scRNA reference in C · SpatialSoupX excluded",
+        "Same 16,198 spatial cells · shared RAW-RCTD annotations · CellChat range 250 µm · 17,050-cell official scRNA reference in C",
         ha="center",
         fontsize=12,
         color="#555555",

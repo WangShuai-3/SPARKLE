@@ -1,8 +1,7 @@
 #!/usr/bin/env Rscript
 #
 # Generate enriched first_type CSVs from existing mousebrain RCTD doublet results.
-# Mirrors enrich_first_type_scores.R (ovarian) but with mousebrain's file naming
-# convention (rctd_Cell_subclass_doublet_results.csv).
+# Uses the mousebrain-specific RCTD file naming convention.
 #
 # Run:
 #   Rscript evaluation/scripts/enrich_first_type_scores_mousebrain.R

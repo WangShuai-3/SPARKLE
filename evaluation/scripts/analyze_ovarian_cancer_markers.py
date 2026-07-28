@@ -33,8 +33,8 @@ TAG = "ovarian_x1000-1800_y300-1100"
 INPUT_DIR = Path("evaluation/reports/h5ad_ovarian_annotated")
 OUTPUT_DIR = Path("evaluation/reports/ovarian_eval/marker_analysis")
 
-METHODS = ["RAW", "SPARKLE", "SpatialSoupX", "SoupX", "DecontX", "SpotClean"]
-PLOT_METHOD_ORDER = ["RAW", "SPARKLE", "SpotClean", "SoupX", "SpatialSoupX", "DecontX"]
+METHODS = ["RAW", "SPARKLE", "SoupX", "DecontX", "SpotClean"]
+PLOT_METHOD_ORDER = ["RAW", "SPARKLE", "SpotClean", "SoupX", "DecontX"]
 METHOD_SUFFIXES = {
     "RAW": "raw",
     "SpotClean": "SpotCleanOfficial",

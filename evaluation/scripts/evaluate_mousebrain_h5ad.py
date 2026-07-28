@@ -363,7 +363,7 @@ def main():
     )
     parser.add_argument(
         "--methods", type=str,
-        default="RAW,SPARKLE,SpatialSoupX,SoupX,DecontX",
+        default="RAW,SPARKLE,SoupX,DecontX,SpotClean",
         help="Comma-separated method names matching h5ad suffixes",
     )
     parser.add_argument(

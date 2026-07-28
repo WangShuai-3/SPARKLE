@@ -142,7 +142,7 @@ def reuse_synthetic_h5ad_metrics(
     tag: str, true_expr: np.ndarray, rmse_raw: float, metrics: dict
 ) -> None:
     """Recover prior-method RMSEs from existing h5ad files without rerunning them."""
-    for method in ("SPARKLE", "SpatialSoupX", "SoupX", "DecontX"):
+    for method in ("SPARKLE", "SoupX", "DecontX"):
         path = REPORTS / "h5ad" / f"{tag}_{method}.h5ad"
         if not path.exists():
             continue

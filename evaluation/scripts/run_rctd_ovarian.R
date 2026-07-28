@@ -1,11 +1,9 @@
 #!/usr/bin/env Rscript
 #
 # Run RCTD (doublet mode) on Ovarian Visium HD cell-level h5ad outputs and
-# compare mapping quality across correction methods (RAW, SPARKLE, SpatialSoupX,
-# SoupX, DecontX).
+# compare mapping quality across the final manuscript methods.
 #
-# Mirrors ``run_rctd_visiumhd.R`` (colon cancer 6p5mm) but uses the Ovarian
-# scFFPE single-cell reference and its FLEX annotation.
+# Uses the ovarian scFFPE single-cell reference and its FLEX annotation.
 #
 # Inputs:
 #   - evaluation/data/ovarian/17k_Ovarian_Cancer_scFFPE_count_filtered_feature_bc_matrix.h5
@@ -68,8 +66,6 @@ method_name_map <- list(
   raw = "RAW",
   sparkle = "SPARKLE",
   SPARKLE = "SPARKLE",
-  spatial_soupx = "SpatialSoupX",
-  SpatialSoupX = "SpatialSoupX",
   soupx = "SoupX",
   SoupX = "SoupX",
   decontx = "DecontX",

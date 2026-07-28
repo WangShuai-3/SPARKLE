@@ -104,12 +104,10 @@ def main():
     # Method name mapping:  stem -> Method used in first_type CSV names
     # ------------------------------------------------------------------
     # The R script uses these method names for first_type CSV filenames:
-    #   RAW, SPARKLE, SpatialSoupX, SoupX, DecontX
-    # The h5ad stems are: raw, sparkle, spatial_soupx, soupx, decontx
+    #   RAW, SPARKLE, SoupX, DecontX, SpotClean
     METHOD_MAP = {
         "raw": "RAW",
         "sparkle": "SPARKLE",
-        "spatial_soupx": "SpatialSoupX",
         "soupx": "SoupX",
         "decontx": "DecontX",
         "spotcleanofficial": "SpotClean",
@@ -121,6 +119,10 @@ def main():
     stats = []
     for h5ad_path in h5ad_files:
         stem = h5ad_path.stem[len(prefix):]  # e.g. "raw", "DecontX", ...
+        if stem.lower() not in METHOD_MAP:
+            print(f"  [{stem}] SKIP: method is outside the final manuscript scope")
+            stats.append((stem, "SKIP (out of scope)", 0, 0))
+            continue
         method = METHOD_MAP.get(stem.lower(), stem)
         # Optionally use a single shared first_type source for all methods.
         source_method = args.annotation_method if args.annotation_method else method

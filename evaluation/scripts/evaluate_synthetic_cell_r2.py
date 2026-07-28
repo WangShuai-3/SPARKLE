@@ -32,7 +32,6 @@ from evaluation.scripts.final_comparison import load_synthetic_scenario_data
 METHOD_FILES = {
     "RAW": "raw",
     "SPARKLE": "SPARKLE",
-    "SpatialSoupX": "SpatialSoupX",
     "SoupX": "SoupX",
     "DecontX": "DecontX",
     "SpotClean": "SpotCleanOfficial",
@@ -40,7 +39,6 @@ METHOD_FILES = {
 METHOD_COLORS = {
     "RAW": "#7f8c8d",
     "SPARKLE": "#e74c3c",
-    "SpatialSoupX": "#f1c40f",
     "SoupX": "#3498db",
     "DecontX": "#2ecc71",
     "SpotClean": "#9b59b6",

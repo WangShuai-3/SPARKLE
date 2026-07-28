@@ -2,8 +2,8 @@
 """Visualize synthetic S1-S10 RMSE across correction methods.
 
 Reads metrics JSONs written by the synthetic benchmark and produces a bar
-chart per scenario.  RAW (ground truth) is shown as a dashed line; other
-methods are bars.  SpatialSoupX is excluded.
+chart per scenario. RAW is shown as a dashed line and the correction methods
+used in the final manuscript are shown as bars.
 """
 
 import argparse
@@ -52,7 +52,7 @@ def load_metrics(metrics_dir):
 
         raw_rows.append({"scenario": sid, "method": "RAW", "rmse": data["raw"]["rmse"]})
         for method, vals in data["methods"].items():
-            if method == "SpatialSoupX":
+            if method not in METHOD_ORDER:
                 continue
             rows.append({"scenario": sid, "method": method, "rmse": vals["rmse"]})
 
@@ -265,7 +265,7 @@ def print_summary(method_df, raw_df):
     merged["reduction_pct"] = (merged["raw_rmse"] - merged["rmse"]) / merged["raw_rmse"] * 100
     pivot = merged.pivot(index="scenario", columns="method", values=["rmse", "reduction_pct"])
     pivot = pivot.loc[sorted(pivot.index, key=lambda s: int(s[1:]))]
-    print("\nRMSE summary (excluding SpatialSoupX):")
+    print("\nRMSE summary:")
     print(pivot["rmse"].round(3).to_string())
     print("\nReduction vs RAW (%):")
     print(pivot["reduction_pct"].round(2).to_string())

@@ -2,8 +2,8 @@
 """Visualize MouseBrain method comparison across normalization scenarios.
 
 Produces four figures:
-    1. HVG-3000 cell-type pseudobulk correlation heatmaps (one per method,
-       excluding SpatialSoupX), with unified colorbar.
+    1. HVG-3000 cell-type pseudobulk correlation heatmaps with a unified
+       colorbar.
     2. Per-cell-type snRNA correlation distributions across scenarios
        (boxplots).
     3. Top-10 per-cell-type SPARKLE improvements (horizontal stacked bar).
@@ -37,7 +37,7 @@ SCENARIOS = {
     },
 }
 
-METHODS = ["raw", "SPARKLE", "SoupX", "DecontX", "SpotClean"]  # exclude SpatialSoupX
+METHODS = ["raw", "SPARKLE", "SoupX", "DecontX", "SpotClean"]
 
 
 def normalize_adata(adata):

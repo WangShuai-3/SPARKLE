@@ -55,7 +55,6 @@ DATASET_TAG <- Sys.getenv("RCTD_DATASET_TAG", "mousebrain_x12500-20000_y2000-100
 method_name_map <- list(
   raw = "RAW",
   sparkle = "SPARKLE",
-  spatial_soupx = "SpatialSoupX",
   soupx = "SoupX",
   decontx = "DecontX",
   SpotCleanOfficial = "SpotClean"

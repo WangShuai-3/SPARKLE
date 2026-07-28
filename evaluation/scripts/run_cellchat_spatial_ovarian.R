@@ -43,7 +43,6 @@ dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
 STEM_MAP <- c(
   raw          = "RAW",
   SPARKLE      = "SPARKLE",
-  SpatialSoupX = "SpatialSoupX",
   SoupX        = "SoupX",
   DecontX      = "DecontX",
   SpotCleanOfficial = "SpotClean"
