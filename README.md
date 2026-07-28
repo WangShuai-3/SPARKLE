@@ -66,8 +66,8 @@ pip install "stambient[gpu]"
 For local development:
 
 ```bash
-git clone https://github.com/WangShuai-3/SPARKLE_dev.git
-cd SPARKLE_dev
+git clone https://github.com/WangShuai-3/SPARKLE.git
+cd SPARKLE
 pip install -e ".[dev]"
 ```
 
