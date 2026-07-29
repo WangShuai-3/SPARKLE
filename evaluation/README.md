@@ -50,11 +50,12 @@ files.
 The generator uses a \(500\times500\) DNB grid, 0.5-µm DNB spacing, 500 genes,
 and 80 highly expressed genes. Per-gene baseline and high-expression rates
 follow log-spaced gradients, so most genes are expressed very low and only a
-few are abundant. Marker genes are strictly cell-type-specific
-in the ground truth, and a 95% UMI dropout is applied (binomial thinning of
-the clean and ambient parts independently); the correction ground truth is
-the observed clean expression. Every scenario contains multiple cell types
-and marker genes while varying one principal source of difficulty:
+few are abundant. Scenarios contain 6 spatially clustered cell types with
+imbalanced proportions (8 in S10); marker genes are strictly
+cell-type-specific in the ground truth, and a 95% UMI dropout is applied
+(binomial thinning of the clean and ambient parts independently); the
+correction ground truth is the observed clean expression. Every scenario
+varies one principal source of difficulty:
 
 | Scenario | Principal variation |
 |---|---|

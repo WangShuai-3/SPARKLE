@@ -38,6 +38,7 @@ def _place_cell_centers(
     rng: np.random.RandomState,
     n_cell_types: int = 1,
     cluster_strength: float = 0.0,
+    type_size_ratio: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Place cell centers on a jittered grid with optional type clusters."""
     aspect = width_um / height_um
@@ -56,21 +57,40 @@ def _place_cell_centers(
     centers[:, 0] = np.clip(centers[:, 0], mean_radius, width_um - mean_radius)
     centers[:, 1] = np.clip(centers[:, 1], mean_radius, height_um - mean_radius)
 
-    # Cell types: random with optional spatial clustering
+    # Cell types: imbalanced sizes (geometric-decay proportions, randomly
+    # permuted across types); type_size_ratio=1 keeps equal sizes.
     cell_types = np.zeros(n_cells, dtype=np.int64)
     if n_cell_types > 1:
+        proportions = type_size_ratio ** np.arange(n_cell_types, dtype=np.float64)
+        proportions /= proportions.sum()
+        rng.shuffle(proportions)
+        type_counts = np.floor(proportions * n_cells).astype(np.int64)
+        type_counts[np.argmax(proportions)] += n_cells - type_counts.sum()
+
         if cluster_strength > 0:
-            # Cluster centers in space, assign nearby cells to the same type
+            # Quota-based spatial assignment: each type takes the unassigned
+            # cells closest to its centre, so types form spatial domains of
+            # the target sizes.  (The former implementation shuffled the
+            # labels afterwards, which silently destroyed the clustering.)
             type_centers = rng.uniform(
                 low=[mean_radius * 2, mean_radius * 2],
                 high=[width_um - mean_radius * 2, height_um - mean_radius * 2],
                 size=(n_cell_types, 2),
             )
-            tree = cKDTree(type_centers)
-            _, cell_types = tree.query(centers)
+            d = np.linalg.norm(
+                centers[:, None, :] - type_centers[None, :, :], axis=2
+            )
+            cell_types = np.full(n_cells, -1, dtype=np.int64)
+            for t in rng.permutation(n_cell_types):
+                free = np.flatnonzero(cell_types < 0)
+                if len(free) == 0:
+                    break
+                take = min(type_counts[t], len(free))
+                chosen = free[np.argsort(d[free, t])[:take]]
+                cell_types[chosen] = t
         else:
-            cell_types = np.arange(n_cells, dtype=np.int64) % n_cell_types
-        rng.shuffle(cell_types)
+            cell_types = np.repeat(np.arange(n_cell_types), type_counts)
+            rng.shuffle(cell_types)
 
     return centers, cell_types
 
@@ -107,6 +127,7 @@ def generate_synthetic_data(
     n_cell_types: int = 1,
     marker_fraction: float = 0.0,
     cluster_strength: float = 0.5,
+    type_size_ratio: float = 1.0,
     dropout_rate: float = 0.0,
     bg_rate_range: Tuple[float, float] = (0.1, 10.0),
     high_rate_range: Tuple[float, float] = (20.0, 100.0),
@@ -130,8 +151,12 @@ def generate_synthetic_data(
             natural empty space, or by randomly removing covered DNBs when
             there is too little.
         n_cell_types: Number of cell types.
-        marker_fraction: Fraction of high genes that are cell-type-specific markers.
+        marker_fraction: Fraction of high genes that are cell-type-specific
+            markers, split evenly across types (each type gets at least one).
         cluster_strength: If >0 and n_cell_types>1, spatially cluster cell types.
+        type_size_ratio: Geometric decay ratio of cell-type proportions;
+            1.0 gives balanced types, values <1 give increasingly imbalanced
+            type sizes (e.g. 0.5 halves each successive type).
         dropout_rate: Fraction of UMIs randomly lost (binomial thinning),
             simulating capture loss. Applied to the clean and ambient parts
             independently; the ground truth is then defined as the observed
@@ -173,6 +198,7 @@ def generate_synthetic_data(
     cell_centers, cell_types = _place_cell_centers(
         n_cells, width_um, height_um, cell_radius, rng,
         n_cell_types=n_cell_types, cluster_strength=cluster_strength,
+        type_size_ratio=type_size_ratio,
     )
 
     # Variable cell radii
@@ -269,19 +295,24 @@ def generate_synthetic_data(
     # Marker genes: strong, cell-type-specific expression.  Markers are
     # absent from every other cell type (exact zero ground truth), giving a
     # present-vs-absent frequency contrast that marker-based detection
-    # methods (e.g. SoupX quickMarkers) can pick up.
+    # methods (e.g. SoupX quickMarkers) can pick up.  The pool is split
+    # across all types so every type receives at least one marker.
     marker_absent = np.zeros((n_genes, n_kept), dtype=bool)
-    n_markers = int(round(n_high_genes * marker_fraction))
-    if n_markers > 0 and n_cell_types > 1:
+    if marker_fraction > 0 and n_cell_types > 1:
+        n_markers_per_type = max(
+            1, int(round(n_high_genes * marker_fraction / n_cell_types))
+        )
         marker_pool = np.arange(n_high_genes)
         rng.shuffle(marker_pool)
+        cursor = 0
         for t in range(n_cell_types):
-            start = t * n_markers
-            end = min(start + n_markers, len(marker_pool))
-            if start >= len(marker_pool):
+            if cursor >= len(marker_pool):
                 break
-            marker_genes = marker_pool[start:end]
+            marker_genes = marker_pool[cursor:cursor + n_markers_per_type]
+            cursor += len(marker_genes)
             cells_t = np.where(cell_types == t)[0]
+            if len(cells_t) == 0:
+                continue
             true_expr[marker_genes[:, None], cells_t] += rng.poisson(
                 80.0, (len(marker_genes), len(cells_t))
             ).astype(np.float64)
@@ -436,6 +467,7 @@ def generate_synthetic_data(
             "n_cell_types": n_cell_types,
             "marker_fraction": float(marker_fraction),
             "cluster_strength": float(cluster_strength),
+            "type_size_ratio": float(type_size_ratio),
             "dropout_rate": float(dropout_rate),
             "bg_rate_range": tuple(float(v) for v in bg_rate_range),
             "high_rate_range": tuple(float(v) for v in high_rate_range),

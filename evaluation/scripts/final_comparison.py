@@ -93,6 +93,7 @@ def load_synthetic_scenario_data(scenario_id="S1", seed=42):
         n_cell_types=scenario.get("n_cell_types", 1),
         marker_fraction=scenario.get("marker_fraction", 0.0),
         cluster_strength=scenario.get("cluster_strength", 0.5),
+        type_size_ratio=scenario.get("type_size_ratio", 1.0),
         dropout_rate=scenario.get("dropout_rate", 0.0),
         seed=seed,
     )

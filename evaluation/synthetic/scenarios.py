@@ -8,9 +8,11 @@ or spatial clustering strength).
 
 The scenarios are generated on a 500×500 DNB canvas (250 µm side at 0.5 µm
 pitch); cell counts are scaled so that even the sparsest scenario provides
-a few hundred cells. Marker genes are strictly cell-type-specific in the
-ground truth, and a 95% UMI dropout is applied to every scenario so that
-sparse leaked counts can drop to zero, mimicking real capture loss.
+a few hundred cells. Scenarios use 6 spatially clustered cell types with
+imbalanced proportions (geometric ratio 0.5; S10 uses 8 types). Marker genes
+are strictly cell-type-specific in the ground truth, and a 95% UMI dropout
+is applied to every scenario so that sparse leaked counts can drop to zero,
+mimicking real capture loss.
 """
 
 SCENARIOS = {
@@ -20,9 +22,10 @@ SCENARIOS = {
         "empty_fraction": 0.40,
         "ambient_lambda": 50.0,
         "ambient_alpha": 0.01,
-        "n_cell_types": 3,
+        "n_cell_types": 6,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "type_size_ratio": 0.5,
         "dropout_rate": 0.95,
     },
     "S2": {
@@ -31,9 +34,10 @@ SCENARIOS = {
         "empty_fraction": 0.25,
         "ambient_lambda": 50.0,
         "ambient_alpha": 0.01,
-        "n_cell_types": 3,
+        "n_cell_types": 6,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "type_size_ratio": 0.5,
         "dropout_rate": 0.95,
     },
     "S3": {
@@ -42,9 +46,10 @@ SCENARIOS = {
         "empty_fraction": 0.10,
         "ambient_lambda": 50.0,
         "ambient_alpha": 0.01,
-        "n_cell_types": 3,
+        "n_cell_types": 6,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "type_size_ratio": 0.5,
         "dropout_rate": 0.95,
     },
     "S4": {
@@ -53,9 +58,10 @@ SCENARIOS = {
         "empty_fraction": 0.25,
         "ambient_lambda": 20.0,
         "ambient_alpha": 0.01,
-        "n_cell_types": 3,
+        "n_cell_types": 6,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "type_size_ratio": 0.5,
         "dropout_rate": 0.95,
     },
     "S5": {
@@ -64,9 +70,10 @@ SCENARIOS = {
         "empty_fraction": 0.25,
         "ambient_lambda": 500.0,
         "ambient_alpha": 0.01,
-        "n_cell_types": 3,
+        "n_cell_types": 6,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "type_size_ratio": 0.5,
         "dropout_rate": 0.95,
     },
     "S6": {
@@ -75,9 +82,10 @@ SCENARIOS = {
         "empty_fraction": 0.25,
         "ambient_lambda": 50.0,
         "ambient_alpha": 0.005,
-        "n_cell_types": 3,
+        "n_cell_types": 6,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "type_size_ratio": 0.5,
         "dropout_rate": 0.95,
     },
     "S7": {
@@ -86,9 +94,10 @@ SCENARIOS = {
         "empty_fraction": 0.25,
         "ambient_lambda": 50.0,
         "ambient_alpha": 0.10,
-        "n_cell_types": 3,
+        "n_cell_types": 6,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "type_size_ratio": 0.5,
         "dropout_rate": 0.95,
     },
     "S8": {
@@ -97,9 +106,10 @@ SCENARIOS = {
         "empty_fraction": 0.60,
         "ambient_lambda": 50.0,
         "ambient_alpha": 0.01,
-        "n_cell_types": 3,
+        "n_cell_types": 6,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "type_size_ratio": 0.5,
         "dropout_rate": 0.95,
     },
     "S9": {
@@ -108,20 +118,22 @@ SCENARIOS = {
         "empty_fraction": 0.25,
         "ambient_lambda": 50.0,
         "ambient_alpha": 0.01,
-        "n_cell_types": 3,
+        "n_cell_types": 6,
         "marker_fraction": 0.50,
         "cluster_strength": 0.6,
+        "type_size_ratio": 0.5,
         "dropout_rate": 0.95,
     },
     "S10": {
-        "name": "Many cell types (5 types)",
+        "name": "Many cell types (8 types)",
         "n_cells": 900,
         "empty_fraction": 0.25,
         "ambient_lambda": 50.0,
         "ambient_alpha": 0.01,
-        "n_cell_types": 5,
+        "n_cell_types": 8,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "type_size_ratio": 0.5,
         "dropout_rate": 0.95,
     },
 }
