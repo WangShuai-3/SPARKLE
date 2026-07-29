@@ -437,28 +437,82 @@ def check_inputs(
     coordinates: np.ndarray,
     labels: np.ndarray,
 ) -> None:
-    """Validate input dimensions and types.
+    """Validate inputs against the SPARKLE input contract.
+
+    Beyond shape alignment this enforces the README content requirements:
+    raw non-negative finite counts, finite [N × 2] coordinates,
+    integer-valued labels, and at least one cell (label >= 0) plus one
+    out-of-mask location (label < 0).
 
     Args:
-        expression: [genes × spots] expression matrix.
+        expression: [genes × spots] expression matrix (dense or sparse).
         coordinates: [spots × 2] coordinates.
-        labels: [spots] cell labels.
+        labels: [spots] cell labels; -1 denotes an out-of-mask location.
 
     Raises:
-        ValueError: If inputs are inconsistent.
+        ValueError: If any input violates the contract.
     """
-    n_spots = coordinates.shape[0]
+    if getattr(expression, "ndim", None) != 2:
+        raise ValueError(
+            f"expression must be 2-D [genes × spots], got shape "
+            f"{getattr(expression, 'shape', None)}"
+        )
+    coordinates = np.asarray(coordinates)
+    labels = np.asarray(labels)
 
+    if coordinates.ndim != 2 or coordinates.shape[1] != 2:
+        raise ValueError(
+            f"coordinates must be [N × 2], got shape {coordinates.shape}"
+        )
+    n_spots = coordinates.shape[0]
     if expression.shape[1] != n_spots:
         raise ValueError(
-            f"Expression has {expression.shape[1]} spots but coordinates have {n_spots}"
+            f"expression has {expression.shape[1]} spots but coordinates "
+            f"have {n_spots}"
         )
-    if len(labels) != n_spots:
+    if labels.ndim != 1 or len(labels) != n_spots:
         raise ValueError(
-            f"Labels has {len(labels)} entries but coordinates have {n_spots}"
+            f"labels must be 1-D with one entry per spot, got shape "
+            f"{labels.shape} for {n_spots} spots"
         )
-    if coordinates.shape[1] != 2:
-        raise ValueError(f"Coordinates must be [N × 2], got {coordinates.shape}")
+
+    if not np.issubdtype(coordinates.dtype, np.number) or not np.all(
+        np.isfinite(coordinates)
+    ):
+        raise ValueError("coordinates must contain only finite numeric values")
+
+    values = expression.data if issparse(expression) else np.asarray(expression)
+    if not np.issubdtype(values.dtype, np.number) or not np.all(
+        np.isfinite(values)
+    ):
+        raise ValueError("expression must contain only finite numeric values")
+    if np.any(values < 0):
+        raise ValueError(
+            "expression must be raw non-negative counts; found negative values"
+        )
+
+    if not np.issubdtype(labels.dtype, np.number) or not np.all(
+        np.isfinite(labels)
+    ):
+        raise ValueError("labels must contain only finite numeric values")
+    if not np.issubdtype(labels.dtype, np.integer):
+        non_integral = labels != np.floor(labels)
+        if np.any(non_integral):
+            bad = labels[np.flatnonzero(non_integral)[0]]
+            raise ValueError(
+                f"labels must be integer-valued cell ids (-1 = out-of-mask); "
+                f"found non-integer value {bad}"
+            )
+    if not np.any(labels >= 0):
+        raise ValueError(
+            "labels contain no cell (label >= 0); segmented cells are "
+            "required as correction targets"
+        )
+    if not np.any(labels < 0):
+        raise ValueError(
+            "labels contain no out-of-mask location (label -1); empty "
+            "locations are required as ambient probes"
+        )
 
 
 def sparse_to_dense_if_needed(mat) -> np.ndarray:
@@ -469,22 +523,27 @@ def sparse_to_dense_if_needed(mat) -> np.ndarray:
 
 
 def save_results(
-    corrected_expr: csr_matrix,
+    corrected_expr,
     diagnostics: dict,
     output_prefix: str,
 ):
     """Save corrected expression and diagnostics to files.
 
     Args:
-        corrected_expr: [genes × cells] corrected per-cell expression.
+        corrected_expr: [genes × cells] corrected per-cell expression, dense
+            numpy array (the ``fit_transform`` return type) or scipy sparse.
         diagnostics: Diagnostic dictionary.
         output_prefix: File path prefix.
     """
     import json
 
-    # Save sparse matrix
+    # save_npz expects a sparse matrix; densify the sparse-on-disk contract.
     from scipy.sparse import save_npz
-    save_npz(f"{output_prefix}_corrected.npz", corrected_expr)
+
+    matrix = (
+        corrected_expr if issparse(corrected_expr) else csr_matrix(corrected_expr)
+    )
+    save_npz(f"{output_prefix}_corrected.npz", matrix)
 
     # Save diagnostics as JSON
     with open(f"{output_prefix}_diagnostics.json", "w") as f:

@@ -213,3 +213,99 @@ class TestLoadStereoSeq:
         # column names are then missing.
         with pytest.raises(ValueError, match="Missing required columns"):
             load_stereoseq(gem_path, verbose=False)
+
+
+# ── check_inputs / save_results ──────────────────────────────────────
+
+from scipy.sparse import csr_matrix, load_npz
+from stambient.io_utils import check_inputs, save_results
+
+
+def _valid_inputs():
+    expr = np.array([[1.0, 0.0, 2.0, 0.0], [0.0, 3.0, 0.0, 1.0]])
+    coords = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    labels = np.array([0, 0, -1, -1])
+    return expr, coords, labels
+
+
+class TestCheckInputs:
+    def test_valid_inputs_pass(self):
+        check_inputs(*_valid_inputs())
+
+    def test_sparse_expression_accepted(self):
+        expr, coords, labels = _valid_inputs()
+        check_inputs(csr_matrix(expr), coords, labels)
+
+    def test_float_integral_labels_accepted(self):
+        expr, coords, labels = _valid_inputs()
+        check_inputs(expr, coords, labels.astype(np.float64))
+
+    @pytest.mark.parametrize(
+        "bad_expr",
+        [
+            np.array([[1.0, -1.0, 2.0, 0.0], [0.0, 3.0, 0.0, 1.0]]),  # negative
+            np.array([[1.0, np.nan, 2.0, 0.0], [0.0, 3.0, 0.0, 1.0]]),  # NaN
+            np.array([[1.0, np.inf, 2.0, 0.0], [0.0, 3.0, 0.0, 1.0]]),  # Inf
+        ],
+    )
+    def test_invalid_expression_rejected(self, bad_expr):
+        _, coords, labels = _valid_inputs()
+        with pytest.raises(ValueError, match="expression"):
+            check_inputs(bad_expr, coords, labels)
+
+    def test_sparse_negative_rejected(self):
+        expr, coords, labels = _valid_inputs()
+        with pytest.raises(ValueError, match="non-negative"):
+            check_inputs(csr_matrix(-expr), coords, labels)
+
+    @pytest.mark.parametrize(
+        "bad_coords",
+        [
+            np.array([[0.0, 0.0], [np.nan, 0.0], [0.0, 1.0], [1.0, 1.0]]),
+            np.array([[0.0, 0.0], [np.inf, 0.0], [0.0, 1.0], [1.0, 1.0]]),
+        ],
+    )
+    def test_non_finite_coordinates_rejected(self, bad_coords):
+        expr, _, labels = _valid_inputs()
+        with pytest.raises(ValueError, match="coordinates"):
+            check_inputs(expr, bad_coords, labels)
+
+    def test_non_integer_labels_rejected(self):
+        expr, coords, labels = _valid_inputs()
+        with pytest.raises(ValueError, match="integer-valued"):
+            check_inputs(expr, coords, labels + 0.5)
+
+    def test_all_cell_labels_rejected(self):
+        expr, coords, labels = _valid_inputs()
+        with pytest.raises(ValueError, match="out-of-mask"):
+            check_inputs(expr, coords, np.abs(labels))
+
+    def test_all_empty_labels_rejected(self):
+        expr, coords, labels = _valid_inputs()
+        with pytest.raises(ValueError, match="no cell"):
+            check_inputs(expr, coords, np.full(4, -1))
+
+    def test_shape_mismatch_rejected(self):
+        expr, coords, labels = _valid_inputs()
+        with pytest.raises(ValueError, match="expression"):
+            check_inputs(expr[:, :3], coords, labels)
+        with pytest.raises(ValueError, match="labels"):
+            check_inputs(expr, coords, labels[:3])
+        with pytest.raises(ValueError, match="coordinates"):
+            check_inputs(expr, coords[:, :1], labels)
+
+
+class TestSaveResults:
+    def test_dense_and_sparse_roundtrip(self, tmp_path):
+        import json
+
+        corrected = np.array([[1.0, 0.0], [0.0, 2.5]])
+        mats = {"dense": corrected, "sparse": csr_matrix(corrected)}
+        for name, mat in mats.items():
+            prefix = tmp_path / name
+            save_results(mat, {"lambda_estimated": 20.0}, str(prefix))
+
+            loaded = load_npz(f"{prefix}_corrected.npz")
+            np.testing.assert_array_equal(loaded.toarray(), corrected)
+            with open(f"{prefix}_diagnostics.json") as f:
+                assert json.load(f)["lambda_estimated"] == 20.0

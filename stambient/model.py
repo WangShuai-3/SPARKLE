@@ -91,11 +91,33 @@ class SPARKLE:
             raise ValueError("bin_size must be a positive finite length in µm")
         if not np.isfinite(max_radius) or max_radius <= 0:
             raise ValueError("max_radius must be a positive finite length in µm")
-        if lambda_grid is not None and any(
-            not np.isfinite(value) or value <= 0 for value in lambda_grid
+        if distance_metric not in ("exponential", "gaussian", "inverse"):
+            raise ValueError(
+                "distance_metric must be one of 'exponential', 'gaussian', "
+                f"'inverse'; got {distance_metric!r}"
+            )
+        if lambda_grid is not None and (
+            len(lambda_grid) == 0
+            or any(not np.isfinite(value) or value <= 0 for value in lambda_grid)
         ):
             raise ValueError(
-                "lambda_grid must contain positive finite lengths in µm"
+                "lambda_grid must be a non-empty list of positive finite "
+                "lengths in µm"
+            )
+        if n_high_genes is not None and (
+            not isinstance(n_high_genes, (int, np.integer)) or n_high_genes <= 0
+        ):
+            raise ValueError(
+                "n_high_genes must be a positive integer or None; "
+                f"got {n_high_genes!r}"
+            )
+        if not isinstance(n_lambda_genes, (int, np.integer)) or n_lambda_genes <= 0:
+            raise ValueError(
+                f"n_lambda_genes must be a positive integer; got {n_lambda_genes!r}"
+            )
+        if not np.isfinite(r2_threshold) or not 0.0 <= r2_threshold <= 1.0:
+            raise ValueError(
+                f"r2_threshold must be a finite value in [0, 1]; got {r2_threshold!r}"
             )
 
         self.bin_size = bin_size
@@ -134,7 +156,8 @@ class SPARKLE:
             dnb_cell_labels: [DNBs] cell IDs; -1 for empty.
 
         Returns:
-            corrected_cell_expr: [genes × cells] corrected per-cell expression.
+            corrected_cell_expr: [genes × cells] corrected per-cell expression
+                as a dense float64 numpy.ndarray.
             diagnostics: Dictionary of diagnostic metrics.
         """
         check_inputs(dnb_expression, dnb_coordinates, dnb_cell_labels)
@@ -204,7 +227,8 @@ class SPARKLE:
             spot_labels: [spots] cell IDs; -1 for empty spots.
 
         Returns:
-            corrected_cell_expr: [genes × cells] corrected per-cell expression.
+            corrected_cell_expr: [genes × cells] corrected per-cell expression
+                as a dense float64 numpy.ndarray.
             diagnostics: Dictionary of diagnostic metrics.
         """
         return self.fit_transform_from_dnb(spot_expr, spot_coords, spot_labels)

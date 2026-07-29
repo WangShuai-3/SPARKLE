@@ -42,8 +42,20 @@ def test_cell_based_default_accepted():
         {"bin_size": float("nan")},
         {"max_radius": 0.0},
         {"max_radius": -5.0},
+        {"distance_metric": "cubic"},
+        {"distance_metric": ""},
+        {"lambda_grid": []},
         {"lambda_grid": [10.0, 0.0]},
         {"lambda_grid": [-1.0]},
+        {"n_high_genes": 0},
+        {"n_high_genes": -5},  # previously sliced genes off the end silently
+        {"n_high_genes": 2.5},
+        {"n_lambda_genes": 0},
+        {"n_lambda_genes": -1},
+        {"n_lambda_genes": 1.5},
+        {"r2_threshold": -0.1},
+        {"r2_threshold": 1.5},
+        {"r2_threshold": float("nan")},
     ],
 )
 def test_invalid_lengths_raise(kwargs):
