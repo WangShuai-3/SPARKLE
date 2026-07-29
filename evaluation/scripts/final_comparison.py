@@ -26,6 +26,7 @@ from scipy.spatial import cKDTree
 
 STEREOSEQ_PITCH_UM = 0.5
 DEFAULT_EMPTY_BIN_SIZE_UM = 25.0
+SYNTHETIC_GRID_SIZE_DNB = 500
 
 # Optional line-by-line memory profiler; falls back to no-op if not installed.
 try:
@@ -79,8 +80,8 @@ def load_synthetic_scenario_data(scenario_id="S1", seed=42):
     print(f"  Generating synthetic data on the fly...")
     data = generate_synthetic_data(
         n_cells=scenario.get("n_cells", 200),
-        grid_width=200,
-        grid_height=200,
+        grid_width=SYNTHETIC_GRID_SIZE_DNB,
+        grid_height=SYNTHETIC_GRID_SIZE_DNB,
         dnb_pitch=0.5,
         cell_radius=5.0,
         cell_radius_cv=0.2,
@@ -155,16 +156,10 @@ def run_synthetic_comparison(
 
     results = {}
     if lambda_grid is None:
-        lambda_grid_sp = [10, 20, 30, 50, 70, 100, 150, 200, 300]
+        lambda_grid_sp = [10, 20, 30, 50, 70, 100, 150, 200, 300, 500]
     else:
         lambda_grid_sp = lambda_grid
 
-    # If the scenario has a true lambda larger than the grid, extend the grid.
-    scenario_lambda = int(round(data.get("true_lambda", 0)))
-    if scenario_lambda > 0 and scenario_lambda > max(lambda_grid_sp):
-        print(f"  Scenario lambda ({scenario_lambda} um) exceeds grid max; "
-              f"extending lambda grid to {scenario_lambda} um")
-        lambda_grid_sp = sorted(set(lambda_grid_sp + [scenario_lambda]))
     if r2_threshold is None:
         r2_threshold_sp = 0.01
     else:

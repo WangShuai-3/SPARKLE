@@ -47,7 +47,7 @@ files.
 
 ## Synthetic data
 
-The generator uses a \(200\times200\) DNB grid, 0.5-µm DNB spacing, 500 genes,
+The generator uses a \(500\times500\) DNB grid, 0.5-µm DNB spacing, 500 genes,
 and 80 highly expressed genes. Every scenario contains multiple cell types
 and marker genes while varying one principal source of difficulty:
 
