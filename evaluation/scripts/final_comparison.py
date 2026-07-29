@@ -357,13 +357,14 @@ def run_all_synthetic_scenarios(
             row += f" {val:>13.1f}%"
         print(row)
 
-    # Average row
+    # Average row: NaN failures are excluded from the mean and counted.
     row = f"  {'Average':<10}"
     for name in method_names:
         vals = [all_results[sid]["results"][name]["reduction"]
                 for sid in scenario_ids if name in all_results[sid]["results"]]
-        avg = np.mean(vals) if vals else float('nan')
-        row += f" {avg:>13.1f}%"
+        finite = [v for v in vals if np.isfinite(v)]
+        avg = f"{np.mean(finite):.1f}%({len(finite)}/{len(vals)})" if finite else "nan"
+        row += f" {avg:>14}"
     print(row)
 
 
