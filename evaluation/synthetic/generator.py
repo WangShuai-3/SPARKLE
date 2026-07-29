@@ -108,6 +108,8 @@ def generate_synthetic_data(
     marker_fraction: float = 0.0,
     cluster_strength: float = 0.5,
     dropout_rate: float = 0.0,
+    bg_rate_range: Tuple[float, float] = (0.1, 10.0),
+    high_rate_range: Tuple[float, float] = (20.0, 100.0),
     seed: int = 42,
 ) -> Dict[str, np.ndarray]:
     """Generate synthetic data.
@@ -134,6 +136,10 @@ def generate_synthetic_data(
             simulating capture loss. Applied to the clean and ambient parts
             independently; the ground truth is then defined as the observed
             (thinned) clean expression. Default 0 (no dropout).
+        bg_rate_range: (min, max) of the log-spaced per-gene background
+            expression gradient; most genes sit near min (very low).
+        high_rate_range: (min, max) of the log-spaced per-gene gradient of
+            the high-expression program in owning cells.
         seed: Random seed.
 
     Returns:
@@ -230,12 +236,26 @@ def generate_synthetic_data(
 
     true_expr = np.zeros((n_genes, n_kept), dtype=np.float64)
 
-    # Background expression for all genes (low Poisson)
-    true_expr[:] = rng.poisson(2.0, (n_genes, n_kept)).astype(np.float64)
+    # Background expression for all genes: per-gene baseline rates follow a
+    # log-spaced gradient, so most genes are expressed very low and only a
+    # few are abundant (long-tailed, like real data).
+    bg_rates = np.logspace(
+        np.log10(bg_rate_range[1]), np.log10(bg_rate_range[0]), n_genes
+    )
+    rng.shuffle(bg_rates)
+    true_expr[:] = rng.poisson(bg_rates[:, None], (n_genes, n_kept)).astype(np.float64)
 
+    # High-expression program: rates likewise log-graded across high genes
+    # (shuffled so no cell type systematically gets the highest genes).
+    high_rates = np.logspace(
+        np.log10(high_rate_range[1]), np.log10(high_rate_range[0]), n_high_genes
+    )
+    rng.shuffle(high_rates)
     if n_cell_types <= 1:
         # Shared high-expression program
-        true_expr[:n_high_genes] = rng.poisson(50.0, (n_high_genes, n_kept)).astype(np.float64)
+        true_expr[:n_high_genes] = rng.poisson(
+            high_rates[:, None], (n_high_genes, n_kept)
+        ).astype(np.float64)
     else:
         # Each cell type expresses a distinct subset of high genes
         high_genes_per_type = np.array_split(np.arange(n_high_genes), n_cell_types)
@@ -243,7 +263,7 @@ def generate_synthetic_data(
             gidx = high_genes_per_type[t]
             cells_t = np.where(cell_types == t)[0]
             true_expr[gidx[:, None], cells_t] = rng.poisson(
-                50.0, (len(gidx), len(cells_t))
+                high_rates[gidx][:, None], (len(gidx), len(cells_t))
             ).astype(np.float64)
 
     # Marker genes: strong, cell-type-specific expression.  Markers are
@@ -417,6 +437,8 @@ def generate_synthetic_data(
             "marker_fraction": float(marker_fraction),
             "cluster_strength": float(cluster_strength),
             "dropout_rate": float(dropout_rate),
+            "bg_rate_range": tuple(float(v) for v in bg_rate_range),
+            "high_rate_range": tuple(float(v) for v in high_rate_range),
             "seed": seed,
         },
     }
