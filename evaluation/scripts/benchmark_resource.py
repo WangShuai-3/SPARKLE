@@ -41,6 +41,7 @@ import numpy as np
 import pandas as pd
 
 from evaluation.scripts.final_comparison import (
+    STEREOSEQ_PITCH_UM,
     load_mousebrain_data,
     subsample_data,
     run_sparkle_method,
@@ -224,6 +225,7 @@ def _run_sparkle_profiled(
         sys.stdout = captured
         corrected, diag = run_sparkle_method(
             sub,
+            coordinate_scale_to_um=STEREOSEQ_PITCH_UM,
             n_high_genes=n_high_genes,
             r2_threshold=r2_threshold,
             lambda_grid=lambda_grid,

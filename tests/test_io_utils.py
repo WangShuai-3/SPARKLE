@@ -126,6 +126,25 @@ class TestLoadStereoSeq:
         assert data["spot_expr"].shape == (2, 4)
         assert list(data["gene_names"]) == ["geneA", "geneB"]
 
+    def test_pitch_converts_raw_coordinates_to_micrometres(self, tmp_path):
+        gem_path = tmp_path / "test.tsv"
+        _write_gem(gem_path, _minimal_gem_tsv())
+
+        data = load_stereoseq(gem_path, pitch_um=0.5, verbose=False)
+
+        np.testing.assert_allclose(
+            data["spot_coords"],
+            [[0.0, 0.0], [0.5, 0.0], [0.5, 0.5], [0.0, 0.5]],
+        )
+
+    @pytest.mark.parametrize("pitch_um", [0.0, -0.5, np.inf, np.nan])
+    def test_invalid_pitch_is_rejected(self, tmp_path, pitch_um):
+        gem_path = tmp_path / "test.tsv"
+        _write_gem(gem_path, _minimal_gem_tsv())
+
+        with pytest.raises(ValueError, match="positive finite"):
+            load_stereoseq(gem_path, pitch_um=pitch_um, verbose=False)
+
     def test_csv(self, tmp_path):
         gem_path = tmp_path / "test.csv"
         content = (

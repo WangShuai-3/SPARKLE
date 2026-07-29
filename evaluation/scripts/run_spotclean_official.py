@@ -56,21 +56,22 @@ if _CONDA:
         / "Rscript",
     )
 DEFAULT_RSCRIPT = str(next((path for path in _RSCRIPT_CANDIDATES if path.is_file()), "Rscript"))
+PREPARATION_CONTRACT = "physical_um_independent_xy_bins_v2"
 
 REAL_CONFIG = {
     "axolotl": {
         "x_range": (10500, 12500),
         "y_range": (6000, 11100),
         "candidate_radius": (10, 20, 30, 50, 70, 100, 150, 200),
-        "empty_bin_size": 50.0,
-        "coordinate_scale": 0.5,
+        "empty_bin_size_um": 25.0,
+        "source_coordinate_scale_to_um": 0.5,
     },
     "mousebrain": {
         "x_range": (12500, 20000),
         "y_range": (2000, 10000),
         "candidate_radius": (10, 20, 30, 50, 70, 100, 150, 200, 300),
-        "empty_bin_size": 50.0,
-        "coordinate_scale": 0.5,
+        "empty_bin_size_um": 25.0,
+        "source_coordinate_scale_to_um": 0.5,
         # Run nine spatial cores sequentially. Each core receives a halo equal
         # to the largest candidate radius, and only core cells are retained
         # during stitching. No cell or background bin is randomly discarded.
@@ -81,8 +82,8 @@ REAL_CONFIG = {
         "x_range": (1000, 1800),
         "y_range": (300, 1100),
         "candidate_radius": (10, 20, 30, 50, 70, 100, 150, 200, 300),
-        "empty_bin_size": 25.0,
-        "coordinate_scale": 1.0,
+        "empty_bin_size_um": 25.0,
+        "source_coordinate_scale_to_um": 1.0,
     },
 }
 
@@ -236,7 +237,7 @@ def _make_spatial_tile_specs(
 ) -> list[dict]:
     """Return deterministic core/halo membership for a tiled official run."""
     n_x, n_y = config["tile_grid"]
-    scale = float(config["coordinate_scale"])
+    scale = float(config["source_coordinate_scale_to_um"])
     x_edges = np.linspace(
         config["x_range"][0] * scale,
         config["x_range"][1] * scale,
@@ -430,6 +431,8 @@ def _run_mousebrain_tiled(args) -> dict:
             for record in candidate.get("tiles", [])
         )
         if (
+            candidate.get("preparation_contract") == PREPARATION_CONTRACT
+            and
             candidate.get("tiling_strategy") == "3x3_core_with_radius_halo"
             and len(candidate.get("tiles", [])) == 9
             and all(path.exists() for path in required)
@@ -448,14 +451,22 @@ def _run_mousebrain_tiled(args) -> dict:
             np.asarray(data["gene_names"], dtype=str), template_genes
         ):
             raise ValueError("mousebrain: loader gene order differs from existing RAW h5ad")
+        coordinate_scale_to_um = float(config["source_coordinate_scale_to_um"])
+        coords_um = (
+            np.asarray(data["dnb_coords"], dtype=np.float64)
+            * coordinate_scale_to_um
+        )
         spot_expr, coords, tissue, barcodes, prep = prepare_spotclean_spots(
             data["dnb_expr"],
-            data["dnb_coords"],
+            coords_um,
             data["dnb_labels"],
             data["cell_ids"],
-            empty_bin_size=config["empty_bin_size"],
-            coordinate_scale=config["coordinate_scale"],
+            empty_bin_size=config["empty_bin_size_um"],
+            coordinate_scale=1.0,
         )
+        prep["spatial_unit"] = "micrometre"
+        prep["source_coordinate_scale_to_um"] = coordinate_scale_to_um
+        prep["empty_bin_size_um"] = float(config["empty_bin_size_um"])
         specs = _make_spatial_tile_specs(coords, tissue, config)
         tile_records = []
         for spec in specs:
@@ -506,6 +517,7 @@ def _run_mousebrain_tiled(args) -> dict:
             )
         diagnostics = {
             "dataset": tag,
+            "preparation_contract": PREPARATION_CONTRACT,
             "implementation": "official_R_package",
             "r_wrapper": str(R_SCRIPT.relative_to(PROJECT_ROOT)),
             "rscript": args.rscript,
@@ -523,6 +535,10 @@ def _run_mousebrain_tiled(args) -> dict:
             "n_all_spots_full_window": prep["n_all_spots"],
             "empty_bin_size_input_units": prep["empty_bin_size_input_units"],
             "coordinate_scale": prep["coordinate_scale"],
+            "source_coordinate_scale_to_um": prep[
+                "source_coordinate_scale_to_um"
+            ],
+            "spatial_unit": prep["spatial_unit"],
             "background_sampling_fraction": 1.0,
             "tiles": tile_records,
             "status": "prepared",
@@ -667,8 +683,20 @@ def run_real(name: str, args) -> dict:
         input_dir / "slide.csv",
         manifest_path,
     ]
+    reuse_is_valid = False
     if args.reuse_prepared_input and all(path.exists() for path in required_prepared):
-        diagnostics = json.loads(manifest_path.read_text(encoding="utf-8"))
+        candidate = json.loads(manifest_path.read_text(encoding="utf-8"))
+        reuse_is_valid = (
+            candidate.get("preparation_contract") == PREPARATION_CONTRACT
+        )
+        if not reuse_is_valid:
+            print(
+                "Prepared input uses an obsolete spatial-unit/binning contract; "
+                "rebuilding it.",
+                flush=True,
+            )
+    if reuse_is_valid:
+        diagnostics = candidate
         diagnostics.setdefault(
             "n_input_genes",
             len((input_dir / "genes.tsv").read_text(encoding="utf-8").splitlines()),
@@ -688,14 +716,22 @@ def run_real(name: str, args) -> dict:
         if not np.array_equal(np.asarray(data["gene_names"], dtype=str), template_genes):
             raise ValueError(f"{name}: loader gene order differs from existing RAW h5ad")
 
+        coordinate_scale_to_um = float(config["source_coordinate_scale_to_um"])
+        coords_um = (
+            np.asarray(data["dnb_coords"], dtype=np.float64)
+            * coordinate_scale_to_um
+        )
         spot_expr, coords, tissue, barcodes, prep = prepare_spotclean_spots(
             data["dnb_expr"],
-            data["dnb_coords"],
+            coords_um,
             data["dnb_labels"],
             data["cell_ids"],
-            empty_bin_size=config["empty_bin_size"],
-            coordinate_scale=config["coordinate_scale"],
+            empty_bin_size=config["empty_bin_size_um"],
+            coordinate_scale=1.0,
         )
+        prep["spatial_unit"] = "micrometre"
+        prep["source_coordinate_scale_to_um"] = coordinate_scale_to_um
+        prep["empty_bin_size_um"] = float(config["empty_bin_size_um"])
         write_official_input(
             input_dir, spot_expr, coords, tissue, barcodes, template_genes, None
         )
@@ -704,6 +740,7 @@ def run_real(name: str, args) -> dict:
         )
         diagnostics = {
             "dataset": tag,
+            "preparation_contract": PREPARATION_CONTRACT,
             "implementation": "official_R_package",
             "r_wrapper": str(R_SCRIPT.relative_to(PROJECT_ROOT)),
             "rscript": args.rscript,

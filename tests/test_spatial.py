@@ -4,10 +4,8 @@ import numpy as np
 import pytest
 from stambient.spatial import (
     build_spatial_distance_graph,
-    build_spatial_graph,
+    build_spatial_distance_graph_between,
     compute_distance_weights,
-    compute_local_density,
-    compute_neighbor_weighted_sum,
     distance_graph_to_weights,
 )
 
@@ -34,42 +32,48 @@ class TestDistanceWeights:
 
 class TestSpatialGraph:
     @pytest.mark.parametrize("metric", ["exponential", "gaussian", "inverse"])
-    def test_distance_topology_reweight_matches_direct_graph(self, metric):
+    def test_reweight_applies_kernel_to_distances(self, metric):
         coords = np.array([[0.0, 0.0], [3.0, 4.0], [20.0, 0.0]])
         distances = build_spatial_distance_graph(coords, max_radius=10.0)
-        reused = distance_graph_to_weights(distances, lam=7.0, metric=metric)
-        direct = build_spatial_graph(
-            coords, max_radius=10.0, lam=7.0, metric=metric
+        W = distance_graph_to_weights(distances, lam=7.0, metric=metric)
+        np.testing.assert_array_equal(W.indptr, distances.indptr)
+        np.testing.assert_array_equal(W.indices, distances.indices)
+        np.testing.assert_allclose(
+            W.data,
+            compute_distance_weights(distances.data, 7.0, metric),
+            rtol=0,
+            atol=0,
         )
-        np.testing.assert_array_equal(reused.indptr, direct.indptr)
-        np.testing.assert_array_equal(reused.indices, direct.indices)
-        np.testing.assert_allclose(reused.data, direct.data, rtol=0, atol=0)
 
-    def test_build_and_weighted_sum(self):
+    def test_build_distance_graph(self):
         coords = np.array([
             [0.0, 0.0],
             [10.0, 0.0],
             [0.0, 10.0],
             [100.0, 100.0],  # far away
         ])
-        W = build_spatial_graph(coords, max_radius=20.0, lam=10.0, metric="exponential")
+        distances = build_spatial_distance_graph(coords, max_radius=20.0)
 
-        # Should be symmetric, no diagonal
-        assert W.shape == (4, 4)
-        assert W[0, 0] == 0
-        assert W[0, 1] > 0  # distance 10
-        assert W[0, 2] > 0  # distance 10
-        assert W[0, 3] == 0  # distance > 20
-        assert W[1, 2] > 0  # distance ~14.1
+        # Should be symmetric, no diagonal, values are raw distances
+        assert distances.shape == (4, 4)
+        assert distances[0, 0] == 0
+        assert distances[0, 1] == pytest.approx(10.0)
+        assert distances[0, 2] == pytest.approx(10.0)
+        assert distances[0, 3] == 0  # distance > 20
+        assert distances[1, 2] == pytest.approx(np.sqrt(200.0))
 
-    def test_weighted_sum(self):
+        W = distance_graph_to_weights(distances, lam=10.0, metric="exponential")
+        assert W[0, 1] == pytest.approx(np.exp(-1.0))
+
+    def test_neighbor_weighted_sum_via_dot(self):
         coords = np.array([
             [0.0, 0.0],
             [10.0, 0.0],
         ])
-        W = build_spatial_graph(coords, max_radius=20.0, lam=10.0, metric="exponential")
+        distances = build_spatial_distance_graph(coords, max_radius=20.0)
+        W = distance_graph_to_weights(distances, lam=10.0, metric="exponential")
         source = np.array([5.0, 3.0])
-        result = compute_neighbor_weighted_sum(W, source)
+        result = W.dot(source)
 
         # For bin 0: w(10) * 3.0 = exp(-1) * 3.0
         assert result[0] == pytest.approx(np.exp(-1.0) * 3.0)
@@ -77,30 +81,16 @@ class TestSpatialGraph:
         assert result[1] == pytest.approx(np.exp(-1.0) * 5.0)
 
 
-class TestLocalDensity:
-    def test_uniform_density(self):
-        coords = np.array([
-            [0.0, 0.0],
-            [5.0, 0.0],
-            [10.0, 0.0],
-        ])
-        n_cell = np.array([10, 10, 10])
-        n_total = np.array([20, 20, 20])
-        beta = compute_local_density(coords, n_cell, n_total, local_radius=20.0)
+class TestCrossGraph:
+    def test_between_shapes_and_distances(self):
+        coords_a = np.array([[0.0, 0.0], [10.0, 0.0]])
+        coords_b = np.array([[5.0, 0.0], [100.0, 0.0]])
+        distances = build_spatial_distance_graph_between(
+            coords_a, coords_b, max_radius=20.0
+        )
 
-        # All bins see all others → same density
-        assert np.allclose(beta, 0.5)
-
-    def test_sparse_density(self):
-        coords = np.array([
-            [0.0, 0.0],
-            [100.0, 0.0],
-        ])
-        n_cell = np.array([10, 0])
-        n_total = np.array([10, 10])
-        beta = compute_local_density(coords, n_cell, n_total, local_radius=50.0)
-
-        # bin 0: only sees itself → 10/10 = 1.0
-        # bin 1: only sees itself → 0/10 = 0.0
-        assert beta[0] == 1.0
-        assert beta[1] == 0.0
+        assert distances.shape == (2, 2)
+        assert distances[0, 0] == pytest.approx(5.0)
+        assert distances[1, 0] == pytest.approx(5.0)
+        assert distances[0, 1] == 0  # distance 100 > 20
+        assert distances[1, 1] == 0  # distance 90 > 20

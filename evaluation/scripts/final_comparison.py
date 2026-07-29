@@ -24,6 +24,9 @@ except ImportError as exc:
 from evaluation.synthetic import generate_synthetic_data, SCENARIOS
 from scipy.spatial import cKDTree
 
+STEREOSEQ_PITCH_UM = 0.5
+DEFAULT_EMPTY_BIN_SIZE_UM = 25.0
+
 # Optional line-by-line memory profiler; falls back to no-op if not installed.
 try:
     from memory_profiler import profile
@@ -184,7 +187,6 @@ def run_synthetic_comparison(
             n_lambda_genes=min(50, dnb_expr.shape[0]),
             r2_threshold=r2_threshold_sp,
             lambda_grid=lambda_grid_sp,
-            use_local_density=False,
             cell_based=True,
             self_confidence_penalty=False,
             verbose=False,
@@ -513,8 +515,10 @@ def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2
     dnb_expr = data['dnb_expr']
     dnb_coords = data['dnb_coords']
     dnb_labels = data['dnb_labels']
+    dnb_coords_um = dnb_coords * STEREOSEQ_PITCH_UM
     gene_names = data['gene_names']
     cell_ids = np.array(data['cell_ids'])
+    ann_map = data['ann_map']
     sstin_set = data['sstin_set']
     sst_gene = "AMEX60DD003175"
 
@@ -526,7 +530,7 @@ def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2
     for c in range(n_cells):
         m = dnb_labels == cell_ids[c]
         if m.sum():
-            cc[c] = dnb_coords[m].mean(axis=0)
+            cc[c] = dnb_coords_um[m].mean(axis=0)
     neighbor_mask, other_mask = compute_neighbor_stats(cc, sstin_mask)
 
     # Select genes: top n_genes by total expression, ensure SST is included
@@ -586,12 +590,15 @@ def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2
         else:
             max_radius_sp = max_radius
         model = SPARKLE(
-            bin_size=50, max_radius=max_radius_sp, n_high_genes=n_high, n_lambda_genes=min(100, sub_all.shape[0]),
+            bin_size=DEFAULT_EMPTY_BIN_SIZE_UM, max_radius=max_radius_sp,
+            n_high_genes=n_high, n_lambda_genes=min(100, sub_all.shape[0]),
             r2_threshold=r2_threshold_sp, lambda_grid=lambda_grid_sp,
-            use_local_density=False, cell_based=True, verbose=True,
+            cell_based=True, verbose=True,
             use_gpu=use_gpu,
         )
-        sp_corr, sp_diag = model.fit_transform_from_dnb(sub_all, dnb_coords, dnb_labels)
+        sp_corr, sp_diag = model.fit_transform_from_dnb(
+            sub_all, dnb_coords_um, dnb_labels
+        )
         sp_t = time.time() - t0
         if hasattr(sp_corr, 'toarray'):
             sp_corr = sp_corr.toarray()
@@ -653,7 +660,7 @@ def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2
     print(f"  {'Raw':<18} {r_si:7.1f} {r_sn:7.1f} {r_so:7.1f} {r_si/r_sn:7.2f}x {r_no:7.2f}x {'-':>7} {'-':>7}")
 
     for name, vals in results.items():
-        if name.endswith('_full'):
+        if name.endswith('_full') or name == 'sp_var_data':
             continue
         si = vals[sstin_mask].mean()
         sn = vals[neighbor_mask].mean()
@@ -711,6 +718,16 @@ def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2
             "sstNbr": float(sst_vals[neighbor_mask].mean()) if neighbor_mask.any() else None,
             "sstOth": float(sst_vals[other_mask].mean()) if other_mask.any() else None,
         }
+        if method_name == "SPARKLE":
+            metrics["methods"][method_name].update({
+                "runtime": float(sp_t),
+                "lambda": float(sp_diag["lambda_estimated"]),
+                "bin_size_um": float(sp_diag["bin_size"]),
+                "n_empty_bins": int(sp_diag["n_empty_bins"]),
+                "empty_bin_dnb_count_max": int(
+                    sp_diag["empty_bin_dnb_count_max"]
+                ),
+            })
     save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
 
 
@@ -729,7 +746,15 @@ def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None
     results = {}
 
     if 'sparkle' in methods:
-        corrected, diag = run_sparkle_method(sub, n_high_genes=n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, max_radius=max_radius, use_gpu=use_gpu)
+        corrected, diag = run_sparkle_method(
+            sub,
+            coordinate_scale_to_um=STEREOSEQ_PITCH_UM,
+            n_high_genes=n_high_genes,
+            lambda_grid=lambda_grid,
+            r2_threshold=r2_threshold,
+            max_radius=max_radius,
+            use_gpu=use_gpu,
+        )
         if corrected is not None:
             results['SPARKLE'] = {'corrected': corrected, 'diag': diag}
 
@@ -827,7 +852,15 @@ def run_mousebrain_comparison(data, sub, n_genes=200, methods=None, n_high_genes
     results = {}
 
     if 'sparkle' in methods:
-        corrected, diag = run_sparkle_method(sub, n_high_genes=n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, max_radius=max_radius, use_gpu=use_gpu)
+        corrected, diag = run_sparkle_method(
+            sub,
+            coordinate_scale_to_um=STEREOSEQ_PITCH_UM,
+            n_high_genes=n_high_genes,
+            lambda_grid=lambda_grid,
+            r2_threshold=r2_threshold,
+            max_radius=max_radius,
+            use_gpu=use_gpu,
+        )
         if corrected is not None:
             results['SPARKLE'] = {'corrected': corrected, 'diag': diag}
 
@@ -888,6 +921,15 @@ def run_mousebrain_comparison(data, sub, n_genes=200, methods=None, n_high_genes
                 "de_genes": r.get('mousebrain_de_genes'),
                 "class_spearman": r.get('mousebrain_class_spearman'),
             }
+            if method_name == "SPARKLE":
+                metrics["methods"][method_name].update({
+                    "lambda": float(r["diag"]["lambda_estimated"]),
+                    "bin_size_um": float(r["diag"]["bin_size"]),
+                    "n_empty_bins": int(r["diag"]["n_empty_bins"]),
+                    "empty_bin_dnb_count_max": int(
+                        r["diag"]["empty_bin_dnb_count_max"]
+                    ),
+                })
     save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
 
     # Summary
@@ -1280,7 +1322,19 @@ def _build_sparkle_var_data(n_total_genes: int, diag: dict, r2_threshold: float)
 
 
 @profile
-def run_sparkle_method(sub, verbose=True, bin_size_um=25.0, spot_pitch_um=0.5, n_high_genes=500, lambda_grid=None, r2_threshold=None, max_radius=None, use_gpu=False, gpu_dtype="float64", gpu_gene_batch_size=None):
+def run_sparkle_method(
+    sub,
+    verbose=True,
+    bin_size_um=DEFAULT_EMPTY_BIN_SIZE_UM,
+    coordinate_scale_to_um=1.0,
+    n_high_genes=500,
+    lambda_grid=None,
+    r2_threshold=None,
+    max_radius=None,
+    use_gpu=False,
+    gpu_dtype="float64",
+    gpu_gene_batch_size=None,
+):
     """运行 SPARKLE（本方法）。
 
     核心流程：
@@ -1292,8 +1346,9 @@ def run_sparkle_method(sub, verbose=True, bin_size_um=25.0, spot_pitch_um=0.5, n
       6. cell-level ambient 校正（含 self-confidence penalty）
 
     参数：
-      bin_size_um=25.0     — 空 bin 目标尺寸（µm）
-      spot_pitch_um=0.5     — DNB 间距（Stereo-seq: 0.5µm, Visium HD: 2µm）
+      bin_size_um=25.0     — 空 bin 边长（µm）
+      coordinate_scale_to_um
+                           — 输入坐标乘以该值后转换为 µm；已是 µm 时用 1
       max_radius=300       — 空间邻域搜索半径（µm）
       r2_threshold=0.01    — α 估计的 R² 阈值
       lambda_grid          — λ 候选值列表（µm）
@@ -1307,12 +1362,19 @@ def run_sparkle_method(sub, verbose=True, bin_size_um=25.0, spot_pitch_um=0.5, n
         r2_threshold = 0.01
     if max_radius is None:
         max_radius = 300.0
-    if max_radius is None:
-        max_radius = 300.0
-    bin_size = max(1, int(bin_size_um / spot_pitch_um + 0.5))  # rounds 25/2=12.5→13
-    print(f"\n  SPARKLE (cell_based + penalty, bin={bin_size} DNBs ≈ {bin_size*spot_pitch_um:.0f}µm, n_high={n_high_genes})...")
+    if not np.isfinite(coordinate_scale_to_um) or coordinate_scale_to_um <= 0:
+        raise ValueError("coordinate_scale_to_um must be positive and finite")
+    if not np.isfinite(bin_size_um) or bin_size_um <= 0:
+        raise ValueError("bin_size_um must be positive and finite")
+    print(
+        f"\n  SPARKLE (cell_based + penalty, bin={bin_size_um:g}µm, "
+        f"coordinate_scale={coordinate_scale_to_um:g}µm/unit, "
+        f"n_high={n_high_genes})..."
+    )
     dnb_expr = sub['dnb_expr']
-    dnb_coords = sub['dnb_coords']
+    dnb_coords_um = np.asarray(sub['dnb_coords'], dtype=np.float64)
+    if coordinate_scale_to_um != 1.0:
+        dnb_coords_um = dnb_coords_um * coordinate_scale_to_um
     dnb_labels = sub['dnb_labels']
 
     # 空 DNB 检查：SPARKLE 必须有空 DNB 作为 ambient probe
@@ -1322,18 +1384,20 @@ def run_sparkle_method(sub, verbose=True, bin_size_um=25.0, spot_pitch_um=0.5, n
         return None, {'error': 'no_empty_dnbs', 'runtime': 0}
 
     model = SPARKLE(
-        bin_size=bin_size, distance_metric="exponential", max_radius=max_radius,
+        bin_size=bin_size_um, distance_metric="exponential", max_radius=max_radius,
         n_high_genes=min(n_high_genes, dnb_expr.shape[0]),
         n_lambda_genes=min(100, dnb_expr.shape[0]),
         r2_threshold=r2_threshold,
         lambda_grid=lambda_grid,
-        use_local_density=False, cell_based=True, verbose=verbose,
+        cell_based=True, verbose=verbose,
         use_gpu=use_gpu,
         gpu_dtype=gpu_dtype,
         gpu_gene_batch_size=gpu_gene_batch_size,
     )
     t0 = time.time()
-    corrected, diag = model.fit_transform_from_dnb(dnb_expr, dnb_coords, dnb_labels)
+    corrected, diag = model.fit_transform_from_dnb(
+        dnb_expr, dnb_coords_um, dnb_labels
+    )
     elapsed = time.time() - t0
     if hasattr(corrected, 'toarray'):
         corrected = corrected.toarray()
@@ -1832,8 +1896,8 @@ def load_visiumhd_data(x_range=None, y_range=None, n_genes=None, verbose=True,
     """Load Visium HD human colon cancer data at 2µm pixel resolution.
 
     Keeps native 2µm pixels as DNBs (matching Stereo-seq's 500nm DNB concept).
-    SPARKLE bin_size=13 will produce ~26µm empty bins, comparable to
-    Stereo-seq's bin_size=50 at 500nm = 25µm.
+    Coordinates are returned in µm, so SPARKLE receives a 25-µm bin side
+    directly, matching the 25-µm empty bins used for Stereo-seq.
 
     Optimized: dict→array pixel lookup, COO accumulation, vectorized per-gene ops.
 
@@ -2253,7 +2317,7 @@ def load_crc_data(segmentation="proseg", x_range=None, y_range=None, verbose=Tru
     }
 
 
-def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None, dataset_tag="visiumhd", spot_pitch_um=2.0, use_gpu=False):
+def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None, lambda_grid=None, r2_threshold=None, save_h5ad=True, max_radius=None, dataset_tag="visiumhd", use_gpu=False):
     """Run the shared comparison pipeline for Visium HD-like 2-µm spots."""
     if methods is None:
         methods = ['sparkle', 'soupx', 'decontx']
@@ -2268,7 +2332,15 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
     results = {}
 
     if 'sparkle' in methods:
-        corrected, diag = run_sparkle_method(sub, spot_pitch_um=spot_pitch_um, n_high_genes=n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, max_radius=max_radius, use_gpu=use_gpu)
+        corrected, diag = run_sparkle_method(
+            sub,
+            coordinate_scale_to_um=1.0,
+            n_high_genes=n_high_genes,
+            lambda_grid=lambda_grid,
+            r2_threshold=r2_threshold,
+            max_radius=max_radius,
+            use_gpu=use_gpu,
+        )
         if corrected is not None:
             results['SPARKLE'] = {'corrected': corrected, 'diag': diag}
 

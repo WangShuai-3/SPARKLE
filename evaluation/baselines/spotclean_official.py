@@ -62,10 +62,10 @@ def prepare_spotclean_spots(
     background spots. Both spot types use their arithmetic coordinate centroids.
     Empty-bin counts are literal sums; no exposure or area scaling is applied.
     """
-    if empty_bin_size <= 0:
-        raise ValueError("empty_bin_size must be positive")
-    if coordinate_scale <= 0:
-        raise ValueError("coordinate_scale must be positive")
+    if not np.isfinite(empty_bin_size) or empty_bin_size <= 0:
+        raise ValueError("empty_bin_size must be positive and finite")
+    if not np.isfinite(coordinate_scale) or coordinate_scale <= 0:
+        raise ValueError("coordinate_scale must be positive and finite")
     if not issparse(dnb_expr):
         dnb_expr = csr_matrix(dnb_expr)
     else:

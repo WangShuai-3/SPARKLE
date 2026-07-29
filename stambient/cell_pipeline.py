@@ -21,7 +21,6 @@ from .spatial import (
     distance_graph_to_weights,
     DistanceMetric,
 )
-from .estimation import _expression_weight as _ewap_source
 from .gpu import (
     resolve_gpu,
     choose_gpu_gene_batch_size,
@@ -31,6 +30,28 @@ from .gpu import (
     to_cpu,
     to_gpu,
 )
+
+
+def _expression_weight(source: np.ndarray) -> np.ndarray:
+    """Expression-weight ambient source to suppress non-expressing cells.
+
+    W(s) = s / (s + s_median) where s_median is the median of positive rates.
+    This is a soft sigmoid: high-expressors weight → 1, low-expressors → 0.5
+    or lower, preventing non-expressing cells from diluting the signal.
+
+    For cell-type-specific genes (e.g., SST): non-expressing cells
+    (rate ~0.005) get w ≈ 0.5 when median = 0.005; expressing cells
+    (rate ~0.17) get w ≈ 0.97 → 2× relative weight boost.
+    For housekeeping genes (uniform ~0.15): all cells get w ≈ 0.5.
+    """
+    positive = source[source > 0]
+    if len(positive) == 0:
+        return np.zeros_like(source)
+    s_median = np.median(positive)
+    if s_median <= 0:
+        return source
+    weight = source / (source + s_median)
+    return source * weight  # s * s/(s+median) = s²/(s+median)
 
 
 def _self_confidence_weight(source_c: np.ndarray, mode: str = "1/(1+s/p90)") -> np.ndarray:
@@ -69,14 +90,21 @@ def _self_confidence_weight(source_c: np.ndarray, mode: str = "1/(1+s/p90)") -> 
 def _bin_empty_dnbs(
     dnb_coords: np.ndarray,
     dnb_labels: np.ndarray,
-    bin_size: int,
+    bin_size: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Assign empty DNBs to bins in one pass.
+    """Assign empty DNBs to square spatial bins in one pass.
+
+    ``dnb_coords`` and ``bin_size`` must use the same spatial unit.  The
+    public API requires micrometres, but keeping this helper unit-agnostic is
+    useful for adapters that scale the resulting centroids afterwards.
 
     Returns bin centroids/areas plus two aligned arrays describing the sparse
     DNB-to-bin mapping.  Returning the mapping directly avoids the former
     per-bin boolean scan, whose complexity was O(n_empty * n_bins).
     """
+    if not np.isfinite(bin_size) or bin_size <= 0:
+        raise ValueError("bin_size must be a positive finite spatial length")
+
     empty_mask = dnb_labels < 0
     n_empty = empty_mask.sum()
     if n_empty == 0:
@@ -90,12 +118,13 @@ def _bin_empty_dnbs(
     x_max, y_max = empty_coords.max(axis=0)
 
     n_bins_x = max(1, int(np.ceil((x_max - x_min) / bin_size)))
+    n_bins_y = max(1, int(np.ceil((y_max - y_min) / bin_size)))
 
     bin_x = np.floor((empty_coords[:, 0] - x_min) / bin_size).astype(np.int64)
     bin_y = np.floor((empty_coords[:, 1] - y_min) / bin_size).astype(np.int64)
     bin_x = np.clip(bin_x, 0, n_bins_x - 1)
-    bin_y = np.clip(bin_y, 0, n_bins_x - 1)  # reuse n_bins_x for both dims
-    bin_ids = bin_x.astype(np.int64) * 100000 + bin_y.astype(np.int64)
+    bin_y = np.clip(bin_y, 0, n_bins_y - 1)
+    bin_ids = bin_x * np.int64(n_bins_y) + bin_y
 
     _, inverse = np.unique(bin_ids, return_inverse=True)
     inverse = inverse.astype(np.int64, copy=False)
@@ -119,7 +148,7 @@ def cell_pipeline_fit(
     dnb_expr: np.ndarray,
     dnb_coords: np.ndarray,
     dnb_labels: np.ndarray,
-    bin_size: int = 50,
+    bin_size: float = 50.0,
     distance_metric: DistanceMetric = "exponential",
     max_radius: float = 200.0,
     n_high_genes: Optional[int] = None,
@@ -138,8 +167,12 @@ def cell_pipeline_fit(
 
     Args:
         dnb_expr: [genes × DNBs] DNB-level expression.
-        dnb_coords: [DNBs × 2] coordinates.
+        dnb_coords: [DNBs × 2] coordinates in micrometres.
         dnb_labels: [DNBs] cell IDs (-1 for empty).
+        bin_size: Side length of each square empty-space bin in micrometres.
+        max_radius: Spatial-graph truncation radius in micrometres.
+        lambda_grid: Candidate spatial-decay lengths in micrometres. If None,
+            use the default physical-length grid.
         n_high_genes: Number of top high-expression genes to select for
             correction. If None, all genes are used.
         ... (standard SPARKLE params)
@@ -303,7 +336,7 @@ def cell_pipeline_fit(
         cell_source[i] = np.divide(cell_expr[g_idx], cell_areas,
                                     out=np.zeros(n_cells), where=cell_areas > 0)
         if use_expr_weight:
-            cell_source[i] = _ewap_source(cell_source[i])
+            cell_source[i] = _expression_weight(cell_source[i])
 
     best_lam = lambda_grid[0]
     best_rss = np.inf
@@ -405,7 +438,7 @@ def cell_pipeline_fit(
                 where=cell_areas[None, :] > 0,
             )
             if use_expr_weight:
-                sources_batch = np.array([_ewap_source(s) for s in sources_batch])
+                sources_batch = np.array([_expression_weight(s) for s in sources_batch])
             y_obs_batch = empty_bin_expr[batch_gene_indices].T
 
             sources_gpu = to_gpu(sources_batch.T, gpu, dtype=storage_dtype)
@@ -452,7 +485,7 @@ def cell_pipeline_fit(
             where=cell_areas[None, :] > 0,
         )
         if use_expr_weight:
-            sources = np.array([_ewap_source(s) for s in sources])
+            sources = np.array([_expression_weight(s) for s in sources])
         y_obs_all = empty_bin_expr[gene_indices].T
 
         # Batched weighted sums and OLS for all genes
@@ -552,7 +585,7 @@ def cell_pipeline_fit(
                     where=cell_areas[None, :] > 0,
                 )
                 if use_expr_weight:
-                    corr_sources = np.array([_ewap_source(s) for s in corr_sources])
+                    corr_sources = np.array([_expression_weight(s) for s in corr_sources])
                 corr_sources_gpu = to_gpu(
                     corr_sources.T, gpu, dtype=storage_dtype
                 )
@@ -589,7 +622,7 @@ def cell_pipeline_fit(
                 where=cell_areas[None, :] > 0,
             )
             if use_expr_weight:
-                corr_sources = np.array([_ewap_source(s) for s in corr_sources])
+                corr_sources = np.array([_expression_weight(s) for s in corr_sources])
             # Single sparse-dense matrix multiply for all corrected genes
             neighbor_contribs = W_cell_to_cell.dot(corr_sources.T)
             ambient = alphas[cpos][None, :] * cell_areas[:, None] * neighbor_contribs
@@ -604,6 +637,9 @@ def cell_pipeline_fit(
     diagnostics = {
         "lambda_estimated": best_lam,
         "lambda_grid": lambda_grid,
+        "spatial_unit": "micrometre",
+        "bin_size": float(bin_size),
+        "max_radius": float(max_radius),
         "n_genes_corrected": n_corrected,
         "n_high_genes_selected": n_genes_use,
         "r2_threshold": r2_threshold,
@@ -615,6 +651,9 @@ def cell_pipeline_fit(
         "n_cells": n_cells,
         "n_empty_bins": n_empty_bins,
         "empty_bin_areas_mean": float(empty_bin_areas.mean()) if n_empty_bins > 0 else 0,
+        "empty_bin_dnb_count_min": int(empty_bin_areas.min()) if n_empty_bins > 0 else 0,
+        "empty_bin_dnb_count_median": float(np.median(empty_bin_areas)) if n_empty_bins > 0 else 0,
+        "empty_bin_dnb_count_max": int(empty_bin_areas.max()) if n_empty_bins > 0 else 0,
         "cell_areas_mean": float(cell_areas.mean()),
         "compute_backend": "gpu" if gpu is not None else "cpu",
         "gpu_requested": bool(use_gpu),

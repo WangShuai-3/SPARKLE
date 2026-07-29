@@ -50,7 +50,7 @@ data = load_RYTools_data(
     empty_labels={0, -1},     # only relevant if your scGEM happens to contain background rows
     gem_sep=None,             # auto-detect tab/comma
     scgem_sep=None,           # auto-detect tab/comma
-    pitch_um=None,            # set to 0.5 if x/y are raw Stereo-seq DNB indices
+    pitch_um=0.5,             # convert raw Stereo-seq DNB indices to µm
     verbose=True,
 )
 
@@ -67,13 +67,12 @@ print(f"Loaded {n_genes} genes, {n_dnbs} DNBs, {n_cells} cells.")
 # ---------------------------------------------------------------------------
 model = SPARKLE(
     cell_based=True,          # keep cells intact, bin empty DNBs separately
-    bin_size=50,              # empty-bin size in DNB units (25 µm if pitch=0.5)
-    max_radius=200.0,           # µm
+    bin_size=25.0,            # empty-bin side length in µm
+    max_radius=200.0,         # µm
     n_high_genes=500,
     n_lambda_genes=50,
     r2_threshold=0.05,
     lambda_grid=[10, 20, 30, 50, 70, 100, 150, 200, 300],
-    use_local_density=False,  # recommended default
     verbose=True,
 )
 
@@ -301,9 +300,10 @@ data = load_RYTools_data(
     gem_path="sample.gem.gz",
     scgem_path="sample.scgem.gz",
     cell_label_col="cell",
+    pitch_um=0.5,
 )
 
-model = SPARKLE(cell_based=True, bin_size=50, max_radius=200.0)
+model = SPARKLE(cell_based=True, bin_size=25.0, max_radius=200.0)
 corrected, diag = model.fit_transform_from_dnb(
     data["spot_expr"], data["spot_coords"], data["spot_labels"]
 )

@@ -8,9 +8,9 @@ empty-bin sizes.  For each bin size we record the SST specificity metric
 better ambient SST signal is confined to the true SST interneurons rather than
 leaking onto neighbouring cells.
 
-Bin sizes are specified in micrometres.  Axolotl Stereo-seq DNB pitch is 0.5 µm,
-so ``bin_size (DNB) = round(bin_size_um / 0.5)``.  The default sweep is
-10–50 µm in 5 µm steps.  Only SPARKLE is run.
+Bin sizes are specified and passed to SPARKLE in micrometres. Axolotl
+Stereo-seq coordinates are multiplied by the 0.5-µm DNB pitch before fitting.
+The default sweep is 10–50 µm in 5 µm steps. Only SPARKLE is run.
 
 Usage:
     python evaluation/scripts/benchmark_binsize_axolotl.py \
@@ -105,23 +105,24 @@ def _score(sst_vals, ev):
     }
 
 
-def _run_sparkle_binsize(data, bin_size_dnb, n_high_genes, lambda_grid,
+def _run_sparkle_binsize(data, bin_size_um, n_high_genes, lambda_grid,
                          r2_threshold, max_radius):
     """Run SPARKLE for one bin size; return corrected matrix and diagnostics."""
     model = SPARKLE(
-        bin_size=bin_size_dnb,
+        bin_size=bin_size_um,
         max_radius=max_radius,
         n_high_genes=n_high_genes,
         n_lambda_genes=min(100, data["dnb_expr"].shape[0]),
         r2_threshold=r2_threshold,
         lambda_grid=lambda_grid,
-        use_local_density=False,
         cell_based=True,
         verbose=False,
     )
     t0 = time.time()
     corrected, diag = model.fit_transform_from_dnb(
-        data["dnb_expr"], data["dnb_coords"], data["dnb_labels"]
+        data["dnb_expr"],
+        data["dnb_coords"] * DNB_PITCH_UM,
+        data["dnb_labels"],
     )
     runtime = time.time() - t0
     if hasattr(corrected, "toarray"):
@@ -229,7 +230,7 @@ def main():
     for bs_um in bin_sizes_um:
         bs_dnb = max(1, int(round(bs_um / DNB_PITCH_UM)))
         corrected, diag, runtime, lam = _run_sparkle_binsize(
-            data, bs_dnb, n_high, args.lambda_grid, args.r2_threshold, args.max_radius,
+            data, bs_um, n_high, args.lambda_grid, args.r2_threshold, args.max_radius,
         )
         m = _score(corrected[ev["sst_idx"]], ev)
         row = {

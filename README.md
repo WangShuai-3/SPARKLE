@@ -96,10 +96,10 @@ ordered by the sorted unique non-negative labels. Keep the corresponding
 from stambient import SPARKLE
 from stambient.io_utils import load_stereoseq
 
-data = load_stereoseq("sample.gem.gz")
+data = load_stereoseq("sample.gem.gz", pitch_um=0.5)
 
 model = SPARKLE(
-    bin_size=50,
+    bin_size=25.0,
     max_radius=200,
     lambda_grid=[10, 30, 50, 70, 100, 150, 200, 300],
     r2_threshold=0.01,
@@ -122,7 +122,7 @@ leakage is continuous, corrected values are not restricted to integers.
 
 ```python
 model = SPARKLE(
-    bin_size=50,
+    bin_size=25.0,
     max_radius=200,
     lambda_grid=[10, 30, 50, 70, 100, 150, 200, 300],
     r2_threshold=0.01,
@@ -196,15 +196,17 @@ data = load_visiumhd("Visium_HD_feature_slice.h5")
 The feature-slice file must contain a cell-segmentation mask. Capture squares
 not covered by the mask are assigned `-1`.
 
-Platform coordinate scales differ. For example, a bin side of 50 units on a
-0.5-µm Stereo-seq grid corresponds to 25 µm, whereas a comparable side on a
-2-µm Visium HD grid is approximately 12–13 squares.
+Loaders must return coordinates in micrometres before fitting. For raw
+Stereo-seq DNB-index coordinates, pass `pitch_um=0.5` to the loader. Visium HD
+coordinates are converted to micrometres by `load_visiumhd`. Once loaded,
+`bin_size=25.0` means the same 25-µm bin side on both platforms; do not divide
+it by the capture-location pitch again.
 
 ## Main parameters
 
 | Parameter | Default | Role |
 |---|---:|---|
-| `bin_size` | `50` | Side length used only to aggregate out-of-mask capture locations |
+| `bin_size` | `50.0` | Bin side length in µm, used only to aggregate out-of-mask capture locations |
 | `max_radius` | `200.0` | Truncation radius of the sparse spatial graphs |
 | `lambda_grid` | `[10,20,30,50,70,100,150,200,300]` | Candidate sample-level spatial decay scales |
 | `n_high_genes` | `None` | Highest-information genes eligible for fitting and correction; `None` uses all genes |

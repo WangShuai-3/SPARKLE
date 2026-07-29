@@ -368,8 +368,9 @@ def load_RYTools_data(
         gem_sep: Field delimiter for the GEM file. Auto-detected if None.
         scgem_sep: Field delimiter for the scGEM file. Auto-detected if None.
         pitch_um: If provided, scale integer coordinates by this factor to
-            convert them to micrometers.  Defaults to ``1.0`` (keep raw
-            coordinates). Use ``0.5`` for Stereo-seq DNB-index coordinates.
+            convert them to micrometres. If None, coordinates are assumed to
+            already be in micrometres and are unchanged. Use ``0.5`` for raw
+            Stereo-seq DNB-index coordinates.
         nrows_per_chunk: Number of rows to read per chunk when scanning the
             (potentially very large) GEM file.
         verbose: Print progress messages.
@@ -408,10 +409,13 @@ def load_RYTools_data(
         verbose=verbose,
     )
 
-    if pitch_um is not None and pitch_um != 1.0:
-        if verbose:
-            print(f"Scaling coordinates by pitch_um={pitch_um}...")
-        spot_coords = spot_coords * pitch_um
+    if pitch_um is not None:
+        if not np.isfinite(pitch_um) or pitch_um <= 0:
+            raise ValueError("pitch_um must be a positive finite scale")
+        if pitch_um != 1.0:
+            if verbose:
+                print(f"Scaling coordinates by pitch_um={pitch_um}...")
+            spot_coords = spot_coords * pitch_um
 
     if verbose:
         n_empty = int((spot_labels < 0).sum())
@@ -699,6 +703,7 @@ def load_stereoseq(
     cell_label_col: str = "cell",
     empty_labels: Optional[Union[int, List[int], Set[int]]] = None,
     sep: Optional[str] = None,
+    pitch_um: Optional[float] = None,
     verbose: bool = True,
 ) -> Dict[str, Any]:
     """Load Stereo-seq GEM data from a text file.
@@ -719,13 +724,16 @@ def load_stereoseq(
         empty_labels: Values that indicate an empty/background DNB.  Defaults
             to ``{0, -1}``.  Can be a single int or a list/set of ints.
         sep: Field delimiter.  Auto-detected if None.
+        pitch_um: Spatial size of one raw coordinate unit in µm. Set to
+            ``0.5`` for unscaled Stereo-seq DNB-index coordinates. If None,
+            coordinates are assumed to already be in µm and are unchanged.
         verbose: Print progress messages.
 
     Returns:
         Dictionary with keys:
 
         - ``spot_expr``: [n_genes × n_spots] ``csr_matrix`` of UMI counts.
-        - ``spot_coords``: [n_spots × 2] spot coordinates.
+        - ``spot_coords``: [n_spots × 2] spot coordinates in µm.
         - ``spot_labels``: [n_spots] cell IDs; ``-1`` for empty spots.
         - ``gene_names``: array of gene names.
         - ``cell_ids``: sorted array of original cell IDs.
@@ -849,6 +857,14 @@ def load_stereoseq(
     cols = np.fromiter((k[1] for k in counts.keys()), dtype=np.int32, count=n_counts)
     data = np.fromiter(counts.values(), dtype=np.float64, count=n_counts)
     spot_expr = csr_matrix((data, (rows, cols)), shape=(n_genes, n_dnbs))
+
+    if pitch_um is not None:
+        if not np.isfinite(pitch_um) or pitch_um <= 0:
+            raise ValueError("pitch_um must be a positive finite scale")
+        if pitch_um != 1.0:
+            if verbose:
+                print(f"  Scaling coordinates by pitch_um={pitch_um}...")
+            dnb_coords = dnb_coords * pitch_um
 
     if verbose:
         n_empty = int((spot_labels < 0).sum())

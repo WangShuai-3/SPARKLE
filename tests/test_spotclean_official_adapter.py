@@ -35,6 +35,30 @@ def test_official_adapter_uses_cell_and_empty_bin_centroids_without_scaling(tmp_
     assert diagnostics["empty_bin_dnb_count_median"] == 2
 
 
+def test_official_adapter_preserves_portrait_background_grid():
+    x = np.arange(0.0, 20.0, 5.0)
+    y = np.arange(0.0, 50.0, 5.0)
+    xx, yy = np.meshgrid(x, y, indexing="ij")
+    empty_coords = np.column_stack((xx.ravel(), yy.ravel()))
+    coordinates = np.vstack(([2.5, 2.5], empty_coords))
+    labels = np.concatenate(([7], np.full(len(empty_coords), -1)))
+    expression = csr_matrix(np.ones((1, len(coordinates)), dtype=np.float64))
+
+    spots, centroids, tissue, _, diagnostics = prepare_spotclean_spots(
+        expression,
+        coordinates,
+        labels,
+        np.array([7]),
+        empty_bin_size=10.0,
+    )
+
+    assert diagnostics["n_background_spots"] == 10
+    assert spots.shape == (1, 11)
+    background = centroids[tissue == 0]
+    assert len(np.unique(background[:, 0])) == 2
+    assert len(np.unique(background[:, 1])) == 5
+
+
 def test_official_adapter_writes_csc_and_unit_slope_slide_metadata(tmp_path):
     spots = csr_matrix(np.array([[5, 12], [1, 6]], dtype=np.float64))
     centroids = np.array([[0.5, 1.5], [5.5, 6.5]])
@@ -80,7 +104,7 @@ def test_spatial_tiles_assign_each_tissue_core_once_and_keep_background_context(
     config = {
         "tile_grid": (2, 2),
         "tile_halo": 0.0,
-        "coordinate_scale": 1.0,
+        "source_coordinate_scale_to_um": 1.0,
         "x_range": (0, 2),
         "y_range": (0, 2),
     }

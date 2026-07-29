@@ -3,10 +3,10 @@
 
 SPARKLE normally estimates the global spatial decay length ``lambda`` via grid
 search.  This benchmark instead *forces* SPARKLE to use a series of fixed lambda
-values (via ``lambda_distance``) on a synthetic scenario with a KNOWN ground
-truth, then measures the RMSE reduction vs raw for each.  It answers: how stable
-is correction quality when lambda is mis-specified, and does the auto-estimated
-lambda land near the optimum / the true value?
+values (via single-element ``lambda_grid``) on a synthetic scenario with a KNOWN
+ground truth, then measures the RMSE reduction vs raw for each.  It answers:
+how stable is correction quality when lambda is mis-specified, and does the
+auto-estimated lambda land near the optimum / the true value?
 
 Default scenario: S2 "Medium multi-type (25% empty)", ground-truth lambda = 50 µm.
 
@@ -41,11 +41,11 @@ from evaluation.scripts.final_comparison import (
 def _run_sparkle_fixed_lambda(data, forced_lambda, r2_threshold, max_radius):
     """Run SPARKLE with a forced lambda (or auto if forced_lambda is None).
 
-    The cell-based pipeline estimates lambda via grid search and ignores the
-    ``lambda_distance`` argument, so to FORCE a lambda we pass a single-element
-    ``lambda_grid=[forced_lambda]`` (the grid 'search' can only pick that value,
-    while alpha and the spatial weights are still fit at that lambda).  When
-    ``forced_lambda`` is None we use the full default grid (auto estimation).
+    SPARKLE estimates lambda via grid search, so to FORCE a lambda we pass a
+    single-element ``lambda_grid=[forced_lambda]`` (the grid 'search' can only
+    pick that value, while alpha and the spatial weights are still fit at that
+    lambda).  When ``forced_lambda`` is None we use the full default grid
+    (auto estimation).
 
     Mirrors the synthetic SPARKLE recipe in final_comparison.run_synthetic_comparison
     (bin_size=25, cell_based, self_confidence_penalty=False).
@@ -64,7 +64,6 @@ def _run_sparkle_fixed_lambda(data, forced_lambda, r2_threshold, max_radius):
         n_lambda_genes=min(50, dnb_expr.shape[0]),
         r2_threshold=r2_threshold,
         lambda_grid=lambda_grid,
-        use_local_density=False,
         cell_based=True,
         self_confidence_penalty=False,
         verbose=False,
