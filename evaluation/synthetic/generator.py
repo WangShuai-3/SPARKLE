@@ -107,6 +107,7 @@ def generate_synthetic_data(
     n_cell_types: int = 1,
     marker_fraction: float = 0.0,
     cluster_strength: float = 0.5,
+    dropout_rate: float = 0.0,
     seed: int = 42,
 ) -> Dict[str, np.ndarray]:
     """Generate synthetic data.
@@ -129,6 +130,10 @@ def generate_synthetic_data(
         n_cell_types: Number of cell types.
         marker_fraction: Fraction of high genes that are cell-type-specific markers.
         cluster_strength: If >0 and n_cell_types>1, spatially cluster cell types.
+        dropout_rate: Fraction of UMIs randomly lost (binomial thinning),
+            simulating capture loss. Applied to the clean and ambient parts
+            independently; the ground truth is then defined as the observed
+            (thinned) clean expression. Default 0 (no dropout).
         seed: Random seed.
 
     Returns:
@@ -144,6 +149,10 @@ def generate_synthetic_data(
             params:       dict of generation parameters.
     """
     rng = np.random.RandomState(seed)
+    if not 0.0 <= dropout_rate < 1.0:
+        raise ValueError(
+            f"dropout_rate must be in [0, 1); got {dropout_rate}"
+        )
 
     # ── 1. DNB grid ──────────────────────────────────────────────────
     x_coords = np.arange(grid_width) * dnb_pitch
@@ -237,7 +246,11 @@ def generate_synthetic_data(
                 50.0, (len(gidx), len(cells_t))
             ).astype(np.float64)
 
-    # Marker genes: strong, cell-type-specific expression
+    # Marker genes: strong, cell-type-specific expression.  Markers are
+    # absent from every other cell type (exact zero ground truth), giving a
+    # present-vs-absent frequency contrast that marker-based detection
+    # methods (e.g. SoupX quickMarkers) can pick up.
+    marker_absent = np.zeros((n_genes, n_kept), dtype=bool)
     n_markers = int(round(n_high_genes * marker_fraction))
     if n_markers > 0 and n_cell_types > 1:
         marker_pool = np.arange(n_high_genes)
@@ -252,6 +265,9 @@ def generate_synthetic_data(
             true_expr[marker_genes[:, None], cells_t] += rng.poisson(
                 80.0, (len(marker_genes), len(cells_t))
             ).astype(np.float64)
+            not_t = np.where(cell_types != t)[0]
+            true_expr[marker_genes[:, None], not_t] = 0.0
+            marker_absent[marker_genes[:, None], not_t] = True
 
     # ── 6. DNB-level clean expression ────────────────────────────────
     dnb_expr_clean = np.zeros((n_genes, n_dnbs), dtype=np.float64)
@@ -267,6 +283,9 @@ def generate_synthetic_data(
             continue
         per_dnb_rate = true_expr[:, c] / n_dnbs_c
         per_dnb_rate = np.maximum(per_dnb_rate, 0.01)
+        # Keep absent markers at exactly zero: the 0.01 floor would
+        # otherwise re-introduce ~2 background counts per cell.
+        per_dnb_rate[marker_absent[:, c]] = 0.0
         dnb_expr_clean[:, mask] = rng.poisson(
             per_dnb_rate[:, None], (n_genes, n_dnbs_c)
         ).astype(np.float64)
@@ -348,6 +367,25 @@ def generate_synthetic_data(
                 np.maximum(ambient_per_empty, 0.0)
             ).astype(np.float64)
 
+    # ── 8. Dropout (random UMI loss) ─────────────────────────────────
+    # Real capture is lossy: abundant true molecules survive detection while
+    # sparse leaked counts often drop to zero.  Thin the clean and ambient
+    # parts independently (binomial per UMI) so that the ground truth can be
+    # defined as the *observed* clean expression; the RMSE evaluation then
+    # compares methods against a recoverable target.
+    if dropout_rate > 0:
+        keep_prob = 1.0 - dropout_rate
+        clean_observed = rng.binomial(
+            dnb_expr_clean.astype(np.int64), keep_prob
+        ).astype(np.float64)
+        ambient_observed = rng.binomial(
+            (dnb_expr - dnb_expr_clean).astype(np.int64), keep_prob
+        ).astype(np.float64)
+        dnb_expr = clean_observed + ambient_observed
+        for c in nonzero_cells:
+            mask = dnb_labels == c
+            true_expr[:, c] = clean_observed[:, mask].sum(axis=1)
+
     n_empty_final = int(empty_mask.sum())
     print(f"  Generated: {n_kept} cells, {n_dnbs} DNBs "
           f"({n_empty_final} empty {100*n_empty_final/n_dnbs:.1f}%, "
@@ -378,6 +416,7 @@ def generate_synthetic_data(
             "n_cell_types": n_cell_types,
             "marker_fraction": float(marker_fraction),
             "cluster_strength": float(cluster_strength),
+            "dropout_rate": float(dropout_rate),
             "seed": seed,
         },
     }

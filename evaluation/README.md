@@ -48,7 +48,10 @@ files.
 ## Synthetic data
 
 The generator uses a \(500\times500\) DNB grid, 0.5-µm DNB spacing, 500 genes,
-and 80 highly expressed genes. Every scenario contains multiple cell types
+and 80 highly expressed genes. Marker genes are strictly cell-type-specific
+in the ground truth, and a 95% UMI dropout is applied (binomial thinning of
+the clean and ambient parts independently); the correction ground truth is
+the observed clean expression. Every scenario contains multiple cell types
 and marker genes while varying one principal source of difficulty:
 
 | Scenario | Principal variation |
@@ -69,6 +72,13 @@ python evaluation/scripts/final_comparison.py \
   --all-scenarios \
   --methods sparkle,soupx,decontx
 ```
+
+For synthetic scenarios SoupX is run with `tfidfMin=0.2`: the scenarios use
+3–5 balanced cell types, so the best achievable marker tf-idf is
+\(\log(n_\mathrm{types})\approx 1.1\), and the default `tfidfMin=1.0` leaves
+no headroom once any background expression is present. If SoupX fails on a
+dataset, the failure is recorded explicitly as NaN metrics rather than
+substituted with a heuristic fallback.
 
 Run SpotClean through the Python wrapper for the official R package:
 

@@ -93,6 +93,7 @@ def load_synthetic_scenario_data(scenario_id="S1", seed=42):
         n_cell_types=scenario.get("n_cell_types", 1),
         marker_fraction=scenario.get("marker_fraction", 0.0),
         cluster_strength=scenario.get("cluster_strength", 0.5),
+        dropout_rate=scenario.get("dropout_rate", 0.0),
         seed=seed,
     )
 
@@ -204,7 +205,13 @@ def run_synthetic_comparison(
         print(f"\n[SoupX]")
         t0 = time.time()
         try:
-            sx_corr, sx_rho = run_soupx(dnb_expr, dnb_labels, verbose=False)
+            # Synthetic scenarios use 3-5 balanced cell types, so the best
+            # achievable tf-idf is log(n_types) ≈ 1.1; the default tfidfMin=1.0
+            # leaves no headroom once any background expression is present.
+            # tfidf_min=0.2 is the documented protocol choice for synthetic.
+            sx_corr, sx_rho = run_soupx(
+                dnb_expr, dnb_labels, tfidf_min=0.2, verbose=False
+            )
         except Exception as e:
             # No heuristic substitution: record the failure explicitly as NaN.
             sx_t = time.time() - t0

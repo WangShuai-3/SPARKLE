@@ -8,7 +8,9 @@ or spatial clustering strength).
 
 The scenarios are generated on a 500×500 DNB canvas (250 µm side at 0.5 µm
 pitch); cell counts are scaled so that even the sparsest scenario provides
-a few hundred cells.
+a few hundred cells. Marker genes are strictly cell-type-specific in the
+ground truth, and a 95% UMI dropout is applied to every scenario so that
+sparse leaked counts can drop to zero, mimicking real capture loss.
 """
 
 SCENARIOS = {
@@ -21,6 +23,7 @@ SCENARIOS = {
         "n_cell_types": 3,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "dropout_rate": 0.95,
     },
     "S2": {
         "name": "Medium multi-type (25% empty)",
@@ -31,6 +34,7 @@ SCENARIOS = {
         "n_cell_types": 3,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "dropout_rate": 0.95,
     },
     "S3": {
         "name": "Dense multi-type (10% empty)",
@@ -41,6 +45,7 @@ SCENARIOS = {
         "n_cell_types": 3,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "dropout_rate": 0.95,
     },
     "S4": {
         "name": "Short lambda multi-type (20 µm)",
@@ -51,6 +56,7 @@ SCENARIOS = {
         "n_cell_types": 3,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "dropout_rate": 0.95,
     },
     "S5": {
         "name": "Long lambda multi-type (500 µm)",
@@ -61,6 +67,7 @@ SCENARIOS = {
         "n_cell_types": 3,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "dropout_rate": 0.95,
     },
     "S6": {
         "name": "Weak alpha multi-type (<=0.005)",
@@ -71,6 +78,7 @@ SCENARIOS = {
         "n_cell_types": 3,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "dropout_rate": 0.95,
     },
     "S7": {
         "name": "Strong alpha multi-type (<=0.10)",
@@ -81,6 +89,7 @@ SCENARIOS = {
         "n_cell_types": 3,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "dropout_rate": 0.95,
     },
     "S8": {
         "name": "Very sparse multi-type (>50% empty)",
@@ -91,6 +100,7 @@ SCENARIOS = {
         "n_cell_types": 3,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "dropout_rate": 0.95,
     },
     "S9": {
         "name": "High marker fraction (50% markers)",
@@ -101,6 +111,7 @@ SCENARIOS = {
         "n_cell_types": 3,
         "marker_fraction": 0.50,
         "cluster_strength": 0.6,
+        "dropout_rate": 0.95,
     },
     "S10": {
         "name": "Many cell types (5 types)",
@@ -111,6 +122,7 @@ SCENARIOS = {
         "n_cell_types": 5,
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
+        "dropout_rate": 0.95,
     },
 }
 
