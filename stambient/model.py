@@ -25,7 +25,9 @@ class SPARKLE:
         Square-bin side length in μm used to aggregate out-of-mask capture
         locations (default 50).
     distance_metric : str
-        Weight function: 'exponential', 'gaussian', or 'inverse'.
+        Weight function: 'exponential', 'gaussian', or 'inverse'. The
+        'inverse' kernel does not use λ; the λ grid search is then skipped
+        and ``lambda_estimated`` is reported as None.
     max_radius : float
         Maximum neighbor search radius in μm.
     n_high_genes : int or None

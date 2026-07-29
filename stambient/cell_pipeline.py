@@ -172,7 +172,9 @@ def cell_pipeline_fit(
         bin_size: Side length of each square empty-space bin in micrometres.
         max_radius: Spatial-graph truncation radius in micrometres.
         lambda_grid: Candidate spatial-decay lengths in micrometres. If None,
-            use the default physical-length grid.
+            use the default physical-length grid. Ignored when
+            ``distance_metric='inverse'`` (that kernel does not use λ, so the
+            grid search is skipped and ``lambda_estimated`` is None).
         n_high_genes: Number of top high-expression genes to select for
             correction. If None, all genes are used.
         ... (standard SPARKLE params)
@@ -324,86 +326,100 @@ def cell_pipeline_fit(
 
     # ── 5. Estimate λ ──────────────────────────────────────────
     stage_started = perf_counter()
-    if verbose:
-        print(f"Estimating λ via grid search...")
 
-    n_lambda_use = min(n_lambda_genes, len(gene_indices))
-    lambda_gene_indices = gene_indices[:n_lambda_use]
+    if distance_metric == "inverse":
+        # The inverse kernel 1/(d+eps) has no λ dependence: every candidate
+        # would produce identical weights, so a grid search is meaningless.
+        best_lam = None
+        best_rss = np.nan
+        if verbose:
+            print(
+                "distance_metric='inverse' does not use λ; "
+                "skipping the λ grid search."
+            )
+    else:
+        if verbose:
+            print(f"Estimating λ via grid search...")
 
-    # Precompute cell source strengths: expression / area
-    cell_source = np.zeros((n_lambda_use, n_cells), dtype=np.float64)
-    for i, g_idx in enumerate(lambda_gene_indices):
-        cell_source[i] = np.divide(cell_expr[g_idx], cell_areas,
-                                    out=np.zeros(n_cells), where=cell_areas > 0)
-        if use_expr_weight:
-            cell_source[i] = _expression_weight(cell_source[i])
+        n_lambda_use = min(n_lambda_genes, len(gene_indices))
+        lambda_gene_indices = gene_indices[:n_lambda_use]
 
-    best_lam = lambda_grid[0]
-    best_rss = np.inf
-    w = empty_bin_areas.astype(np.float64)
-    y_obs_lambda = empty_bin_expr[lambda_gene_indices].T  # [n_empty_bins × n_lambda_use]
+        # Precompute cell source strengths: expression / area
+        cell_source = np.zeros((n_lambda_use, n_cells), dtype=np.float64)
+        for i, g_idx in enumerate(lambda_gene_indices):
+            cell_source[i] = np.divide(cell_expr[g_idx], cell_areas,
+                                        out=np.zeros(n_cells), where=cell_areas > 0)
+            if use_expr_weight:
+                cell_source[i] = _expression_weight(cell_source[i])
 
-    if gpu is not None:
-        cell_source_gpu = to_gpu(cell_source.T, gpu, dtype=storage_dtype)
-        w_gpu = to_gpu(w[:, None], gpu, dtype=reduction_dtype)
-        y_obs_lambda_gpu = to_gpu(y_obs_lambda, gpu, dtype=reduction_dtype)
-        areas_gpu = to_gpu(
-            empty_bin_areas[:, None], gpu, dtype=reduction_dtype
-        )
+        best_lam = lambda_grid[0]
+        best_rss = np.inf
+        w = empty_bin_areas.astype(np.float64)
+        y_obs_lambda = empty_bin_expr[lambda_gene_indices].T  # [n_empty_bins × n_lambda_use]
 
-    for lam in lambda_grid:
         if gpu is not None:
-            W_empty_gpu = weighted_gpu_csr(
-                empty_distance_gpu, lam, distance_metric, gpu
+            cell_source_gpu = to_gpu(cell_source.T, gpu, dtype=storage_dtype)
+            w_gpu = to_gpu(w[:, None], gpu, dtype=reduction_dtype)
+            y_obs_lambda_gpu = to_gpu(y_obs_lambda, gpu, dtype=reduction_dtype)
+            areas_gpu = to_gpu(
+                empty_bin_areas[:, None], gpu, dtype=reduction_dtype
             )
-            weighted_sums_gpu = sparse_mm(
-                W_empty_gpu, cell_source_gpu, gpu
-            ).to(dtype=reduction_dtype)
-            N_gb_gpu = areas_gpu * weighted_sums_gpu
-            denom_gpu = (w_gpu * N_gb_gpu.square()).sum(dim=0)
-            numer_gpu = (w_gpu * y_obs_lambda_gpu * N_gb_gpu).sum(dim=0)
-            alpha_gpu = gpu.torch.where(
-                denom_gpu > 0, numer_gpu / denom_gpu, gpu.torch.zeros_like(denom_gpu)
-            ).clamp_min(0.0)
-            residuals_gpu = y_obs_lambda_gpu - alpha_gpu.unsqueeze(0) * N_gb_gpu
-            total_rss = float((w_gpu * residuals_gpu.square()).sum().item())
-        else:
-            W_empty_to_cell = distance_graph_to_weights(
-                empty_to_cell_distances, lam, distance_metric
-            )
-            # Batched weighted sums for all lambda genes at once
-            weighted_sums = W_empty_to_cell.dot(cell_source.T)
-            N_gb_all = empty_bin_areas[:, None] * weighted_sums
 
-            denom = (w[:, None] * N_gb_all ** 2).sum(axis=0)
-            alpha_g = np.divide(
-                (w[:, None] * y_obs_lambda * N_gb_all).sum(axis=0),
-                denom,
-                out=np.zeros(n_lambda_use, dtype=np.float64),
-                where=denom > 0,
-            )
-            alpha_g = np.maximum(alpha_g, 0.0)
+        for lam in lambda_grid:
+            if gpu is not None:
+                W_empty_gpu = weighted_gpu_csr(
+                    empty_distance_gpu, lam, distance_metric, gpu
+                )
+                weighted_sums_gpu = sparse_mm(
+                    W_empty_gpu, cell_source_gpu, gpu
+                ).to(dtype=reduction_dtype)
+                N_gb_gpu = areas_gpu * weighted_sums_gpu
+                denom_gpu = (w_gpu * N_gb_gpu.square()).sum(dim=0)
+                numer_gpu = (w_gpu * y_obs_lambda_gpu * N_gb_gpu).sum(dim=0)
+                alpha_gpu = gpu.torch.where(
+                    denom_gpu > 0, numer_gpu / denom_gpu, gpu.torch.zeros_like(denom_gpu)
+                ).clamp_min(0.0)
+                residuals_gpu = y_obs_lambda_gpu - alpha_gpu.unsqueeze(0) * N_gb_gpu
+                total_rss = float((w_gpu * residuals_gpu.square()).sum().item())
+            else:
+                W_empty_to_cell = distance_graph_to_weights(
+                    empty_to_cell_distances, lam, distance_metric
+                )
+                # Batched weighted sums for all lambda genes at once
+                weighted_sums = W_empty_to_cell.dot(cell_source.T)
+                N_gb_all = empty_bin_areas[:, None] * weighted_sums
 
-            residuals = y_obs_lambda - alpha_g[None, :] * N_gb_all
-            rss_per_gene = (w[:, None] * residuals ** 2).sum(axis=0)
-            total_rss = rss_per_gene.sum()
+                denom = (w[:, None] * N_gb_all ** 2).sum(axis=0)
+                alpha_g = np.divide(
+                    (w[:, None] * y_obs_lambda * N_gb_all).sum(axis=0),
+                    denom,
+                    out=np.zeros(n_lambda_use, dtype=np.float64),
+                    where=denom > 0,
+                )
+                alpha_g = np.maximum(alpha_g, 0.0)
 
-        if total_rss < best_rss:
-            best_rss = total_rss
-            best_lam = lam
+                residuals = y_obs_lambda - alpha_g[None, :] * N_gb_all
+                rss_per_gene = (w[:, None] * residuals ** 2).sum(axis=0)
+                total_rss = rss_per_gene.sum()
 
+            if total_rss < best_rss:
+                best_rss = total_rss
+                best_lam = lam
+
+        if verbose:
+            print(f"  → Optimal λ = {best_lam:.1f} μm (RSS = {best_rss:.2f})")
+
+    # λ is unused by the inverse kernel; any value yields the same weights.
+    lam_weights = best_lam if best_lam is not None else 1.0
     if gpu is not None:
         best_W_empty_gpu = weighted_gpu_csr(
-            empty_distance_gpu, best_lam, distance_metric, gpu
+            empty_distance_gpu, lam_weights, distance_metric, gpu
         )
     else:
         W_empty_to_cell = distance_graph_to_weights(
-            empty_to_cell_distances, best_lam, distance_metric
+            empty_to_cell_distances, lam_weights, distance_metric
         )
     timings["lambda_search_sec"] = perf_counter() - stage_started
-
-    if verbose:
-        print(f"  → Optimal λ = {best_lam:.1f} μm (RSS = {best_rss:.2f})")
 
     # ── 6. Estimate α per gene ──────────────────────────────────
     stage_started = perf_counter()
@@ -538,11 +554,11 @@ def cell_pipeline_fit(
             cell_to_cell_distances, gpu, dtype=storage_dtype
         )
         W_cell_gpu = weighted_gpu_csr(
-            cell_distance_gpu, best_lam, distance_metric, gpu
+            cell_distance_gpu, lam_weights, distance_metric, gpu
         )
     else:
         W_cell_to_cell = distance_graph_to_weights(
-            cell_to_cell_distances, best_lam, distance_metric
+            cell_to_cell_distances, lam_weights, distance_metric
         )
     timings["cell_graph_build_sec"] = perf_counter() - stage_started
     stage_started = perf_counter()
