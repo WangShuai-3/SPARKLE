@@ -14,39 +14,6 @@ from typing import Tuple
 from soupx import SoupChannel, autoEstCont, adjustCounts
 
 
-def _estimate_rho_simple(dnb_expr, dnb_labels):
-    """Fallback: estimate contamination ρ from empty-DNB / cell-DNB ratio.
-
-    Uses only high-count genes to avoid noise-dominated ratios.
-    ρ ≈ median_g(mean_empty_expr[g] / mean_cell_expr[g]) for top 20% genes by total counts.
-    """
-    empty_mask = dnb_labels < 0
-    cell_mask = dnb_labels >= 0
-
-    if not empty_mask.any() or not cell_mask.any():
-        return 0.01
-
-    n_genes = dnb_expr.shape[0]
-    total_per_gene = np.asarray(dnb_expr.sum(axis=1)).ravel()
-
-    # Select top 20% genes by total expression (high-expr + ambient-rich)
-    n_top = max(5, n_genes // 5)
-    top_genes = np.argsort(total_per_gene)[-n_top:]
-
-    dnb_dense = np.asarray(dnb_expr.todense()) if hasattr(dnb_expr, 'todense') else dnb_expr.toarray()
-    mean_cell = dnb_dense[top_genes][:, cell_mask].mean(axis=1)
-    mean_empty = dnb_dense[top_genes][:, empty_mask].mean(axis=1)
-
-    # ρ = empty / (cell + empty) avoids division by zero
-    valid = mean_cell > 0.01
-    if valid.sum() < 3:
-        return 0.01
-
-    ratios = mean_empty[valid] / (mean_cell[valid] + mean_empty[valid])
-    rho = float(np.median(ratios))
-    return max(0.001, min(rho, 0.8))
-
-
 def run_soupx(
     dnb_expr: np.ndarray,
     dnb_labels: np.ndarray,
@@ -63,8 +30,9 @@ def run_soupx(
     profile estimation; cell DNBs are aggregated to per-cell expression
     and corrected.
 
-    Falls back to a simple ρ estimate from empty/cell ratio if autoEstCont
-    fails due to insufficient marker genes (common in synthetic data).
+    No heuristic fallback is applied: if autoEstCont or adjustCounts fails,
+    a RuntimeError is raised so the caller records the failure explicitly
+    (NaN metrics) instead of silently substituting a fabricated correction.
 
     Args:
         dnb_expr: [genes × DNBs] DNB-level expression matrix.
@@ -80,6 +48,9 @@ def run_soupx(
     Returns:
         corrected_expr: [genes × n_cells] corrected per-cell expression.
         rho: global contamination fraction estimate.
+
+    Raises:
+        RuntimeError: If contamination estimation or count adjustment fails.
     """
     n_genes, n_dnbs = dnb_expr.shape
     cell_ids = np.unique(dnb_labels[dnb_labels >= 0])
@@ -126,21 +97,16 @@ def run_soupx(
         )
         rho = float(sc.metaData['rho'].iloc[0])
     except (ValueError, KeyError) as e:
-        # Fallback: simple ρ estimation from empty DNB ratio
-        if verbose:
-            print(f"  autoEstCont failed ({e}), using simple ρ estimate")
-        rho = _estimate_rho_simple(dnb_expr, dnb_labels)
-        sc.set_contamination_fraction(rho, forceAccept=True)
+        raise RuntimeError(
+            f"SoupX autoEstCont failed (insufficient marker genes?): {e}"
+        ) from e
 
     # ── 6. Correct ─────────────────────────────────────────────────
     try:
         corrected_sparse = adjustCounts(sc, roundToInt=False, verbose=int(verbose))
         corrected_dense = corrected_sparse.toarray()
     except Exception as e:
-        # Fallback: simple global subtraction using estimated ρ
-        if verbose:
-            print(f"  adjustCounts failed ({e}), using simple global subtraction")
-        corrected_dense = np.maximum(toc_dense * (1.0 - rho), 0.0)
+        raise RuntimeError(f"SoupX adjustCounts failed: {e}") from e
 
     # Clip negative values that can arise from soupx cluster expansion numerical errors.
     corrected_dense = np.maximum(corrected_dense, 0.0)

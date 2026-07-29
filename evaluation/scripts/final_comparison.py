@@ -211,29 +211,22 @@ def run_synthetic_comparison(
         try:
             sx_corr, sx_rho = run_soupx(dnb_expr, dnb_labels, verbose=False)
         except Exception as e:
-            # Robust fallback for on-the-fly generated data where adjustCounts
-            # can produce pathological negatives.
-            print(f"  run_soupx failed ({e}), using simple global subtraction fallback")
-            empty_mask = np.asarray(dnb_labels < 0).ravel()
-            cell_mask = np.asarray(dnb_labels >= 0).ravel()
-            dnb_dense = np.asarray(dnb_expr.todense() if hasattr(dnb_expr, "todense") else dnb_expr.toarray())
-            total_per_gene = dnb_dense.sum(axis=1)
-            n_top = max(5, dnb_dense.shape[0] // 5)
-            top_genes = np.argsort(total_per_gene)[-n_top:]
-            mean_cell = dnb_dense[top_genes][:, cell_mask].mean(axis=1)
-            mean_empty = dnb_dense[top_genes][:, empty_mask].mean(axis=1)
-            valid = mean_cell > 0.01
-            ratios = mean_empty[valid] / (mean_cell[valid] + mean_empty[valid])
-            sx_rho = float(np.median(ratios))
-            sx_rho = max(0.001, min(sx_rho, 0.8))
-            raw_cell_soupx = compute_cell_expr(dnb_expr, dnb_labels, n_cells)
-            sx_corr = np.maximum(raw_cell_soupx * (1.0 - sx_rho), 0.0)
-        sx_t = time.time() - t0
-        rmse_sx = _rmse(sx_corr, true_expr)
-        reduc_sx = (rmse_raw - rmse_sx) / rmse_raw * 100.0
-        print(f"  RMSE={rmse_sx:.4f}, reduction={reduc_sx:.1f}%, "
-              f"ρ={sx_rho:.4f}, time={sx_t:.1f}s")
-        results["SoupX"] = {"rmse": rmse_sx, "reduction": reduc_sx, "runtime": sx_t}
+            # No heuristic substitution: record the failure explicitly as NaN.
+            sx_t = time.time() - t0
+            print(f"  SoupX FAILED ({e}); recording NaN metrics")
+            results["SoupX"] = {
+                "rmse": float("nan"),
+                "reduction": float("nan"),
+                "runtime": sx_t,
+                "error": str(e),
+            }
+        else:
+            sx_t = time.time() - t0
+            rmse_sx = _rmse(sx_corr, true_expr)
+            reduc_sx = (rmse_raw - rmse_sx) / rmse_raw * 100.0
+            print(f"  RMSE={rmse_sx:.4f}, reduction={reduc_sx:.1f}%, "
+                  f"ρ={sx_rho:.4f}, time={sx_t:.1f}s")
+            results["SoupX"] = {"rmse": rmse_sx, "reduction": reduc_sx, "runtime": sx_t}
 
     # 3. DecontX
     if "decontx" in methods:
@@ -608,26 +601,35 @@ def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2
         results['sp_var_data'] = _build_sparkle_var_data(sub_all.shape[0], sp_diag, r2_threshold_sp)
 
     # 2. SoupX
+    soupx_error = None
     if 'soupx' in methods:
         step += 1
         print(f"\n[{step}/{n_method_steps}] SoupX (top {n_genes} genes)...")
         t0 = time.time()
-        sx_corr, sx_rho = run_soupx(dnb_expr[top_n, :], labels_0based, verbose=False)
-        sx_t = time.time() - t0
-        # labels_0based maps DNB→0-based cell index; SoupX returns corrected for these cells
-        sx_aligned = np.full(n_cells, np.nan)
-        for c in range(n_cells):
-            if c < sx_corr.shape[1]:
-                sx_aligned[c] = sx_corr[sst_loc_n, c]
-        valid_sx = ~np.isnan(sx_aligned)
-        if valid_sx.sum() > 0:
-            si = np.nanmean(sx_aligned[sstin_mask])
-            sn = np.nanmean(sx_aligned[neighbor_mask])
-            so = np.nanmean(sx_aligned[other_mask])
-            extra = f"s/N={si/sn:5.2f}x  N/O={sn/so:5.2f}x" if so > 0 else ""
-            print(f"  SoupX ({sx_t:.0f}s, rho={sx_rho:.4f})  sstIN={si:7.1f}  Nbr={sn:6.1f}  Oth={so:5.1f}  {extra}")
-            results['SoupX'] = sx_aligned
-            results['sx_full'] = sx_corr
+        try:
+            sx_corr, sx_rho = run_soupx(dnb_expr[top_n, :], labels_0based, verbose=False)
+        except Exception as e:
+            # No heuristic substitution: record the failure explicitly as NaN.
+            sx_t = time.time() - t0
+            soupx_error = str(e)
+            print(f"  SoupX FAILED ({e}); recording NaN values")
+            results['SoupX'] = np.full(n_cells, np.nan)
+        else:
+            sx_t = time.time() - t0
+            # labels_0based maps DNB→0-based cell index; SoupX returns corrected for these cells
+            sx_aligned = np.full(n_cells, np.nan)
+            for c in range(n_cells):
+                if c < sx_corr.shape[1]:
+                    sx_aligned[c] = sx_corr[sst_loc_n, c]
+            valid_sx = ~np.isnan(sx_aligned)
+            if valid_sx.sum() > 0:
+                si = np.nanmean(sx_aligned[sstin_mask])
+                sn = np.nanmean(sx_aligned[neighbor_mask])
+                so = np.nanmean(sx_aligned[other_mask])
+                extra = f"s/N={si/sn:5.2f}x  N/O={sn/so:5.2f}x" if so > 0 else ""
+                print(f"  SoupX ({sx_t:.0f}s, rho={sx_rho:.4f})  sstIN={si:7.1f}  Nbr={sn:6.1f}  Oth={so:5.1f}  {extra}")
+                results['SoupX'] = sx_aligned
+                results['sx_full'] = sx_corr
 
     # 3. DecontX
     if 'decontx' in methods:
@@ -728,6 +730,15 @@ def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2
                     sp_diag["empty_bin_dnb_count_max"]
                 ),
             })
+    if soupx_error is not None:
+        # SoupX failed: no corrected matrix, but the failure must be visible
+        # in the metrics as NaN values instead of silent omission.
+        metrics["methods"]["SoupX"] = {
+            "sstIN": None,
+            "sstNbr": None,
+            "sstOth": None,
+            "error": soupx_error,
+        }
     save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
 
 
@@ -760,8 +771,9 @@ def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None
 
     if 'soupx' in methods:
         corrected, diag = run_soupx_method(sub)
-        if corrected is not None:
-            results['SoupX'] = {'corrected': corrected, 'diag': diag}
+        # Record even on failure (corrected=None) so the failure surfaces as
+        # NaN/error in summaries and metrics instead of vanishing silently.
+        results['SoupX'] = {'corrected': corrected, 'diag': diag}
 
     if 'decontx' in methods:
         corrected, diag = run_decontx_method(sub)
@@ -815,6 +827,14 @@ def run_mosta_comparison(data, sub, n_genes=200, methods=None, n_high_genes=None
                 "de_genes": r.get('mosta_de_genes'),
                 "layer_spearman": r.get('mosta_layer_spearman'),
             }
+        else:
+            # Method failed (e.g. SoupX): keep the failure visible as NaN.
+            metrics["methods"][method_name] = {
+                "runtime": r.get('diag', {}).get('runtime', 0),
+                "de_genes": None,
+                "layer_spearman": None,
+                "error": r.get('diag', {}).get('error'),
+            }
     save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
 
     # Summary
@@ -866,8 +886,9 @@ def run_mousebrain_comparison(data, sub, n_genes=200, methods=None, n_high_genes
 
     if 'soupx' in methods:
         corrected, diag = run_soupx_method(sub)
-        if corrected is not None:
-            results['SoupX'] = {'corrected': corrected, 'diag': diag}
+        # Record even on failure (corrected=None) so the failure surfaces as
+        # NaN/error in summaries and metrics instead of vanishing silently.
+        results['SoupX'] = {'corrected': corrected, 'diag': diag}
 
     if 'decontx' in methods:
         corrected, diag = run_decontx_method(sub)
@@ -930,6 +951,14 @@ def run_mousebrain_comparison(data, sub, n_genes=200, methods=None, n_high_genes
                         r["diag"]["empty_bin_dnb_count_max"]
                     ),
                 })
+        else:
+            # Method failed (e.g. SoupX): keep the failure visible as NaN.
+            metrics["methods"][method_name] = {
+                "runtime": r.get('diag', {}).get('runtime', 0),
+                "de_genes": None,
+                "class_spearman": None,
+                "error": r.get('diag', {}).get('error'),
+            }
     save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
 
     # Summary
@@ -1414,8 +1443,9 @@ def run_soupx_method(sub, verbose=True):
       1. DNBs 聚合为 per-cell 表达（toc）
       2. 空 DNBs 作为 "空液滴" 估计背景谱
       3. KMeans 聚类 → marker gene 检测 → autoEstCont 估计 ρ
-      4. 如果 autoEstCont 失败（常见于合成数据和无 marker 的数据），
-         回退到简单的 empty/cell 比值估计 ρ
+      4. autoEstCont/adjustCounts 失败时 run_soupx 直接抛错（无启发式回退）；
+         本函数捕获后返回 (None, {'error': ...})，由调用方在 results/metrics
+         中显式记为 NaN
 
     输出 diagnostics 包含 ρ 和 runtime。
     """
@@ -2346,8 +2376,9 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
 
     if 'soupx' in methods:
         corrected, diag = run_soupx_method(sub)
-        if corrected is not None:
-            results['SoupX'] = {'corrected': corrected, 'diag': diag}
+        # Record even on failure (corrected=None) so the failure surfaces as
+        # NaN/error in summaries and metrics instead of vanishing silently.
+        results['SoupX'] = {'corrected': corrected, 'diag': diag}
 
     if 'decontx' in methods:
         corrected, diag = run_decontx_method(sub)
@@ -2404,6 +2435,13 @@ def run_visiumhd_comparison(data, sub, n_genes=200, methods=None, n_high_genes=N
             metrics["methods"][method_name] = {
                 "runtime": r['diag'].get('runtime', 0),
                 "library_qc": library_qc,
+            }
+        else:
+            # Method failed (e.g. SoupX): keep the failure visible as NaN.
+            metrics["methods"][method_name] = {
+                "runtime": r.get('diag', {}).get('runtime', 0),
+                "library_qc": None,
+                "error": r.get('diag', {}).get('error'),
             }
     save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
 
