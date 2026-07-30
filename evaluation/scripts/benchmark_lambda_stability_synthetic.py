@@ -48,7 +48,7 @@ def _run_sparkle_fixed_lambda(data, forced_lambda, r2_threshold, max_radius):
     (auto estimation).
 
     Mirrors the synthetic SPARKLE recipe in final_comparison.run_synthetic_comparison
-    (bin_size=25, cell_based, self_confidence_penalty=False).
+    (bin_size=25, cell_based, self_confidence_penalty=True).
     Returns (corrected_matrix, used_lambda, runtime).
     """
     dnb_expr = data["dnb_expr"]
@@ -65,7 +65,7 @@ def _run_sparkle_fixed_lambda(data, forced_lambda, r2_threshold, max_radius):
         r2_threshold=r2_threshold,
         lambda_grid=lambda_grid,
         cell_based=True,
-        self_confidence_penalty=False,
+        self_confidence_penalty=True,
         verbose=False,
     )
     t0 = time.time()

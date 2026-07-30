@@ -5,7 +5,7 @@ Supports the synthetic scenarios and the Axolotl, MouseBrain, and Ovarian
 windows used in the final manuscript.
 """
 
-import sys, os, time, argparse, gzip, numpy as np
+import sys, os, time, argparse, gzip, json, numpy as np
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from scipy.sparse import csr_matrix, issparse, lil_matrix
@@ -187,7 +187,7 @@ def run_synthetic_comparison(
             r2_threshold=r2_threshold_sp,
             lambda_grid=lambda_grid_sp,
             cell_based=True,
-            self_confidence_penalty=False,
+            self_confidence_penalty=True,
             verbose=False,
             use_gpu=use_gpu,
         )
@@ -260,15 +260,22 @@ def run_synthetic_comparison(
     save_result_h5ad(raw_cell, data['gene_names'], data['cell_ids'], None,
                      reports_root / "h5ad" / f"{tag}_raw.h5ad", "RAW",
                      save_h5ad=save_h5ad)
-    metrics = {
+    metrics_path = reports_root / "metrics" / f"{tag}_metrics.json"
+    if metrics_path.exists():
+        # Merge into the existing file so partial reruns (e.g. SPARKLE only)
+        # preserve entries of methods not re-run this time.
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        metrics.setdefault("methods", {})
+    else:
+        metrics = {"dataset": tag, "raw": {}, "methods": {}}
+    metrics.update({
         "dataset": tag,
         "scenario": data.get("scenario_name", ""),
         "n_cells": int(raw_cell.shape[1]),
         "n_genes": int(raw_cell.shape[0]),
         "rmse_raw": rmse_raw,
-        "raw": {"rmse": rmse_raw},
-        "methods": {},
-    }
+    })
+    metrics.setdefault("raw", {})["rmse"] = rmse_raw
     for method_name, r in results.items():
         # Try to recover corrected matrix saved in result dict
         corrected = None
@@ -285,12 +292,15 @@ def run_synthetic_comparison(
                              method_name,
                              save_h5ad=save_h5ad,
                              var_data=var_data)
-        metrics["methods"][method_name] = {
+        entry = {
             "rmse": r['rmse'],
             "reduction_pct": r['reduction'],
             "runtime": r['runtime'],
         }
-    save_metrics_json(metrics, reports_root / "metrics" / f"{tag}_metrics.json")
+        if r.get("error"):
+            entry["error"] = r["error"]
+        metrics["methods"][method_name] = entry
+    save_metrics_json(metrics, metrics_path)
 
     # Summary table
     print(f"\n{'='*60}")

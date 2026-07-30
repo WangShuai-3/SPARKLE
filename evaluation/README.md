@@ -76,6 +76,11 @@ python evaluation/scripts/final_comparison.py \
   --methods sparkle,soupx,decontx
 ```
 
+SPARKLE must always be run with `self_confidence_penalty=True` (the default)
+on synthetic scenarios; do not disable it. Cell types form spatial domains,
+so marker-owning cells are each other's strongest leakage sources — without
+the penalty they over-subtract one another and marker specificity degrades.
+
 For synthetic scenarios SoupX is run with `tfidfMin=0.2`: the scenarios use
 3–5 balanced cell types, so the best achievable marker tf-idf is
 \(\log(n_\mathrm{types})\approx 1.1\), and the default `tfidfMin=1.0` leaves
