@@ -175,6 +175,8 @@ def generate_synthetic_data(
             true_expr:    [n_genes x n_kept_cells] ground-truth per-cell expression.
             gene_is_high: [n_genes] bool.
             cell_types:   [n_kept_cells] int.
+            marker_types: [n_genes] int; owning cell type of each marker
+                gene, -1 for non-markers.
             true_alpha:   [n_genes] per-gene ambient coefficient.
             true_lambda:  float, ground-truth lambda.
             params:       dict of generation parameters.
@@ -298,6 +300,7 @@ def generate_synthetic_data(
     # methods (e.g. SoupX quickMarkers) can pick up.  The pool is split
     # across all types so every type receives at least one marker.
     marker_absent = np.zeros((n_genes, n_kept), dtype=bool)
+    marker_types = np.full(n_genes, -1, dtype=np.int64)
     if marker_fraction > 0 and n_cell_types > 1:
         n_markers_per_type = max(
             1, int(round(n_high_genes * marker_fraction / n_cell_types))
@@ -319,6 +322,7 @@ def generate_synthetic_data(
             not_t = np.where(cell_types != t)[0]
             true_expr[marker_genes[:, None], not_t] = 0.0
             marker_absent[marker_genes[:, None], not_t] = True
+            marker_types[marker_genes] = t
 
     # ── 6. DNB-level clean expression ────────────────────────────────
     dnb_expr_clean = np.zeros((n_genes, n_dnbs), dtype=np.float64)
@@ -449,6 +453,7 @@ def generate_synthetic_data(
         "true_expr": true_expr,
         "gene_is_high": gene_is_high,
         "cell_types": cell_types,
+        "marker_types": marker_types,
         "true_alpha": true_alpha,
         "true_lambda": float(ambient_lambda),
         "params": {

@@ -52,17 +52,18 @@ OUT_DIR <- file.path(PROJECT_ROOT, "evaluation", "reports", "rctd_mousebrain")
 
 DATASET_TAG <- Sys.getenv("RCTD_DATASET_TAG", "mousebrain_x12500-20000_y2000-10000")
 
-method_name_map <- list(
+method_name_map <- c(
   raw = "RAW",
   sparkle = "SPARKLE",
   soupx = "SoupX",
   decontx = "DecontX",
-  SpotCleanOfficial = "SpotClean"
+  spotcleanofficial = "SpotClean"
 )
 
 method_name_from_stem <- function(stem) {
-  if (stem %in% names(method_name_map)) {
-    return(method_name_map[[stem]])
+  key <- tolower(stem)
+  if (key %in% names(method_name_map)) {
+    return(unname(method_name_map[[key]]))
   }
   if (!grepl("_", stem)) {
     return(toupper(stem))
@@ -119,14 +120,22 @@ dir.create(MTX_DIR, recursive = TRUE, showWarnings = FALSE)
 py_script <- file.path(PROJECT_ROOT, "evaluation", "scripts", "convert_h5ad_to_mtx_mousebrain.py")
 for (i in seq_along(H5AD_FILES)) {
   prefix_i <- MTX_PREFIXES[i]
+  h5ad_file <- file.path(H5AD_DIR, H5AD_FILES[i])
   mtx_file <- file.path(MTX_DIR, paste0(prefix_i, "_counts.mtx"))
   obs_file <- file.path(MTX_DIR, paste0(prefix_i, "_obs.csv"))
   var_file <- file.path(MTX_DIR, paste0(prefix_i, "_var.csv"))
-  if (file.exists(mtx_file) && file.exists(obs_file) && file.exists(var_file)) {
+  cache_files <- c(mtx_file, obs_file, var_file)
+  cache_complete <- all(file.exists(cache_files))
+  cache_fresh <- cache_complete &&
+    min(file.info(cache_files)$mtime) >= file.info(h5ad_file)$mtime
+  if (cache_fresh) {
     next
   }
-  message(sprintf("MTX inputs missing for %s. Running Python conversion ...", prefix_i))
-  h5ad_file <- file.path(H5AD_DIR, H5AD_FILES[i])
+  cache_reason <- if (cache_complete) "stale" else "missing"
+  message(sprintf(
+    "MTX inputs %s for %s. Running Python conversion ...",
+    cache_reason, prefix_i
+  ))
   cmd <- sprintf("%s '%s' '%s' '%s'", PYTHON_BIN, py_script, h5ad_file, MTX_DIR)
   message(sprintf("  %s", cmd))
   system(cmd)

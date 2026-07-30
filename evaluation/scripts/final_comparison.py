@@ -115,6 +115,8 @@ def load_synthetic_scenario_data(scenario_id="S1", seed=42):
         "true_expr": data["true_expr"],
         "scenario_id": scenario_id,
         "gene_is_high": data["gene_is_high"],
+        "cell_types": data["cell_types"],
+        "marker_types": data["marker_types"],
         "true_alpha": data["true_alpha"],
         "true_lambda": data["true_lambda"],
         "params": data["params"],

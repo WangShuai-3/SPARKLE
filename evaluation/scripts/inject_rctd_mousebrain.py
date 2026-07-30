@@ -13,11 +13,11 @@ OUT_DIR = Path("evaluation/reports/h5ad_mousebrain_annotated")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 METH_MAP = {
-    "raw": "RAW", "sparkle": "SPARKLE", 
-    "soupx": "SOUPX", "SoupX": "SOUPX",
-    "decontx": "DECONTX", "DecontX": "DECONTX",
+    "raw": "RAW", "sparkle": "SPARKLE",
+    "soupx": "SoupX",
+    "decontx": "DecontX",
     "spotcleanofficial": "SpotClean",
-    "spatialsoupx": "SPATIALSOUPX",
+    "spatialsoupx": "SpatialSoupX",
 }
 
 prefix = f"{TAG}_"
