@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
-"""Cell-type structure benchmark for synthetic scenarios.
+"""Cell-type clustering accuracy benchmark for synthetic scenarios.
 
 Leakage blurs cell-type structure; a good correction restores it.  For RAW
-and every corrected matrix we
-
-  * cluster cells (log1p(CP10K) -> PCA -> KMeans with k = n_true_types) and
-    compare clusters with the ground-truth cell types via ARI and NMI;
-  * compute per-type pseudobulk profiles (log1p(CP10K) means) and their
-    Pearson correlation with the ground-truth pseudobulk.
-
-Both metrics are library-size invariant.  Existing h5ad files are reused;
-correction methods and the simulator are not rerun.  Scenarios where a
-method has no h5ad are recorded as NaN.
+and every corrected matrix we cluster cells (log1p(CP10K) -> TruncatedSVD
+-> KMeans with k = n_true_types) and compare clusters with the ground-truth
+cell types via the Adjusted Rand Index (ARI).  The metric is library-size
+invariant.  Existing h5ad files are reused; correction methods and the
+simulator are not rerun.  Scenarios where a method has no h5ad are recorded
+as NaN.
 """
 
 from __future__ import annotations
@@ -30,7 +26,7 @@ import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.decomposition import TruncatedSVD
-from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+from sklearn.metrics import adjusted_rand_score
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -62,9 +58,9 @@ def log1p_cp10k(matrix: np.ndarray) -> np.ndarray:
     return np.log1p(matrix / np.maximum(lib, 1.0) * 1e4)
 
 
-def clustering_scores(matrix: np.ndarray, cell_types: np.ndarray,
-                      seed: int = 42):
-    """ARI and NMI of KMeans clusters (k = n_true_types) vs true types."""
+def clustering_ari(matrix: np.ndarray, cell_types: np.ndarray,
+                   seed: int = 42) -> float:
+    """ARI of KMeans clusters (k = n_true_types) vs ground-truth types."""
     X = log1p_cp10k(matrix)
     n_types = len(np.unique(cell_types))
     n_pc = min(30, X.shape[0] - 1, X.shape[1])
@@ -75,25 +71,7 @@ def clustering_scores(matrix: np.ndarray, cell_types: np.ndarray,
     labels = KMeans(
         n_clusters=n_types, n_init="auto", random_state=seed
     ).fit_predict(pcs)
-    return (adjusted_rand_score(cell_types, labels),
-            normalized_mutual_info_score(cell_types, labels))
-
-
-def pseudobulk_pearson(matrix: np.ndarray, truth: np.ndarray,
-                       cell_types: np.ndarray):
-    """Per-type Pearson r between method and ground-truth pseudobulk."""
-    types = np.unique(cell_types)
-    rs = []
-    for t in types:
-        mask = cell_types == t
-        if mask.sum() < 3:
-            continue
-        a = log1p_cp10k(matrix[mask]).mean(axis=0)
-        b = log1p_cp10k(truth[mask]).mean(axis=0)
-        if a.std() == 0 or b.std() == 0:
-            continue
-        rs.append(float(np.corrcoef(a, b)[0, 1]))
-    return rs
+    return adjusted_rand_score(cell_types, labels)
 
 
 def _aligned_h5ad_matrix(path: Path, cell_ids: np.ndarray,
@@ -113,16 +91,14 @@ def _aligned_h5ad_matrix(path: Path, cell_ids: np.ndarray,
 
 
 def evaluate(h5ad_dir: Path, metrics_dir: Path, scenarios: list[str],
-             per_type_path: Path | None = None,
              summary_path: Path | None = None):
-    per_type_rows, summary_rows = [], []
+    summary_rows = []
     for sid in scenarios:
         tag = f"synthetic_{sid}"
         data = load_synthetic_scenario_data(sid)
         cell_ids = data["cell_ids"]
         gene_names = data["gene_names"]
         cell_types = data["cell_types"]
-        truth_cells = data["true_expr"].T  # cells × genes
 
         metrics_path = metrics_dir / f"{tag}_metrics.json"
         metrics = json.loads(metrics_path.read_text(encoding="utf-8")) \
@@ -134,39 +110,24 @@ def evaluate(h5ad_dir: Path, metrics_dir: Path, scenarios: list[str],
                 print(f"  {sid} {method}: {path.name} missing, recorded as NaN")
                 continue
             matrix = _aligned_h5ad_matrix(path, cell_ids, gene_names)
-            ari, nmi = clustering_scores(matrix, cell_types)
-            rs = pseudobulk_pearson(matrix, truth_cells, cell_types)
+            ari = clustering_ari(matrix, cell_types)
 
             entry = (metrics.setdefault("raw", {}) if method == "RAW"
                      else metrics.setdefault("methods", {}).setdefault(method, {}))
             entry["clustering_ari"] = float(ari)
-            entry["clustering_nmi"] = float(nmi)
-            entry["pseudobulk_pearson_mean"] = float(np.mean(rs))
-
             summary_rows.append({
-                "scenario": sid, "method": method,
-                "clustering_ari": float(ari), "clustering_nmi": float(nmi),
-                "pseudobulk_pearson_mean": float(np.mean(rs)),
-                "pseudobulk_pearson_min": float(np.min(rs)),
+                "scenario": sid, "method": method, "clustering_ari": float(ari),
             })
-            for t, r in zip(np.unique(cell_types), rs):
-                per_type_rows.append({
-                    "scenario": sid, "method": method, "cell_type": int(t),
-                    "n_cells_type": int((cell_types == t).sum()),
-                    "pseudobulk_pearson": r,
-                })
 
         metrics_path.parent.mkdir(parents=True, exist_ok=True)
         metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
         print(f"{sid}: done", flush=True)
         # Save partial results after every scenario so a long run can be
         # interrupted without losing progress.
-        if per_type_path is not None:
-            pd.DataFrame(per_type_rows).to_csv(per_type_path, index=False)
         if summary_path is not None:
             pd.DataFrame(summary_rows).to_csv(summary_path, index=False)
 
-    return pd.DataFrame(per_type_rows), pd.DataFrame(summary_rows)
+    return pd.DataFrame(summary_rows)
 
 
 def _plot_grouped(summary: pd.DataFrame, value_col: str, title: str,
@@ -197,7 +158,7 @@ def _plot_grouped(summary: pd.DataFrame, value_col: str, title: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Cell-type structure benchmark on synthetic h5ad outputs."
+        description="Cell-type clustering accuracy benchmark on synthetic h5ad outputs."
     )
     parser.add_argument("--h5ad-dir", type=str, default="evaluation/reports/h5ad")
     parser.add_argument("--metrics-dir", type=str, default="evaluation/reports/metrics")
@@ -220,14 +181,10 @@ def main():
             key=lambda s: int(s[1:]),
         )
 
-    per_type_path = out_dir / "synthetic_pseudobulk_per_type.csv"
     summary_path = out_dir / "synthetic_clustering_summary.csv"
-    per_type, summary = evaluate(
-        h5ad_dir, metrics_dir, scenarios,
-        per_type_path=per_type_path, summary_path=summary_path,
-    )
-
-    print(f"Saved {per_type_path}\nSaved {summary_path}")
+    summary = evaluate(h5ad_dir, metrics_dir, scenarios,
+                       summary_path=summary_path)
+    print(f"Saved {summary_path}")
 
     _plot_grouped(
         summary, "clustering_ari",
@@ -235,13 +192,6 @@ def main():
         "higher = correction better preserves cell-type structure",
         "Adjusted Rand Index",
         out_dir / "synthetic_clustering_ari.png",
-    )
-    _plot_grouped(
-        summary, "pseudobulk_pearson_mean",
-        "Per-type pseudobulk concordance with ground truth\n"
-        "higher = type-level expression profiles better preserved",
-        "Mean Pearson r (log1p(CP10K))",
-        out_dir / "synthetic_pseudobulk_pearson.png",
     )
 
 

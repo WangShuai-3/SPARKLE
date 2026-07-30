@@ -99,18 +99,12 @@ python evaluation/scripts/run_spotclean_official.py \
 
 RMSE is calculated on unnormalised raw counts. Cell-wise Pearson \(R^2\)
 compares each corrected cell with its uncontaminated ground truth across all
-simulated genes; marker-specificity log2FC compares each marker gene's
-expression between its owning cell type and all other cells (scale-invariant,
-testing true-signal retention against leaked-marker removal); marker-detection
-accuracy ranks genes per cell type by Wilcoxon effect size and measures
-detection AUROC and precision@k against the ground-truth markers; cell-type
-structure is assessed by clustering accuracy (ARI/NMI of KMeans on
-log1p(CP10K) PCs) and per-type pseudobulk concordance with the ground truth:
+simulated genes; cell-type clustering accuracy (ARI of KMeans on
+log1p(CP10K) PCs against the ground-truth cell types) measures how well
+correction preserves cell-type structure:
 
 ```bash
 python evaluation/scripts/evaluate_synthetic_cell_r2.py
-python evaluation/scripts/evaluate_synthetic_marker_specificity.py
-python evaluation/scripts/evaluate_synthetic_marker_detection.py
 python evaluation/scripts/evaluate_synthetic_clustering.py
 python evaluation/scripts/visualize_synthetic_rmse.py
 ```
