@@ -184,6 +184,13 @@ def main():
     summary_path = out_dir / "synthetic_clustering_summary.csv"
     summary = evaluate(h5ad_dir, metrics_dir, scenarios,
                        summary_path=summary_path)
+    # Merge with any existing summary so single-scenario reruns do not
+    # wipe the rows of scenarios not evaluated this time.
+    if summary_path.exists():
+        prior = pd.read_csv(summary_path)
+        prior = prior[~prior["scenario"].isin(summary["scenario"].unique())]
+        summary = pd.concat([prior, summary], ignore_index=True)
+        summary.to_csv(summary_path, index=False)
     print(f"Saved {summary_path}")
 
     _plot_grouped(
