@@ -250,6 +250,14 @@ def run_synthetic_comparison(
             print(f"  RMSE={rmse_dx:.4f}, reduction={reduc_dx:.1f}%, "
                   f"contamination={dx_diag.get('contamination', 'N/A'):.3f}, time={dx_t:.1f}s")
             results["DecontX"] = {"rmse": rmse_dx, "reduction": reduc_dx, "runtime": dx_t}
+        else:
+            print(f"  DecontX FAILED ({dx_diag.get('error')}); recording NaN metrics")
+            results["DecontX"] = {
+                "rmse": float("nan"),
+                "reduction": float("nan"),
+                "runtime": dx_t,
+                "error": dx_diag.get("error"),
+            }
 
     # Save cell-based h5ad and metrics
     print(f"\n  {'='*60}")
@@ -1483,8 +1491,17 @@ def run_soupx_method(sub, verbose=True):
 def run_decontx_method(sub, verbose=True):
     """运行 DecontX（cell-level EM, gene-specific α, no spatial info）。
 
-    先聚合 DNB → cell 表达，再调用 decontx-python。
+    先聚合 DNB → cell 表达，再调用 decontx-python。失败时返回
+    (None, {'error': ...})，由调用方在 results/metrics 中显式记为 NaN。
     """
+    try:
+        return _decontx_impl(sub, verbose=verbose)
+    except Exception as e:
+        print(f"    DecontX failed: {e}")
+        return None, {'error': str(e)}
+
+
+def _decontx_impl(sub, verbose=True):
     import scanpy as sc
     from decontx import decontx as run_dx
     print(f"\n  DecontX...")
@@ -1518,9 +1535,20 @@ def run_decontx_method(sub, verbose=True):
     sc.tl.pca(adata, n_comps=n_pcs, svd_solver='arpack')
     n_nbrs = min(15, adata.n_obs - 1)
     sc.pp.neighbors(adata, n_neighbors=n_nbrs)
-    sc.tl.leiden(adata, resolution=0.5)
+    # DecontX needs >=2 clusters; leiden at low resolution can return a
+    # single cluster on homogeneous data, so escalate resolution if needed.
+    resolution = 0.5
+    sc.tl.leiden(adata, resolution=resolution)
+    while adata.obs['leiden'].nunique() < 2 and resolution < 2.0:
+        resolution *= 2
+        sc.tl.leiden(adata, resolution=resolution)
+    if adata.obs['leiden'].nunique() < 2:
+        raise ValueError(
+            "DecontX requires at least 2 clusters; leiden found only 1 "
+            f"even at resolution={resolution}"
+        )
     if verbose:
-        print(f"    Clusters: {adata.obs['leiden'].nunique()}")
+        print(f"    Clusters: {adata.obs['leiden'].nunique()} (resolution={resolution})")
     adata.X = raw_counts
     t0 = time.time()
     run_dx(adata, cluster_key='leiden', max_iter=200, seed=12345, verbose=False)
@@ -2496,8 +2524,8 @@ def main():
     parser.add_argument("--n-high-genes", type=int, default=None,
                         help="Number of top genes (default: 200)")
     parser.add_argument("--lambda-grid", type=int, nargs="+",
-                        default=[10, 20, 30, 50, 70, 100, 150, 200, 300],
-                        help="Lambda candidates in um for SPARKLE (default: 10 20 30 50 70 100 150 200 300)")
+                        default=[10, 20, 30, 50, 70, 100, 150, 200, 300, 500],
+                        help="Lambda candidates in um for SPARKLE (default: 10 20 30 50 70 100 150 200 300 500)")
     parser.add_argument("--r2-threshold", type=float, default=0.01,
                         help="Minimum weighted R^2 for SPARKLE gene correction (default: 0.01)")
     parser.add_argument("--max-radius", type=float, default=None,

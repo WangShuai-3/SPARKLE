@@ -144,6 +144,12 @@ def reuse_synthetic_h5ad_metrics(
 ) -> None:
     """Recover prior-method RMSEs from existing h5ad files without rerunning them."""
     for method in ("SPARKLE", "SoupX", "DecontX"):
+        existing = metrics.get("methods", {}).get(method, {})
+        if existing.get("error"):
+            # The method failed on the CURRENT data; an h5ad from an earlier
+            # run (different data realisation, same shape) must not
+            # resurrect it.  Keep the explicit NaN/error record.
+            continue
         path = REPORTS / "h5ad" / f"{tag}_{method}.h5ad"
         if not path.exists():
             continue

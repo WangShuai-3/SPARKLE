@@ -50,8 +50,9 @@ files.
 The generator uses a \(500\times500\) DNB grid, 0.5-µm DNB spacing, 500 genes,
 and 80 highly expressed genes. Per-gene baseline and high-expression rates
 follow log-spaced gradients, so most genes are expressed very low and only a
-few are abundant. Scenarios contain 6 spatially clustered cell types with
-imbalanced proportions (8 in S10); marker genes are strictly
+few are abundant. Scenarios contain 6 cell types with
+imbalanced proportions (8 in S10), randomly assigned in space except in S6,
+which forms spatially clustered domains; marker genes are strictly
 cell-type-specific in the ground truth, and a 95% UMI dropout is applied
 (binomial thinning of the clean and ambient parts independently); the
 correction ground truth is the observed clean expression. Every scenario
@@ -60,8 +61,10 @@ varies one principal source of difficulty:
 | Scenario | Principal variation |
 |---|---|
 | S1–S3 | Increasing cell coverage from sparse to dense |
-| S4–S5 | Shorter or longer leakage-decay scale |
-| S6–S7 | Weaker or stronger leakage fraction |
+| S4 | Shorter leakage-decay scale |
+| S5 | Longer leakage-decay scale |
+| S6 | Spatially clustered cell types (domains) |
+| S7 | Stronger leakage fraction |
 | S8 | High out-of-cell fraction |
 | S9 | Higher marker-gene fraction |
 | S10 | More cell types |
@@ -82,9 +85,9 @@ so marker-owning cells are each other's strongest leakage sources — without
 the penalty they over-subtract one another and marker specificity degrades.
 
 For synthetic scenarios SoupX is run with `tfidfMin=0.2`: the scenarios use
-3–5 balanced cell types, so the best achievable marker tf-idf is
-\(\log(n_\mathrm{types})\approx 1.1\), and the default `tfidfMin=1.0` leaves
-no headroom once any background expression is present. If SoupX fails on a
+6–8 cell types, so the best achievable marker tf-idf is near
+\(\log(n_\mathrm{types})\), and the default `tfidfMin=1.0` leaves little
+headroom once any background expression is present. If SoupX fails on a
 dataset, the failure is recorded explicitly as NaN metrics rather than
 substituted with a heuristic fallback.
 
@@ -215,10 +218,16 @@ python evaluation/scripts/inject_rctd_mousebrain.py
 ```
 
 The final comparison must consistently use `Cell_group`; do not combine RCTD
-labels or denominators from different hierarchy levels. Restrict expression
-evaluation explicitly to the final-manuscript methods:
+labels or denominators from different hierarchy levels. For the Figure 4C
+singlet comparison, use the 9,190 cells retained by all five methods, reported
+in `evaluation/reports/rctd_mousebrain/rctd_Cell_group_all_methods_shared_metrics.csv`.
+Do not use the method-specific denominators in `summary_metrics.csv` for this
+panel. Restrict expression evaluation explicitly to the final-manuscript
+methods:
 
 ```bash
+python evaluation/scripts/plot_mousebrain_rctd_shared_singlets.py
+
 python evaluation/scripts/evaluate_mousebrain_h5ad.py \
   --tag mousebrain_x12500-20000_y2000-10000 \
   --input-dir evaluation/reports/h5ad_mousebrain_annotated \
@@ -226,7 +235,9 @@ python evaluation/scripts/evaluate_mousebrain_h5ad.py \
   --output-dir evaluation/reports/mousebrain_eval \
   --methods RAW,SPARKLE,SoupX,DecontX,SpotClean
 
-python evaluation/scripts/visualize_mousebrain_comparison.py
+python evaluation/scripts/visualize_mousebrain_comparison.py \
+  --tag mousebrain_x12500-20000_y2000-10000 \
+  --h5ad-dir evaluation/reports/h5ad_mousebrain_annotated
 ```
 
 ## Ovarian: single-cell reference, markers, and CellChat
