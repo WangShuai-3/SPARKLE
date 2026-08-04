@@ -268,10 +268,10 @@ def main():
     parser.add_argument(
         "--metric",
         type=str,
-        default="r2",
+        default="rmse",
         choices=["rmse", "r2"],
-        help="Stability metric: 'rmse' (reduction %) or 'r2' (per-cell R² gain "
-        "over raw; default: r2).",
+        help="Stability metric: 'rmse' (RMSE reduction %; default) or 'r2' "
+        "(per-cell R² gain over raw).",
     )
     parser.add_argument("--plot", action="store_true")
     args = parser.parse_args()
