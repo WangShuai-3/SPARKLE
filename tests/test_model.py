@@ -77,6 +77,7 @@ def test_inverse_metric_skips_lambda_search(capsys):
     corrected, diag = model.fit_transform(expr, coords, labels)
 
     assert diag["lambda_estimated"] is None
+    assert diag["lambda_search_rss"] == []
     assert model.lambda_ is None
     assert "skipping the λ grid search" in capsys.readouterr().out
 
@@ -109,3 +110,8 @@ def test_exponential_metric_reports_estimated_lambda():
 
     assert diag["lambda_estimated"] in {5.0, 10.0, 20.0}
     assert model.lambda_ == diag["lambda_estimated"]
+    assert len(diag["lambda_search_rss"]) == 3
+    assert np.all(np.isfinite(diag["lambda_search_rss"]))
+    best_index = int(np.argmin(diag["lambda_search_rss"]))
+    assert diag["lambda_estimated"] == model.lambda_grid[best_index]
+    assert diag["lambda_search_best_rss"] == diag["lambda_search_rss"][best_index]

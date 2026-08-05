@@ -88,12 +88,14 @@ def compute_pseudobulk(adata, group_key="annotation", min_cells=3):
     Returns:
         DataFrame [genes x cell_group]
     """
-    groups = adata.obs[group_key].astype(str)
-    valid = groups != "Unknown"
+    groups = (
+        adata.obs[group_key].astype(object).fillna("Unknown").astype(str)
+    )
+    valid = ~groups.isin(["Unknown", "nan", "None", ""])
     if valid.sum() == 0:
         raise ValueError("No cells with known annotations.")
     adata = adata[valid].copy()
-    groups = adata.obs[group_key]
+    groups = groups.loc[adata.obs_names]
     group_names = sorted(groups.unique())
 
     expr = adata.X
@@ -250,16 +252,19 @@ def plot_snrna_comparison(summary, out_path):
 
 def compute_silhouette(adata, group_key="annotation", n_pcs=30):
     """Compute cell-group silhouette score on log-normalized PCA."""
-    adata = adata.copy()
+    labels = (
+        adata.obs[group_key].astype(object).fillna("Unknown").astype(str)
+    )
+    valid = ~labels.isin(["Unknown", "nan", "None", ""])
+    adata = adata[valid].copy()
+    labels = labels.loc[adata.obs_names].to_numpy()
     n_pcs = min(n_pcs, adata.n_obs - 1, adata.n_vars - 1)
     if n_pcs < 2:
         return float("nan")
-    sc.pp.pca(adata, n_comps=n_pcs, svd_solver="arpack")
-    labels = adata.obs[group_key].astype(str).values
-    valid = labels != "Unknown"
-    if valid.sum() < 10 or len(set(labels[valid])) < 2:
+    if len(labels) < 10 or len(set(labels)) < 2:
         return float("nan")
-    score = silhouette_score(adata.obsm["X_pca"][valid], labels[valid])
+    sc.pp.pca(adata, n_comps=n_pcs, svd_solver="arpack")
+    score = silhouette_score(adata.obsm["X_pca"], labels)
     return float(score)
 
 
@@ -540,9 +545,17 @@ def main():
         print(f"  Silhouette (cell_group): {sil:.4f}")
 
         mean_between = compute_mean_between_corr(pb_df)
+        group_values = (
+            adata.obs["annotation"]
+            .astype(object)
+            .fillna("Unknown")
+            .astype(str)
+        )
+        retained_mask = ~group_values.isin(["Unknown", "nan", "None", ""])
 
         method_metrics = {
-            "n_cells": int(adata.n_obs),
+            "n_cells": int(retained_mask.sum()),
+            "n_input_cells": int(adata.n_obs),
             "n_genes": int(adata.n_vars),
             "n_groups": int(pb_df.shape[1]),
             "silhouette": sil,
@@ -601,6 +614,7 @@ def main():
         summary_rows.append({
             "method": method,
             "n_cells": method_metrics["n_cells"],
+            "n_input_cells": method_metrics["n_input_cells"],
             "n_groups": method_metrics["n_groups"],
             "silhouette": method_metrics["silhouette"],
             "mean_between_corr": method_metrics["mean_between_corr"],

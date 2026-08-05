@@ -332,6 +332,7 @@ def cell_pipeline_fit(
         # would produce identical weights, so a grid search is meaningless.
         best_lam = None
         best_rss = np.nan
+        lambda_search_rss = []
         if verbose:
             print(
                 "distance_metric='inverse' does not use λ; "
@@ -354,6 +355,7 @@ def cell_pipeline_fit(
 
         best_lam = lambda_grid[0]
         best_rss = np.inf
+        lambda_search_rss = []
         w = empty_bin_areas.astype(np.float64)
         y_obs_lambda = empty_bin_expr[lambda_gene_indices].T  # [n_empty_bins × n_lambda_use]
 
@@ -401,6 +403,8 @@ def cell_pipeline_fit(
                 residuals = y_obs_lambda - alpha_g[None, :] * N_gb_all
                 rss_per_gene = (w[:, None] * residuals ** 2).sum(axis=0)
                 total_rss = rss_per_gene.sum()
+
+            lambda_search_rss.append(float(total_rss))
 
             if total_rss < best_rss:
                 best_rss = total_rss
@@ -653,6 +657,8 @@ def cell_pipeline_fit(
     diagnostics = {
         "lambda_estimated": best_lam,
         "lambda_grid": lambda_grid,
+        "lambda_search_rss": lambda_search_rss,
+        "lambda_search_best_rss": float(best_rss),
         "spatial_unit": "micrometre",
         "bin_size": float(bin_size),
         "max_radius": float(max_radius),

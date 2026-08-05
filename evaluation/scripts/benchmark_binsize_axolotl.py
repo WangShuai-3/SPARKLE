@@ -32,12 +32,14 @@ from scipy.sparse import csr_matrix
 
 from stambient import SPARKLE
 from evaluation.scripts.final_comparison import (
+    STEREOSEQ_PITCH_UM,
     load_axolotl_data_windowed,
     compute_neighbor_stats,
 )
 
 SST_GENE = "AMEX60DD003175"
-DNB_PITCH_UM = 0.5  # Axolotl Stereo-seq DNB pitch
+DNB_PITCH_UM = STEREOSEQ_PITCH_UM  # Axolotl Stereo-seq DNB pitch
+NEIGHBOR_RADIUS_UM = 50.0
 
 
 def _prepare_axolotl_eval(data):
@@ -47,7 +49,7 @@ def _prepare_axolotl_eval(data):
     sst_idx, labels_0based (DNB -> 0-based cell), sstin/neighbor/other masks and
     the raw per-cell SST vector for retain/remove computation.
     """
-    dnb_coords = data["dnb_coords"]
+    dnb_coords_um = data["dnb_coords"] * DNB_PITCH_UM
     dnb_labels = data["dnb_labels"]
     gene_names = list(data["gene_names"])
     cell_ids = np.array(data["cell_ids"])
@@ -61,8 +63,10 @@ def _prepare_axolotl_eval(data):
     for c in range(n_cells):
         m = dnb_labels == cell_ids[c]
         if m.sum():
-            cc[c] = dnb_coords[m].mean(axis=0)
-    neighbor_mask, other_mask = compute_neighbor_stats(cc, sstin_mask)
+            cc[c] = dnb_coords_um[m].mean(axis=0)
+    neighbor_mask, other_mask = compute_neighbor_stats(
+        cc, sstin_mask, radius=NEIGHBOR_RADIUS_UM
+    )
 
     sst_idx = gene_names.index(SST_GENE)
 

@@ -549,16 +549,30 @@ def main():
     # 2. Subsample genes once.
     print("\n[2/3] Subsampling genes...")
     sub_full = subsample_data(data, n_genes=args.n_genes, cut_genes=True)
+    # The full loader output contains the original all-gene sparse matrix.
+    # Keeping it alive together with the 10k-gene subset, a window copy and
+    # SPARKLE's working arrays can exceed host memory on the largest window.
+    # The benchmark only needs the subset from this point onward.
+    del data
+    gc.collect()
 
     # 3. Benchmark SPARKLE on arithmetically shrinking windows.
     print("\n[3/3] Benchmarking SPARKLE...")
     profile_dir = Path(args.profile_dir)
     profile_dir.mkdir(parents=True, exist_ok=True)
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    partial_path = out_path.with_suffix(".partial.csv")
 
     results = []
     for i in range(args.n_runs):
         x_range_i, y_range_i = _shrink_range(x_range, y_range, args.n_runs, i)
-        window = _extract_window(sub_full, x_range_i, y_range_i)
+        if i == 0:
+            # The first run is the complete loaded window. Reuse it directly
+            # instead of materializing a second 10k-gene sparse matrix.
+            window = sub_full
+        else:
+            window = _extract_window(sub_full, x_range_i, y_range_i)
 
         n_empty = int((window["dnb_labels"] < 0).sum())
         n_cell_dnbs = int((window["dnb_labels"] >= 0).sum())
@@ -673,6 +687,14 @@ def main():
                     "gpu_sparse_format": diag.get("gpu_sparse_format"),
                 })
 
+            # The largest window can leave sizeable temporary NumPy/SciPy or
+            # CUDA allocations cached after one backend. Reclaim them before
+            # starting the paired backend so the measurement does not fail
+            # merely because the previous run's temporaries are still cached.
+            gc.collect()
+            if gpu_context is not None:
+                gpu_context.torch.cuda.empty_cache()
+
         cpu_runtime = row.get("cpu_runtime_sec", float("nan"))
         gpu_runtime = row.get("gpu_runtime_sec", float("nan"))
         gpu_is_valid = row.get("gpu_compute_backend") == "gpu" and row.get("gpu_status") == "ok"
@@ -698,15 +720,19 @@ def main():
                 "status": row["cpu_status"],
             })
         results.append(row)
+        # Preserve completed windows if a later, larger-memory backend is
+        # interrupted. The canonical output remains untouched until all runs
+        # finish, so downstream plotting cannot mistake a checkpoint for the
+        # final benchmark.
+        pd.DataFrame(results).to_csv(partial_path, index=False)
 
         # Release memory before the next run.
         del window
         gc.collect()
 
     df = pd.DataFrame(results)
-    out_path = Path(args.output)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False)
+    partial_path.unlink(missing_ok=True)
 
     print(f"\n{'=' * 60}")
     print(f"Saved CSV: {out_path}")

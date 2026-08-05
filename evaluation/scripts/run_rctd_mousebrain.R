@@ -11,6 +11,7 @@
 #   - rctd_doublet_results.csv
 #   - rctd_summary_metrics.csv
 #   - rctd_shared_metrics.csv
+#   - rctd_all_methods_shared_metrics.csv
 #
 # Required R packages:
 #   /home/shuaiwang/miniconda3/envs/r-env/bin/Rscript -e "install.packages(c('remotes','data.table','Matrix','Seurat'), repos='https://cloud.r-project.org/')"
@@ -84,6 +85,7 @@ method_stems <- ifelse(startsWith(method_stems, prefix),
                        method_stems)
 MTX_PREFIXES <- tools::file_path_sans_ext(H5AD_FILES)
 METHOD_NAMES <- sapply(method_stems, method_name_from_stem)
+FINAL_COMPARISON_METHODS <- c("RAW", "SPARKLE", "SoupX", "DecontX", "SpotClean")
 
 # Optionally run only selected methods while preserving the rows already
 # present in the aggregate CSV files. This is intended for adding a newly
@@ -464,6 +466,72 @@ all_results <- merge_incremental(
 fwrite(all_results, results_path)
 message(sprintf("  Per-cell results: %s", results_path))
 
+# Figure 4C uses one fixed denominator: the intersection of cells retained by
+# all five final-manuscript methods. This avoids conflating method performance
+# with method-specific filtering or failed RCTD fits.
+all_methods_shared_path <- file.path(
+  OUT_DIR, paste0(out_prefix, "all_methods_shared_metrics.csv")
+)
+available_methods <- unique(as.character(all_results$method))
+if (all(FINAL_COMPARISON_METHODS %in% available_methods)) {
+  final_results <- all_results[method %in% FINAL_COMPARISON_METHODS]
+  duplicate_rows <- final_results[, .N, by = .(method, cell_barcode)][N > 1]
+  if (nrow(duplicate_rows) > 0) {
+    stop("Duplicate method/cell_barcode rows prevent a valid shared-cell comparison")
+  }
+
+  common_barcodes <- Reduce(
+    intersect,
+    lapply(
+      FINAL_COMPARISON_METHODS,
+      function(method_name) final_results[method == method_name, cell_barcode]
+    )
+  )
+  if (length(common_barcodes) == 0) {
+    stop("The five final-comparison methods have no shared retained cells")
+  }
+
+  all_methods_shared_metrics <- rbindlist(lapply(
+    FINAL_COMPARISON_METHODS,
+    function(method_name) {
+      x <- final_results[
+        method == method_name & cell_barcode %in% common_barcodes
+      ]
+      classes <- as.character(x$spot_class)
+      is_singlet <- !is.na(classes) & classes == "singlet"
+      is_certain <- !is.na(classes) & classes == "doublet_certain"
+      is_uncertain <- !is.na(classes) & classes == "doublet_uncertain"
+      is_other <- !(is_singlet | is_certain | is_uncertain)
+      data.table(
+        method = method_name,
+        n_cells = nrow(x),
+        n_singlet = sum(is_singlet),
+        pct_singlet = mean(is_singlet) * 100,
+        n_doublet_certain = sum(is_certain),
+        pct_doublet_certain = mean(is_certain) * 100,
+        n_doublet_uncertain = sum(is_uncertain),
+        pct_doublet_uncertain = mean(is_uncertain) * 100,
+        n_reject_or_other = sum(is_other),
+        pct_reject_or_other = mean(is_other) * 100,
+        mean_singlet_score = mean(x$singlet_score, na.rm = TRUE),
+        median_singlet_score = median(x$singlet_score, na.rm = TRUE)
+      )
+    }
+  ))
+  fwrite(all_methods_shared_metrics, all_methods_shared_path)
+  message(sprintf(
+    "  All-method shared-cell metrics (%d cells): %s",
+    length(common_barcodes), all_methods_shared_path
+  ))
+} else {
+  missing_methods <- setdiff(FINAL_COMPARISON_METHODS, available_methods)
+  warning(sprintf(
+    "Not writing all-method shared-cell metrics; missing methods: %s",
+    paste(missing_methods, collapse = ", ")
+  ))
+  all_methods_shared_metrics <- data.table()
+}
+
 summary_path <- file.path(OUT_DIR, paste0(out_prefix, "summary_metrics.csv"))
 summary_metrics <- merge_incremental(
   rbindlist(metrics_list, use.names = TRUE, fill = TRUE), summary_path
@@ -496,3 +564,6 @@ print(summary_metrics)
 
 message("\nRCTD doublet-mode comparison (shared cells with RAW):")
 print(shared_metrics)
+
+message("\nRCTD doublet-mode comparison (cells shared by all five methods):")
+print(all_methods_shared_metrics)

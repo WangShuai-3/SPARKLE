@@ -51,10 +51,12 @@ def normalize_adata(adata):
 
 
 def compute_pseudobulk(adata, group_key="annotation", min_cells=3):
-    groups = adata.obs[group_key].astype(str)
-    valid = groups != "Unknown"
+    groups = (
+        adata.obs[group_key].astype(object).fillna("Unknown").astype(str)
+    )
+    valid = ~groups.isin(["Unknown", "nan", "None", ""])
     adata = adata[valid].copy()
-    groups = adata.obs[group_key]
+    groups = groups.loc[adata.obs_names]
     group_names = sorted(groups.unique())
     expr = adata.X
     if hasattr(expr, "toarray"):
