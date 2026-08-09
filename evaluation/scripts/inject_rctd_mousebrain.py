@@ -9,15 +9,16 @@ import pandas as pd
 TAG = "mousebrain_x12500-20000_y2000-10000"
 H5AD_DIR = Path("evaluation/reports/h5ad")
 FIRST_DIR = Path("evaluation/reports/rctd_mousebrain/first_type")
-OUT_DIR = Path("evaluation/reports/h5ad_mousebrain_annotated")
+OUT_DIR = Path("evaluation/reports/h5ad_mousebrain_annotated_subclass")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# Cell_subclass first_type CSVs are named with the R-script method names
+# (DECONTX / SOUPX uppercase, SpotClean, RAW, SPARKLE).
 METH_MAP = {
     "raw": "RAW", "sparkle": "SPARKLE",
-    "soupx": "SoupX",
-    "decontx": "DecontX",
+    "soupx": "SOUPX",
+    "decontx": "DECONTX",
     "spotcleanofficial": "SpotClean",
-    "spatialsoupx": "SpatialSoupX",
 }
 
 prefix = f"{TAG}_"
@@ -42,8 +43,10 @@ for hp in h5ads:
         common = adata.obs_names.intersection(rctd_idx.index)
         print(f"    common cells: {len(common)} / {adata.n_obs}")
 
-        # Annotation
-        adata.obs["annotation"] = rctd_idx.loc[common, "first_type"]
+        # Annotation (RCTD's R factor names were mangled by make.names:
+        # 'CA1-N-GLU' -> 'CA1_N_GLU'; restore hyphens to match the snRNA reference)
+        ann_vals = rctd_idx.loc[common, "first_type"].astype(str).str.replace("_", "-", regex=False)
+        adata.obs["annotation"] = ann_vals
 
         # Numeric scores
         for rcol, ocol in [("singlet_score","rctd_singlet_score"),
