@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    name: Build and publish stambient ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify the tag points to a commit on main
+        run: |
+          if ! git merge-base --is-ancestor "${{ github.sha }}" refs/remotes/origin/main; then
+            echo "::error::Tag ${{ github.ref_name }} does not point to a commit on origin/main; aborting the release."
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build distributions
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+
+      - name: Validate distributions
+        run: twine check dist/*
+
+      # Trusted publishing (OIDC) -- no API token stored in secrets.
+      # One-time setup: PyPI -> Account settings -> Publishing -> add a
+      # pending publisher for project "stambient", owner "WangShuai-3",
+      # repository "SPARKLE", workflow file name "release.yml".
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+      - name: Create GitHub Release and attach assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --verify-tag \
+            --title "${{ github.ref_name }}" \
+            --generate-notes
