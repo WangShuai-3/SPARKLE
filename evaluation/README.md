@@ -214,7 +214,12 @@ RCTD_MAX_CORES=16 \
 Rscript evaluation/scripts/run_rctd_mousebrain.R
 
 Rscript evaluation/scripts/enrich_first_type_scores_mousebrain.R
+
+# Cell_subclass annotations (restores hyphens in RCTD type names) -> h5ad_mousebrain_annotated_subclass/
 python evaluation/scripts/inject_rctd_mousebrain.py
+
+# Cell_group annotations with the shared RCTD grouping -> h5ad_mousebrain_annotated_cellgroup/
+python evaluation/scripts/inject_rctd_cellgroup_mousebrain.py
 ```
 
 The final comparison must consistently use `Cell_group`; do not combine RCTD
@@ -230,14 +235,34 @@ python evaluation/scripts/plot_mousebrain_rctd_shared_singlets.py
 
 python evaluation/scripts/evaluate_mousebrain_h5ad.py \
   --tag mousebrain_x12500-20000_y2000-10000 \
-  --input-dir evaluation/reports/h5ad_mousebrain_annotated \
+  --input-dir evaluation/reports/h5ad_mousebrain_annotated_cellgroup \
   --snrna-ref evaluation/data/mousebrain/snrna_cell_group_pseudobulk.csv \
-  --output-dir evaluation/reports/mousebrain_eval \
+  --output-dir evaluation/reports/mousebrain_eval_cellgroup_v2 \
   --methods RAW,SPARKLE,SoupX,DecontX,SpotClean
 
 python evaluation/scripts/visualize_mousebrain_comparison.py \
   --tag mousebrain_x12500-20000_y2000-10000 \
-  --h5ad-dir evaluation/reports/h5ad_mousebrain_annotated
+  --h5ad-dir evaluation/reports/h5ad_mousebrain_annotated_cellgroup
+```
+
+Per-gene and per-cell-type snRNA-concordance improvements (SPARKLE minus RAW)
+are computed from the corrected h5ad files. `--hvg-from-corrected N` selects
+the top-N highly variable genes within the SPARKLE-corrected subset; a stored
+gene list can instead be supplied with `--genes-file`:
+
+```bash
+python evaluation/scripts/gene_level_analysis_mousebrain.py \
+  --tag mousebrain_x12500-20000_y2000-10000 \
+  --h5ad-dir evaluation/reports/h5ad_mousebrain_annotated_cellgroup \
+  --snrna-ref evaluation/data/mousebrain/snrna_cell_group_pseudobulk.csv \
+  --out-dir evaluation/reports/mousebrain_eval_cellgroup_v2/gene_level_final \
+  --min-cells 1
+
+# Figure 4E top-10 marker genes (reference-derived markers within corrected HVGs)
+python evaluation/scripts/plot_mousebrain_marker_top10_corrected_hvg.py \
+  --input evaluation/reports/mousebrain_eval_cellgroup_v2/gene_level_hvg_corrected/mousebrain_x12500-20000_y2000-10000_per_gene_improvement.csv \
+  --snrna-ref evaluation/data/mousebrain/snrna_cell_group_pseudobulk.csv \
+  --out evaluation/reports/mousebrain_eval_cellgroup_v2/gene_level_hvg_corrected/mousebrain_x12500-20000_y2000-10000_marker_top10_corrected_hvg.png
 ```
 
 ## Ovarian: single-cell reference, markers, and CellChat
@@ -312,10 +337,6 @@ progressively larger MouseBrain windows. Strict numerical comparison uses
 `float64`; `--require-gpu` prevents a silent CPU fallback on GPU nodes:
 
 ```bash
-conda run -n scvi python evaluation/scripts/compare_sparkle_cpu_gpu.py \
-  --gpu-dtype float64 \
-  --require-gpu
-
 conda run -n scvi python evaluation/scripts/benchmark_resource.py \
   --x-range 6000 20000 --y-range 2000 15000 \
   --n-genes 10000 --n-high-genes 10000 \
@@ -330,3 +351,18 @@ conda run -n scvi python evaluation/scripts/benchmark_resource.py \
 
 The resource table records runtime, host RSS, GPU allocated/reserved memory,
 and stage-level timings.
+
+A separate cross-method benchmark measures end-to-end runtime and peak RSS of
+SPARKLE, SoupX, DecontX, and SpotClean on the three smallest MouseBrain
+windows, with each (method, window) run in its own subprocess via
+`/usr/bin/time -v`:
+
+```bash
+python evaluation/scripts/benchmark_methods_mousebrain.py \
+  --methods sparkle,soupx,decontx,spotclean \
+  --plot
+```
+
+The per-window SpotClean run (official R package, non-tiled axolotl-style
+configuration) is handled by `benchmark_spotclean_worker.py`; a completed
+combination can be skipped on reruns with `--skip-existing`.
