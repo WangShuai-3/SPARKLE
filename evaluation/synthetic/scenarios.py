@@ -12,8 +12,9 @@ a few hundred cells. Scenarios use 6 cell types with imbalanced proportions
 (geometric ratio 0.5; S10 uses 8 types), assigned randomly in space except
 in S6, which forms spatially clustered domains — the regime that biases the
 effective decay-scale estimate. Marker genes are strictly cell-type-specific
-in the ground truth, and a 95% UMI dropout is applied to every scenario so
-that sparse leaked counts can drop to zero, mimicking real capture loss.
+in the ground truth, and a 20% UMI dropout is applied to every scenario so
+that sparse leaked counts drop to zero, mimicking real capture loss while
+keeping the overall count level high enough to remain informative.
 """
 
 SCENARIOS = {
@@ -27,7 +28,7 @@ SCENARIOS = {
         "marker_fraction": 0.20,
         "cluster_strength": 0.0,
         "type_size_ratio": 0.5,
-        "dropout_rate": 0.95,
+        "dropout_rate": 0.20,
     },
     "S2": {
         "name": "Medium multi-type (25% empty)",
@@ -39,7 +40,7 @@ SCENARIOS = {
         "marker_fraction": 0.20,
         "cluster_strength": 0.0,
         "type_size_ratio": 0.5,
-        "dropout_rate": 0.95,
+        "dropout_rate": 0.20,
     },
     "S3": {
         "name": "Dense multi-type (10% empty)",
@@ -51,7 +52,7 @@ SCENARIOS = {
         "marker_fraction": 0.20,
         "cluster_strength": 0.0,
         "type_size_ratio": 0.5,
-        "dropout_rate": 0.95,
+        "dropout_rate": 0.20,
     },
     "S4": {
         "name": "Short lambda multi-type (20 µm)",
@@ -63,7 +64,7 @@ SCENARIOS = {
         "marker_fraction": 0.20,
         "cluster_strength": 0.0,
         "type_size_ratio": 0.5,
-        "dropout_rate": 0.95,
+        "dropout_rate": 0.20,
     },
     "S5": {
         "name": "Long lambda multi-type (500 µm)",
@@ -75,7 +76,7 @@ SCENARIOS = {
         "marker_fraction": 0.20,
         "cluster_strength": 0.0,
         "type_size_ratio": 0.5,
-        "dropout_rate": 0.95,
+        "dropout_rate": 0.20,
     },
     "S6": {
         "name": "Spatially clustered multi-type (domains)",
@@ -87,7 +88,7 @@ SCENARIOS = {
         "marker_fraction": 0.20,
         "cluster_strength": 0.6,
         "type_size_ratio": 0.5,
-        "dropout_rate": 0.95,
+        "dropout_rate": 0.20,
     },
     "S7": {
         "name": "Strong alpha multi-type (<=0.10)",
@@ -99,7 +100,7 @@ SCENARIOS = {
         "marker_fraction": 0.20,
         "cluster_strength": 0.0,
         "type_size_ratio": 0.5,
-        "dropout_rate": 0.95,
+        "dropout_rate": 0.20,
     },
     "S8": {
         "name": "Very sparse multi-type (>50% empty)",
@@ -111,7 +112,7 @@ SCENARIOS = {
         "marker_fraction": 0.20,
         "cluster_strength": 0.0,
         "type_size_ratio": 0.5,
-        "dropout_rate": 0.95,
+        "dropout_rate": 0.20,
     },
     "S9": {
         "name": "High marker fraction (50% markers)",
@@ -123,7 +124,7 @@ SCENARIOS = {
         "marker_fraction": 0.50,
         "cluster_strength": 0.0,
         "type_size_ratio": 0.5,
-        "dropout_rate": 0.95,
+        "dropout_rate": 0.20,
     },
     "S10": {
         "name": "Many cell types (8 types)",
@@ -135,7 +136,7 @@ SCENARIOS = {
         "marker_fraction": 0.20,
         "cluster_strength": 0.0,
         "type_size_ratio": 0.5,
-        "dropout_rate": 0.95,
+        "dropout_rate": 0.20,
     },
 }
 

@@ -12,6 +12,7 @@ from scipy.sparse import csr_matrix
 from typing import Tuple
 
 from soupx import SoupChannel, autoEstCont, adjustCounts
+import soupx.estimation as _soupx_estimation
 
 
 def run_soupx(
@@ -21,6 +22,8 @@ def run_soupx(
     contamination_range: tuple = (0.01, 0.8),
     tfidf_min: float = 1.0,
     soup_quantile: float = 0.90,
+    fdr: float = 0.01,
+    force_accept: bool = False,
     random_state: int = 42,
     verbose: bool = False,
 ) -> Tuple[np.ndarray, float]:
@@ -42,6 +45,12 @@ def run_soupx(
         contamination_range: (min, max) bounds for contamination fraction ρ.
         tfidf_min: Minimum TF-IDF score for marker genes.
         soup_quantile: Quantile threshold for soup profile filtering.
+        fdr: FDR threshold for the hypergeometric marker-enrichment test in
+            quickMarkers. The official autoEstCont call hardcodes 0.01; the
+            threshold is temporarily relaxed by wrapping quickMarkers only for
+            the duration of this call. Keep 0.01 to match official behaviour.
+        force_accept: Pass forceAccept=TRUE to autoEstCont, accepting an
+            extremely high estimated contamination instead of failing.
         random_state: Seed for KMeans clustering.
         verbose: Print SoupX progress.
 
@@ -88,13 +97,22 @@ def run_soupx(
 
     # ── 5. Estimate contamination fraction ──────────────────────────
     try:
-        sc = autoEstCont(
-            sc,
-            tfidfMin=tfidf_min,
-            soupQuantile=soup_quantile,
-            contaminationRange=contamination_range,
-            verbose=verbose,
-        )
+        original_quick_markers = _soupx_estimation.quickMarkers
+        if fdr != 0.01:
+            _soupx_estimation.quickMarkers = (
+                lambda *a, **kw: original_quick_markers(*a, FDR=fdr, **kw)
+            )
+        try:
+            sc = autoEstCont(
+                sc,
+                tfidfMin=tfidf_min,
+                soupQuantile=soup_quantile,
+                contaminationRange=contamination_range,
+                forceAccept=force_accept,
+                verbose=verbose,
+            )
+        finally:
+            _soupx_estimation.quickMarkers = original_quick_markers
         rho = float(sc.metaData['rho'].iloc[0])
     except (ValueError, KeyError) as e:
         raise RuntimeError(

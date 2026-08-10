@@ -31,6 +31,8 @@ from evaluation.baselines.spotclean_official import (
     write_official_input,
 )
 from evaluation.scripts.final_comparison import (
+    _cellwise_r2_mean,
+    _rmse_log1p_cp10k,
     compute_cell_expr,
     load_axolotl_data_windowed,
     load_mousebrain_data,
@@ -160,10 +162,12 @@ def reuse_synthetic_h5ad_metrics(
         matrix = np.asarray(matrix, dtype=np.float64).T
         if matrix.shape != true_expr.shape:
             raise ValueError(f"Reused {method} h5ad has shape {matrix.shape}, expected {true_expr.shape}")
-        rmse = float(np.sqrt(np.mean((matrix - true_expr) ** 2)))
+        rmse = _rmse_log1p_cp10k(matrix, true_expr)
+        r2 = _cellwise_r2_mean(matrix, true_expr)
         entry = metrics.setdefault("methods", {}).setdefault(method, {})
         entry["rmse"] = rmse
         entry["reduction_pct"] = (rmse_raw - rmse) / rmse_raw * 100.0
+        entry["r2_mean"] = r2
         entry["result_source"] = "reused_existing_h5ad"
 
 
@@ -909,9 +913,11 @@ def run_synthetic(scenario_id: str, args) -> dict:
         for row, gene in enumerate(output_genes):
             corrected[gene_lookup[gene], :] = handle["X"][:, row]
     true_expr = np.asarray(data["true_expr"], dtype=np.float64)
-    rmse_raw = float(np.sqrt(np.mean((raw_cell - true_expr) ** 2)))
-    rmse = float(np.sqrt(np.mean((corrected - true_expr) ** 2)))
+    rmse_raw = _rmse_log1p_cp10k(raw_cell, true_expr)
+    rmse = _rmse_log1p_cp10k(corrected, true_expr)
     reduction = (rmse_raw - rmse) / rmse_raw * 100.0
+    r2_raw = _cellwise_r2_mean(raw_cell, true_expr)
+    r2 = _cellwise_r2_mean(corrected, true_expr)
     diagnostics = {
         "dataset": tag,
         "implementation": "official_R_package",
@@ -922,7 +928,10 @@ def run_synthetic(scenario_id: str, args) -> dict:
         "gene_keep_selection": "all_genes_as_in_official_simulation_evaluation",
         "rmse_raw": rmse_raw,
         "rmse": rmse,
+        "rmse_definition": "log1p(CP10K)",
         "reduction_pct": reduction,
+        "r2_raw": r2_raw,
+        "r2_mean": r2,
         "end_to_end_runtime_seconds": time.time() - started,
         **prep,
         **r_diag,
@@ -961,6 +970,7 @@ def run_synthetic(scenario_id: str, args) -> dict:
     metrics.setdefault("methods", {})["SpotClean"] = {
         "rmse": rmse,
         "reduction_pct": reduction,
+        "r2_mean": r2,
         "runtime": float(r_diag["runtime_seconds"]),
         "implementation": "official_R_package",
         "background_used": True,
@@ -974,7 +984,8 @@ def run_synthetic(scenario_id: str, args) -> dict:
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     print(
-        f"Saved {h5ad_path}; RMSE={rmse:.4f}, reduction={reduction:.1f}%",
+        f"Saved {h5ad_path}; RMSE(log1p)={rmse:.4f}, reduction={reduction:.1f}%, "
+        f"R^2={r2:.4f}",
         flush=True,
     )
     return diagnostics

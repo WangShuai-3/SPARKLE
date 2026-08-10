@@ -53,7 +53,7 @@ follow log-spaced gradients, so most genes are expressed very low and only a
 few are abundant. Scenarios contain 6 cell types with
 imbalanced proportions (8 in S10), randomly assigned in space except in S6,
 which forms spatially clustered domains; marker genes are strictly
-cell-type-specific in the ground truth, and a 95% UMI dropout is applied
+cell-type-specific in the ground truth, and a 20% UMI dropout is applied
 (binomial thinning of the clean and ambient parts independently); the
 correction ground truth is the observed clean expression. Every scenario
 varies one principal source of difficulty:
@@ -84,12 +84,14 @@ on synthetic scenarios; do not disable it. Cell types form spatial domains,
 so marker-owning cells are each other's strongest leakage sources — without
 the penalty they over-subtract one another and marker specificity degrades.
 
-For synthetic scenarios SoupX is run with `tfidfMin=0.2`: the scenarios use
-6–8 cell types, so the best achievable marker tf-idf is near
-\(\log(n_\mathrm{types})\), and the default `tfidfMin=1.0` leaves little
-headroom once any background expression is present. If SoupX fails on a
-dataset, the failure is recorded explicitly as NaN metrics rather than
-substituted with a heuristic fallback.
+For synthetic scenarios SoupX uses a marker-detection protocol tuned for
+ambient-contaminated data: clustering with the true cell-type count (larger
+clusters restore power in the hypergeometric marker-enrichment test),
+`tfidfMin=0.05`, `soupQuantile=0.5`, and a relaxed quickMarkers FDR of 0.1.
+`forceAccept=TRUE` is enabled so that an extremely high estimated
+contamination is accepted rather than failing the run. If SoupX still fails,
+the failure is recorded explicitly as NaN metrics rather than substituted
+with a heuristic fallback.
 
 Run SpotClean through the Python wrapper for the official R package:
 
@@ -100,11 +102,12 @@ python evaluation/scripts/run_spotclean_official.py \
   --overwrite
 ```
 
-RMSE is calculated on unnormalised raw counts. Cell-wise Pearson \(R^2\)
-compares each corrected cell with its uncontaminated ground truth across all
-simulated genes; cell-type clustering accuracy (ARI of KMeans on
-log1p(CP10K) PCs against the ground-truth cell types) measures how well
-correction preserves cell-type structure:
+Synthetic accuracy is summarised by two scale-robust metrics: RMSE calculated
+on per-cell library-normalised \(\log1p(CP10K)\) counts, and cell-wise
+Pearson \(R^2\) comparing each corrected cell with its uncontaminated ground
+truth across all simulated genes. Cell-type clustering accuracy (ARI of
+KMeans on log1p(CP10K) PCs against the ground-truth cell types) is reported
+as a secondary structure-preservation check:
 
 ```bash
 python evaluation/scripts/evaluate_synthetic_cell_r2.py

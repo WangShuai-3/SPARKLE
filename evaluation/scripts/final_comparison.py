@@ -128,6 +128,38 @@ def _rmse(pred, true):
     return float(np.sqrt(np.mean((pred - true) ** 2)))
 
 
+def _log1p_cp10k(matrix):
+    """Per-cell library-size normalisation to CP10K, then log1p.
+
+    Accepts genes-by-cells matrices.  The scale-invariant transform makes the
+    synthetic RMSE comparable across scenarios with very different count
+    levels and prevents a few high-abundance genes from dominating the error.
+    """
+    matrix = np.maximum(np.asarray(matrix, dtype=np.float64), 0.0)
+    lib = matrix.sum(axis=0, keepdims=True)
+    return np.log1p(matrix / np.maximum(lib, 1.0) * 1e4)
+
+
+def _rmse_log1p_cp10k(pred, true):
+    """RMSE computed on log1p(CP10K)-transformed matrices (genes-by-cells)."""
+    return float(
+        np.sqrt(np.mean((_log1p_cp10k(pred) - _log1p_cp10k(true)) ** 2))
+    )
+
+
+def _cellwise_r2_mean(pred, true):
+    """Mean squared cell-wise Pearson correlation across genes.
+
+    Inputs are genes-by-cells; the metric is computed per cell over genes,
+    matching the evaluation defined in evaluate_synthetic_cell_r2.py.
+    """
+    from evaluation.scripts.evaluate_synthetic_cell_r2 import cellwise_pearson_r2
+
+    pred = np.asarray(pred, dtype=np.float64)
+    true = np.asarray(true, dtype=np.float64)
+    return float(np.nanmean(cellwise_pearson_r2(pred.T, true.T)))
+
+
 def run_synthetic_comparison(
     data,
     n_genes=500,
@@ -138,7 +170,8 @@ def run_synthetic_comparison(
     max_radius=None,
     use_gpu=False,
 ):
-    """Run methods on a synthetic scenario and report RMSE reduction vs raw."""
+    """Run methods on a synthetic scenario and report log1p(CP10K) RMSE
+    reduction vs raw and cell-wise Pearson R^2."""
     if methods is None:
         methods = ["sparkle", "soupx", "decontx"]
     methods = [m.lower().strip() for m in methods]
@@ -151,12 +184,13 @@ def run_synthetic_comparison(
 
     # Per-cell raw expression
     raw_cell = compute_cell_expr(dnb_expr, dnb_labels, n_cells)
-    rmse_raw = _rmse(raw_cell, true_expr)
+    rmse_raw = _rmse_log1p_cp10k(raw_cell, true_expr)
+    r2_raw = _cellwise_r2_mean(raw_cell, true_expr)
 
     print(f"\n{'='*60}")
     print("SYNTHETIC SCENARIO EVALUATION")
     print(f"{'='*60}")
-    print(f"  Raw RMSE: {rmse_raw:.4f}")
+    print(f"  Raw RMSE (log1p CP10K): {rmse_raw:.4f}, R^2: {r2_raw:.4f}")
 
     results = {}
     if lambda_grid is None:
@@ -195,25 +229,35 @@ def run_synthetic_comparison(
         sp_t = time.time() - t0
         if hasattr(sp_corr, "toarray"):
             sp_corr = sp_corr.toarray()
-        rmse_sp = _rmse(sp_corr, true_expr)
+        rmse_sp = _rmse_log1p_cp10k(sp_corr, true_expr)
+        r2_sp = _cellwise_r2_mean(sp_corr, true_expr)
         reduc_sp = (rmse_raw - rmse_sp) / rmse_raw * 100.0
-        print(f"  RMSE={rmse_sp:.4f}, reduction={reduc_sp:.1f}%, "
+        print(f"  RMSE(log1p)={rmse_sp:.4f}, reduction={reduc_sp:.1f}%, "
+              f"R^2={r2_sp:.4f}, "
               f"λ={model.lambda_:.0f}µm, time={sp_t:.1f}s")
         sp_var_data = _build_sparkle_var_data(dnb_expr.shape[0], diag, r2_threshold_sp)
         results["SPARKLE"] = {"rmse": rmse_sp, "reduction": reduc_sp, "runtime": sp_t,
-                               "diag": {"var_data": sp_var_data}}
+                              "r2": r2_sp, "diag": {"var_data": sp_var_data}}
 
     # 2. SoupX
     if "soupx" in methods:
         print(f"\n[SoupX]")
         t0 = time.time()
         try:
-            # Synthetic scenarios use 3-5 balanced cell types, so the best
-            # achievable tf-idf is log(n_types) ≈ 1.1; the default tfidfMin=1.0
-            # leaves no headroom once any background expression is present.
-            # tfidf_min=0.2 is the documented protocol choice for synthetic.
+            # Synthetic protocol tuned for ambient-contaminated marker data:
+            # cluster with the true cell-type count (larger clusters restore
+            # power in SoupX's hypergeometric marker-enrichment test), relax
+            # the tf-idf and soup-profile thresholds, and accept an extremely
+            # high estimated contamination instead of failing (forceAccept).
             sx_corr, sx_rho = run_soupx(
-                dnb_expr, dnb_labels, tfidf_min=0.2, verbose=False
+                dnb_expr,
+                dnb_labels,
+                n_clusters=int(data["params"]["n_cell_types"]),
+                tfidf_min=0.05,
+                soup_quantile=0.5,
+                fdr=0.1,
+                force_accept=True,
+                verbose=False,
             )
         except Exception as e:
             # No heuristic substitution: record the failure explicitly as NaN.
@@ -223,15 +267,23 @@ def run_synthetic_comparison(
                 "rmse": float("nan"),
                 "reduction": float("nan"),
                 "runtime": sx_t,
+                "r2": float("nan"),
                 "error": str(e),
             }
         else:
             sx_t = time.time() - t0
-            rmse_sx = _rmse(sx_corr, true_expr)
+            rmse_sx = _rmse_log1p_cp10k(sx_corr, true_expr)
+            r2_sx = _cellwise_r2_mean(sx_corr, true_expr)
             reduc_sx = (rmse_raw - rmse_sx) / rmse_raw * 100.0
-            print(f"  RMSE={rmse_sx:.4f}, reduction={reduc_sx:.1f}%, "
+            print(f"  RMSE(log1p)={rmse_sx:.4f}, reduction={reduc_sx:.1f}%, "
+                  f"R^2={r2_sx:.4f}, "
                   f"ρ={sx_rho:.4f}, time={sx_t:.1f}s")
-            results["SoupX"] = {"rmse": rmse_sx, "reduction": reduc_sx, "runtime": sx_t}
+            results["SoupX"] = {
+                "rmse": rmse_sx,
+                "reduction": reduc_sx,
+                "runtime": sx_t,
+                "r2": r2_sx,
+            }
 
     # 3. DecontX
     if "decontx" in methods:
@@ -245,17 +297,25 @@ def run_synthetic_comparison(
         }, verbose=False)
         dx_t = time.time() - t0
         if dx_corr is not None:
-            rmse_dx = _rmse(dx_corr, true_expr)
+            rmse_dx = _rmse_log1p_cp10k(dx_corr, true_expr)
+            r2_dx = _cellwise_r2_mean(dx_corr, true_expr)
             reduc_dx = (rmse_raw - rmse_dx) / rmse_raw * 100.0
-            print(f"  RMSE={rmse_dx:.4f}, reduction={reduc_dx:.1f}%, "
+            print(f"  RMSE(log1p)={rmse_dx:.4f}, reduction={reduc_dx:.1f}%, "
+                  f"R^2={r2_dx:.4f}, "
                   f"contamination={dx_diag.get('contamination', 'N/A'):.3f}, time={dx_t:.1f}s")
-            results["DecontX"] = {"rmse": rmse_dx, "reduction": reduc_dx, "runtime": dx_t}
+            results["DecontX"] = {
+                "rmse": rmse_dx,
+                "reduction": reduc_dx,
+                "runtime": dx_t,
+                "r2": r2_dx,
+            }
         else:
             print(f"  DecontX FAILED ({dx_diag.get('error')}); recording NaN metrics")
             results["DecontX"] = {
                 "rmse": float("nan"),
                 "reduction": float("nan"),
                 "runtime": dx_t,
+                "r2": float("nan"),
                 "error": dx_diag.get("error"),
             }
 
@@ -282,8 +342,11 @@ def run_synthetic_comparison(
         "n_cells": int(raw_cell.shape[1]),
         "n_genes": int(raw_cell.shape[0]),
         "rmse_raw": rmse_raw,
+        "rmse_definition": "log1p(CP10K)",
     })
-    metrics.setdefault("raw", {})["rmse"] = rmse_raw
+    metrics.setdefault("raw", {}).update(
+        {"rmse": rmse_raw, "r2_mean": r2_raw}
+    )
     for method_name, r in results.items():
         # Try to recover corrected matrix saved in result dict
         corrected = None
@@ -304,6 +367,7 @@ def run_synthetic_comparison(
             "rmse": r['rmse'],
             "reduction_pct": r['reduction'],
             "runtime": r['runtime'],
+            "r2_mean": r.get('r2', float('nan')),
         }
         if r.get("error"):
             entry["error"] = r["error"]
@@ -312,15 +376,16 @@ def run_synthetic_comparison(
 
     # Summary table
     print(f"\n{'='*60}")
-    print("SUMMARY (RMSE reduction vs raw)")
+    print("SUMMARY (log1p CP10K RMSE reduction vs raw)")
     print(f"{'='*60}")
-    print(f"  {'Method':<16} {'RMSE':>10} {'Reduction':>12} {'Runtime':>10}")
-    print(f"  {'-'*16} {'-'*10} {'-'*12} {'-'*10}")
-    print(f"  {'RAW':<16} {rmse_raw:>10.4f} {'—':>12} {'—':>10}")
+    print(f"  {'Method':<16} {'RMSE':>10} {'Reduction':>12} {'R^2':>8} {'Runtime':>10}")
+    print(f"  {'-'*16} {'-'*10} {'-'*12} {'-'*8} {'-'*10}")
+    print(f"  {'RAW':<16} {rmse_raw:>10.4f} {'—':>12} {r2_raw:>8.4f} {'—':>10}")
     for name, r in results.items():
-        print(f"  {name:<16} {r['rmse']:>10.4f} {r['reduction']:>11.1f}% {r['runtime']:>9.1f}s")
+        print(f"  {name:<16} {r['rmse']:>10.4f} {r['reduction']:>11.1f}% "
+              f"{r.get('r2', float('nan')):>8.4f} {r['runtime']:>9.1f}s")
 
-    return {"rmse_raw": rmse_raw, "results": results}
+    return {"rmse_raw": rmse_raw, "r2_raw": r2_raw, "results": results}
 
 
 def run_all_synthetic_scenarios(
