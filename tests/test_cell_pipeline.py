@@ -6,6 +6,23 @@ import pytest
 from stambient.cell_pipeline import _bin_empty_dnbs
 
 
+def test_pipeline_module_preserves_backward_compatible_exports():
+    """The orchestrator must keep re-exporting the historical helpers."""
+    from stambient.binning import bin_empty_dnbs
+    from stambient.weights import expression_weight, self_confidence_weight
+    from stambient.cell_pipeline import (
+        _bin_empty_dnbs,
+        _expression_weight,
+        _self_confidence_weight,
+        cell_pipeline_fit,
+    )
+
+    assert _bin_empty_dnbs is bin_empty_dnbs
+    assert _expression_weight is expression_weight
+    assert _self_confidence_weight is self_confidence_weight
+    assert callable(cell_pipeline_fit)
+
+
 def _rectangular_grid(width, height, pitch=5.0):
     x = np.arange(0.0, width, pitch)
     y = np.arange(0.0, height, pitch)
