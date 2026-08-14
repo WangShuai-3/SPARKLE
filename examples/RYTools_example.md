@@ -173,6 +173,10 @@ save_cell_h5ad(
     method_name="SPARKLE",
 )
 
+# The corrected h5ad written above is ready for downstream analysis. In the
+# normal case, use it directly (no SCTransform) -- SPARKLE correction already
+# removes ambient leakage, and no extra normalisation step is required.
+
 # ---------------------------------------------------------------------------
 # 5. (Optional) add external annotations to the h5ad
 # ---------------------------------------------------------------------------
@@ -186,9 +190,19 @@ save_cell_h5ad(
 
 ---
 
-## R: read h5ad into Seurat v4 and re-run SCTransform
+## R: (optional) read h5ad into Seurat v4 and re-run SCTransform
 
-The following R script uses `reticulate` to call Python's `scanpy` directly from R, extracts the corrected counts, replaces the `spatial` assay in an existing Seurat v4 object, and re-runs `SCTransform`.
+> **Do you need SCTransform after SPARKLE?** After SPARKLE denoising the
+> corrected cell-level matrix is ready for downstream analysis, and in the
+> normal case **no SCTransform is needed** — generate the h5ad directly from
+> the corrected matrix and proceed. Whether an additional SCTransform step
+> helps depends on your downstream task; base the decision on the actual
+> performance of your downstream analyses (e.g. clustering stability, marker
+> detection, batch behaviour) and evaluate carefully before adopting it. The
+> script below is only needed if you have verified that an extra SCTransform
+> step genuinely improves your results.
+
+The following R script uses `reticulate` to call Python's `scanpy` directly from R, extracts the corrected counts, replaces the `spatial` assay in an existing Seurat v4 object, and optionally re-runs `SCTransform`.
 
 ```r
 library(reticulate)
@@ -281,6 +295,12 @@ saveRDS(seu, "path/to/your_seurat_v4_sparkle_corrected.rds")
 
 ### Notes on the R workflow
 
+- **SCTransform is optional and should be evaluated cautiously**: the
+  `corrected_cell.h5ad` written by SPARKLE can be used directly for downstream
+  analysis without SCTransform, which is the normal recommended path. If you
+  still want to try SCTransform on top of SPARKLE correction, compare the
+  downstream results (clustering, marker genes, etc.) with and without it and
+  keep it only when it clearly improves your actual analyses.
 - **Coordinate system**: The h5ad created by SPARKLE is cell-level; it does not store DNB-level coordinates. If your downstream Seurat analysis needs spatial coordinates, keep them from the original `spatial` assay object or add them to `seu@images` as appropriate for your platform (Stereo-seq, Visium HD, etc.).
 - **Count rounding**: SPARKLE returns corrected expression values that are non-negative but continuous. The example rounds them to integers before creating a Seurat assay because many Seurat functions expect integer counts. If you prefer to keep the continuous values, use `CreateAssayObject(counts = counts)` with a `data` slot instead, but note that `SCTransform` expects counts.
 - **Feature/Cell matching**: Always match by name before overwriting the Seurat assay to avoid silent reordering errors.
