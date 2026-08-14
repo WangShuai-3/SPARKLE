@@ -141,6 +141,39 @@ def test_pipeline_latent_defaults_match_roadmap():
     assert model.latent_eta == 0.5
     assert model.latent_max_iter == 20
     assert model.latent_tol == 1e-4
+    assert model.latent_refit_rounds == 0
+
+
+def test_refit_rounds_require_latent_mode():
+    with pytest.raises(ValueError):
+        SPARKLE(inference_mode="legacy", latent_refit_rounds=1)
+    with pytest.raises(ValueError):
+        SPARKLE(inference_mode="latent", latent_refit_rounds=-1)
+
+
+def test_alpha_refit_is_self_consistent_on_fixture():
+    """v2.0-alpha2: α refit against the latent X must raise the Y-calibrated
+    α (the Y-source over-predicts background, biasing α downward) and settle."""
+    expr, coords, labels = build_freeze_fixture()
+    c0, d0 = SPARKLE(
+        inference_mode="latent", latent_refit_rounds=0, **FIXTURE_KW
+    ).fit_transform(expr, coords, labels)
+    c2, d2 = SPARKLE(
+        inference_mode="latent", latent_refit_rounds=2, **FIXTURE_KW
+    ).fit_transform(expr, coords, labels)
+    h0 = d0["latent_refit_history"]
+    h2 = d2["latent_refit_history"]
+    assert len(h0) == 1 and len(h2) == 3
+    alpha_track = [h["alpha_mean"] for h in h2]
+    assert alpha_track[1] > alpha_track[0]  # Y-calibration biased downward
+    assert abs(alpha_track[2] - alpha_track[1]) < 0.05 * alpha_track[1]
+    assert all(h["converged"] for h in h2)
+    assert (c2 >= 0).all() and c2.sum() <= expr[:, labels >= 0].sum()
+    # rounds=0 must reproduce the plain latent solve exactly.
+    c0b, _ = SPARKLE(
+        inference_mode="latent", latent_refit_rounds=0, **FIXTURE_KW
+    ).fit_transform(expr, coords, labels)
+    np.testing.assert_array_equal(c0, c0b)
 
 
 @pytest.mark.skipif(

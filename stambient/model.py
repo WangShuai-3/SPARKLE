@@ -75,6 +75,12 @@ class SPARKLE:
     latent_tol : float
         Relative L1 convergence tolerance of the latent solve
         (default 1e-4).
+    latent_refit_rounds : int
+        Number of alternating α/R² refit rounds after each latent solve
+        (v2.0-alpha2). λ, the spatial graphs and the background
+        observations stay fixed; only α and R² are re-estimated against
+        the current latent X. 0 (default) reproduces v2.0-alpha1.
+        Requires ``inference_mode='latent'``.
     """
 
     def __init__(
@@ -97,6 +103,7 @@ class SPARKLE:
         latent_eta: float = 0.5,
         latent_max_iter: int = 20,
         latent_tol: float = 1e-4,
+        latent_refit_rounds: int = 0,
     ):
         if not cell_based:
             raise ValueError(
@@ -153,6 +160,18 @@ class SPARKLE:
             raise ValueError(
                 f"latent_tol must be a positive finite value; got {latent_tol!r}"
             )
+        if (
+            not isinstance(latent_refit_rounds, (int, np.integer))
+            or latent_refit_rounds < 0
+        ):
+            raise ValueError(
+                "latent_refit_rounds must be a non-negative integer; "
+                f"got {latent_refit_rounds!r}"
+            )
+        if inference_mode != "latent" and latent_refit_rounds != 0:
+            raise ValueError(
+                "latent_refit_rounds requires inference_mode='latent'"
+            )
 
         self.bin_size = bin_size
         self.distance_metric = distance_metric
@@ -172,6 +191,7 @@ class SPARKLE:
         self.latent_eta = latent_eta
         self.latent_max_iter = latent_max_iter
         self.latent_tol = latent_tol
+        self.latent_refit_rounds = latent_refit_rounds
 
         # Results (populated after fit)
         self.lambda_ = None
@@ -215,6 +235,7 @@ class SPARKLE:
             latent_eta=self.latent_eta,
             latent_max_iter=self.latent_max_iter,
             latent_tol=self.latent_tol,
+            latent_refit_rounds=self.latent_refit_rounds,
         )
         try:
             corrected, diag = cell_pipeline_fit(

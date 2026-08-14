@@ -46,6 +46,19 @@ from .correction import correct_cells
 from .latent_correction import correct_cells_latent
 
 
+def _latent_round_summary(latent_info, alphas, r2_scores, r2_threshold):
+    """Compact per-round diagnostics for the alternating latent solve."""
+    return {
+        "alpha_mean": float(alphas.mean()) if len(alphas) else 0.0,
+        "n_genes_corrected": int((r2_scores >= r2_threshold).sum()),
+        "converged": bool(latent_info["converged"]),
+        "n_iterations_max": max(latent_info["n_iterations"], default=0),
+        "final_rel_change_max": max(
+            latent_info["final_rel_change"], default=float("nan")
+        ),
+    }
+
+
 def cell_pipeline_fit(
     dnb_expr: np.ndarray,
     dnb_coords: np.ndarray,
@@ -68,6 +81,7 @@ def cell_pipeline_fit(
     latent_eta: float = 0.5,
     latent_max_iter: int = 20,
     latent_tol: float = 1e-4,
+    latent_refit_rounds: int = 0,
 ) -> Tuple[np.ndarray, Dict]:
     """Run cell-based SPARKLE pipeline.
 
@@ -98,6 +112,13 @@ def cell_pipeline_fit(
         latent_eta: damping factor of the latent fixed-point update.
         latent_max_iter: maximum latent fixed-point iterations.
         latent_tol: relative L1 convergence tolerance of the latent solve.
+        latent_refit_rounds: number of alternating α/R² refit rounds
+            (v2.0-alpha2).  After each latent solve, α and R² are
+            re-estimated against the current latent X (λ, the empty→cell
+            graph and the background observations stay fixed), then the
+            latent solve is repeated with the updated parameters.  ``0``
+            reproduces v2.0-alpha1.  Only valid for ``inference_mode=
+            'latent'``.
 
     Returns:
         corrected_cell_expr: [genes × n_cells] corrected per-cell expression.
@@ -110,6 +131,14 @@ def cell_pipeline_fit(
     if inference_mode not in {"legacy", "latent"}:
         raise ValueError(
             f"inference_mode must be 'legacy' or 'latent'; got {inference_mode!r}"
+        )
+    if not isinstance(latent_refit_rounds, (int, np.integer)) or latent_refit_rounds < 0:
+        raise ValueError(
+            f"latent_refit_rounds must be a non-negative integer; got {latent_refit_rounds!r}"
+        )
+    if inference_mode != "latent" and latent_refit_rounds != 0:
+        raise ValueError(
+            "latent_refit_rounds requires inference_mode='latent'"
         )
 
     gpu, gpu_fallback_reason = resolve_gpu(use_gpu)
@@ -308,6 +337,47 @@ def cell_pipeline_fit(
                 f"in {max(latent_info['n_iterations'], default=0)} iterations "
                 f"(eta={latent_eta}, tol={latent_tol})"
             )
+        refit_history = [_latent_round_summary(latent_info, alphas, r2_scores, r2_threshold)]
+        refit_started = perf_counter()
+        for refit_round in range(latent_refit_rounds):
+            # v2.0-alpha2: re-calibrate α/R² against the current latent X so
+            # the leakage strength is self-consistent with the X source.
+            # λ, W_empty and the background observations stay fixed.
+            alphas, r2_scores, effective_gpu_gene_batch_size = estimate_alphas(
+                gene_indices=gene_indices,
+                cell_expr=corrected_expr,
+                cell_areas=cell_areas,
+                empty_bin_expr=empty_bin_expr,
+                empty_bin_areas=empty_bin_areas,
+                W_empty=W_empty,
+                use_expr_weight=use_expr_weight,
+                gpu=gpu,
+                storage_dtype=storage_dtype,
+                reduction_dtype=reduction_dtype,
+                gpu_gene_batch_size=gpu_gene_batch_size,
+            )
+            correction_kwargs["alphas"] = alphas
+            correction_kwargs["r2_scores"] = r2_scores
+            corrected_expr, latent_info = correct_cells_latent(
+                eta=latent_eta,
+                max_iter=latent_max_iter,
+                tol=latent_tol,
+                **correction_kwargs,
+            )
+            refit_history.append(
+                _latent_round_summary(latent_info, alphas, r2_scores, r2_threshold)
+            )
+            if verbose:
+                print(
+                    f"  → refit round {refit_round + 1}: "
+                    f"α_mean={alphas.mean():.4f}, "
+                    f"converged={latent_info['converged']} "
+                    f"in {max(latent_info['n_iterations'], default=0)} iterations"
+                )
+        if latent_refit_rounds:
+            timings["alpha_refit_sec"] = perf_counter() - refit_started
+            # The R² gate and corrected-gene count follow the final refit.
+            n_corrected = int((r2_scores >= r2_threshold).sum())
     else:
         corrected_expr = correct_cells(**correction_kwargs)
     timings["correction_sec"] = perf_counter() - stage_started
@@ -326,6 +396,10 @@ def cell_pipeline_fit(
         "r2_threshold": r2_threshold,
         "inference_mode": inference_mode,
         "latent": latent_info,
+        "latent_refit_rounds": int(latent_refit_rounds),
+        "latent_refit_history": (
+            refit_history if inference_mode == "latent" else None
+        ),
         "alpha_mean": float(alphas.mean()) if n_genes_use > 0 else 0.0,
         "r2_mean": float(r2_scores.mean()) if n_genes_use > 0 else 0.0,
         "gene_indices": gene_indices,
