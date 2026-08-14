@@ -87,13 +87,24 @@ def _load_method_adata(dataset, method):
     if not path.exists():
         return None
     adata = ad.read_h5ad(path)
-    if dataset == "ovarian" and "annotation" not in adata.obs.columns:
-        # Shared v1 grouping: RCTD RAW first_type (same as the manuscript).
-        ft = pd.read_csv(OVARIAN_FIRST_TYPE)
-        mapping = dict(zip(ft["cell_id"].astype(int), ft["first_type"].astype(str)))
-        adata.obs["annotation"] = [
-            mapping.get(int(cid), "Unknown") for cid in adata.obs["cell_id"]
-        ]
+    if dataset == "ovarian":
+        existing = (
+            adata.obs["annotation"].astype(str)
+            if "annotation" in adata.obs.columns
+            else pd.Series(dtype=str)
+        )
+        has_labels = len(existing) > 0 and not existing.isin(
+            ["Unknown", "nan", "None", ""]
+        ).all()
+        if not has_labels:
+            # Shared v1 grouping: RCTD RAW first_type (same as the manuscript).
+            ft = pd.read_csv(OVARIAN_FIRST_TYPE)
+            mapping = dict(
+                zip(ft["cell_id"].astype(int), ft["first_type"].astype(str))
+            )
+            adata.obs["annotation"] = [
+                mapping.get(int(cid), "Unknown") for cid in adata.obs["cell_id"]
+            ]
     return adata
 
 

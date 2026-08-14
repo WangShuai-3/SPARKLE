@@ -48,6 +48,32 @@ from evaluation.scripts.final_comparison import (
 )
 from evaluation.synthetic import SCENARIOS
 
+
+def _aggregate_cell_expr(dnb_expr, dnb_labels, cell_ids):
+    """Aggregate DNB expression into per-cell expression [genes x cells].
+
+    Unlike compute_cell_expr (which assumes 0-based contiguous labels),
+    this maps arbitrary cell identifiers through ``cell_ids``, matching the
+    axolotl path of final_comparison.run_axolotl_comparison.
+    """
+    from scipy.sparse import csr_matrix as _csr
+
+    cell_ids = np.asarray(cell_ids)
+    label_to_idx = {cid: i for i, cid in enumerate(cell_ids)}
+    labels_0based = np.array(
+        [label_to_idx.get(l, -1) for l in dnb_labels], dtype=np.int64
+    )
+    valid = labels_0based >= 0
+    indicator = _csr(
+        (
+            np.ones(int(valid.sum())),
+            (np.flatnonzero(valid), labels_0based[valid]),
+        ),
+        shape=(dnb_expr.shape[1], len(cell_ids)),
+    )
+    return (dnb_expr @ indicator).toarray()
+
+
 METHODS = ["raw", "SPARKLEv1", "SPARKLEv2", "SPARKLEv2NP"]
 LAMBDA_GRID = [10, 20, 30, 50, 70, 100, 150, 200, 300, 500]
 
@@ -122,7 +148,7 @@ def run_dataset(dataset, sub, cell_ids, ann_map, tag, methods, use_gpu,
     else:
         metrics = {"dataset": tag, "seed": seed, "raw": {}, "methods": {}}
 
-    raw_cell = compute_cell_expr(sub["dnb_expr"], sub["dnb_labels"], len(cell_ids))
+    raw_cell = _aggregate_cell_expr(sub["dnb_expr"], sub["dnb_labels"], cell_ids)
     metrics["raw"].update({
         "library_total": float(raw_cell.sum()),
         "n_cells": int(raw_cell.shape[1]),
