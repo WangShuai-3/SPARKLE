@@ -62,6 +62,19 @@ class SPARKLE:
         (float32 sparse products and float64 reductions), or 'float32'.
     gpu_gene_batch_size : int or None
         Genes per GPU batch. None chooses a batch from available VRAM.
+    inference_mode : str
+        'legacy' (default, SPARKLE 1.x): predict leakage from the observed
+        expression Y. 'latent' (2.0-alpha1): solve a damped fixed-point
+        iteration for the latent clean expression X and use X as the
+        leakage source. Lambda, alpha and the R² gate are identical in
+        both modes.
+    latent_eta : float
+        Damping factor of the latent fixed-point update (default 0.5).
+    latent_max_iter : int
+        Maximum latent fixed-point iterations (default 20).
+    latent_tol : float
+        Relative L1 convergence tolerance of the latent solve
+        (default 1e-4).
     """
 
     def __init__(
@@ -80,6 +93,10 @@ class SPARKLE:
         use_gpu: bool = False,
         gpu_dtype: str = "float64",
         gpu_gene_batch_size: Optional[int] = None,
+        inference_mode: str = "legacy",
+        latent_eta: float = 0.5,
+        latent_max_iter: int = 20,
+        latent_tol: float = 1e-4,
     ):
         if not cell_based:
             raise ValueError(
@@ -119,6 +136,23 @@ class SPARKLE:
             raise ValueError(
                 f"r2_threshold must be a finite value in [0, 1]; got {r2_threshold!r}"
             )
+        if inference_mode not in ("legacy", "latent"):
+            raise ValueError(
+                "inference_mode must be 'legacy' or 'latent'; "
+                f"got {inference_mode!r}"
+            )
+        if not np.isfinite(latent_eta) or not 0.0 < latent_eta <= 1.0:
+            raise ValueError(
+                f"latent_eta must be a finite value in (0, 1]; got {latent_eta!r}"
+            )
+        if not isinstance(latent_max_iter, (int, np.integer)) or latent_max_iter < 1:
+            raise ValueError(
+                f"latent_max_iter must be a positive integer; got {latent_max_iter!r}"
+            )
+        if not np.isfinite(latent_tol) or latent_tol <= 0:
+            raise ValueError(
+                f"latent_tol must be a positive finite value; got {latent_tol!r}"
+            )
 
         self.bin_size = bin_size
         self.distance_metric = distance_metric
@@ -134,6 +168,10 @@ class SPARKLE:
         self.use_gpu = use_gpu
         self.gpu_dtype = gpu_dtype
         self.gpu_gene_batch_size = gpu_gene_batch_size
+        self.inference_mode = inference_mode
+        self.latent_eta = latent_eta
+        self.latent_max_iter = latent_max_iter
+        self.latent_tol = latent_tol
 
         # Results (populated after fit)
         self.lambda_ = None
@@ -173,6 +211,10 @@ class SPARKLE:
             use_expr_weight=self.use_expr_weight,
             self_confidence_penalty=self.self_confidence_penalty,
             verbose=self.verbose,
+            inference_mode=self.inference_mode,
+            latent_eta=self.latent_eta,
+            latent_max_iter=self.latent_max_iter,
+            latent_tol=self.latent_tol,
         )
         try:
             corrected, diag = cell_pipeline_fit(

@@ -43,6 +43,7 @@ from .graphs import build_cell_to_cell_graph, build_empty_to_cell_graph
 from .lambda_search import estimate_lambda
 from .alpha_estimation import estimate_alphas
 from .correction import correct_cells
+from .latent_correction import correct_cells_latent
 
 
 def cell_pipeline_fit(
@@ -63,6 +64,10 @@ def cell_pipeline_fit(
     use_gpu: bool = False,
     gpu_gene_batch_size: Optional[int] = None,
     gpu_dtype: str = "float64",
+    inference_mode: str = "legacy",
+    latent_eta: float = 0.5,
+    latent_max_iter: int = 20,
+    latent_tol: float = 1e-4,
 ) -> Tuple[np.ndarray, Dict]:
     """Run cell-based SPARKLE pipeline.
 
@@ -86,6 +91,13 @@ def cell_pipeline_fit(
         gpu_dtype: GPU precision mode: ``float64`` for strict reproducibility,
             ``mixed`` for float32 sparse products plus float64 reductions, or
             ``float32`` for maximum throughput.
+        inference_mode: ``legacy`` (SPARKLE 1.x, leakage source = observed Y)
+            or ``latent`` (2.0-alpha1: damped fixed-point solve for latent
+            clean expression X as the leakage source).  λ, α and R² gating
+            are identical in both modes.
+        latent_eta: damping factor of the latent fixed-point update.
+        latent_max_iter: maximum latent fixed-point iterations.
+        latent_tol: relative L1 convergence tolerance of the latent solve.
 
     Returns:
         corrected_cell_expr: [genes × n_cells] corrected per-cell expression.
@@ -95,6 +107,10 @@ def cell_pipeline_fit(
     timings = {}
     if gpu_dtype not in {"float64", "mixed", "float32"}:
         raise ValueError("gpu_dtype must be one of: float64, mixed, float32")
+    if inference_mode not in {"legacy", "latent"}:
+        raise ValueError(
+            f"inference_mode must be 'legacy' or 'latent'; got {inference_mode!r}"
+        )
 
     gpu, gpu_fallback_reason = resolve_gpu(use_gpu)
     if gpu is not None:
@@ -256,7 +272,8 @@ def cell_pipeline_fit(
     timings["cell_graph_build_sec"] = perf_counter() - stage_started
 
     stage_started = perf_counter()
-    corrected_expr = correct_cells(
+    latent_info = None
+    correction_kwargs = dict(
         gene_indices=gene_indices,
         r2_scores=r2_scores,
         r2_threshold=r2_threshold,
@@ -278,6 +295,21 @@ def cell_pipeline_fit(
         reduction_dtype=reduction_dtype,
         effective_gpu_gene_batch_size=effective_gpu_gene_batch_size,
     )
+    if inference_mode == "latent":
+        corrected_expr, latent_info = correct_cells_latent(
+            eta=latent_eta,
+            max_iter=latent_max_iter,
+            tol=latent_tol,
+            **correction_kwargs,
+        )
+        if verbose:
+            print(
+                f"  → latent-X solve converged={latent_info['converged']} "
+                f"in {max(latent_info['n_iterations'], default=0)} iterations "
+                f"(eta={latent_eta}, tol={latent_tol})"
+            )
+    else:
+        corrected_expr = correct_cells(**correction_kwargs)
     timings["correction_sec"] = perf_counter() - stage_started
     timings["total_sec"] = perf_counter() - total_started
 
@@ -292,6 +324,8 @@ def cell_pipeline_fit(
         "n_genes_corrected": n_corrected,
         "n_high_genes_selected": n_genes_use,
         "r2_threshold": r2_threshold,
+        "inference_mode": inference_mode,
+        "latent": latent_info,
         "alpha_mean": float(alphas.mean()) if n_genes_use > 0 else 0.0,
         "r2_mean": float(r2_scores.mean()) if n_genes_use > 0 else 0.0,
         "gene_indices": gene_indices,
