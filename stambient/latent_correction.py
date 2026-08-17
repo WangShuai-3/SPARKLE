@@ -60,8 +60,13 @@ def _latent_fixed_point_cpu(
     eta: float,
     max_iter: int,
     tol: float,
+    diffuse_ambient: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, List[float]]:
-    """Damped fixed-point solve for one batch of genes (CPU, SciPy)."""
+    """Damped fixed-point solve for one batch of genes (CPU, SciPy).
+
+    ``diffuse_ambient`` is an optional constant [n_cells × batch] term
+    (A_c · β_g) subtracted alongside the local component.
+    """
     X = Y.astype(np.float64, copy=True)
     rel_history: List[float] = []
     for _ in range(max_iter):
@@ -73,6 +78,8 @@ def _latent_fixed_point_cpu(
         )
         neighbor = W_cell.dot(weighted_sources.T)  # [n_cells × batch]
         ambient = alphas[None, :] * cell_areas[:, None] * neighbor
+        if diffuse_ambient is not None:
+            ambient = ambient + diffuse_ambient
         if self_confidence_penalty:
             penalties = self_confidence_weight(sources, mode=penalty_mode)
             ambient *= penalties.T
@@ -165,6 +172,7 @@ def _latent_fixed_point_gpu(
     eta: float,
     max_iter: int,
     tol: float,
+    diffuse_ambient_gpu=None,
 ):
     """Damped fixed-point solve for one batch of genes (GPU, PyTorch).
 
@@ -189,6 +197,8 @@ def _latent_fixed_point_gpu(
             W_cell, weighted_sources.to(dtype=storage_dtype), gpu
         ).to(dtype=reduction_dtype)
         ambient = alphas_gpu * areas_gpu * neighbor
+        if diffuse_ambient_gpu is not None:
+            ambient = ambient + diffuse_ambient_gpu
         if self_confidence_penalty:
             ambient = ambient * _self_confidence_weight_gpu(
                 sources, penalty_mode, torch
@@ -227,6 +237,8 @@ def correct_cells_latent(
     eta: float = 0.5,
     max_iter: int = 20,
     tol: float = 1e-4,
+    betas: Optional[np.ndarray] = None,
+    subtract_diffuse: bool = False,
 ) -> Tuple[np.ndarray, Dict]:
     """Correct cells by solving the latent-X self-consistent system.
 
@@ -235,6 +247,11 @@ def correct_cells_latent(
         eta: damping factor of the fixed-point update (0 < eta <= 1).
         max_iter: maximum fixed-point iterations per gene batch.
         tol: stop when ||ΔX||₁ / (||X||₁ + ε) falls below this value.
+        betas: optional [n_genes_use] diffuse ambient rates aligned with
+            ``gene_indices`` (Poisson count model, Phase 2).
+        subtract_diffuse: subtract the diffuse term A_c·β_g from cells in
+            addition to the local component.  SPARKLE's conservative
+            default (False) only removes the locally predictable part.
 
     Returns:
         corrected_expr: [genes × n_cells] corrected per-cell expression.
@@ -301,6 +318,16 @@ def correct_cells_latent(
                     gpu,
                     dtype=reduction_dtype,
                 )
+                diffuse_gpu = None
+                if betas is not None and subtract_diffuse:
+                    diffuse_gpu = (
+                        to_gpu(
+                            betas[batch_positions][None, :],
+                            gpu,
+                            dtype=reduction_dtype,
+                        )
+                        * areas_gpu
+                    )
                 X_gpu, history = _latent_fixed_point_gpu(
                     Y_gpu,
                     alphas_gpu,
@@ -315,6 +342,7 @@ def correct_cells_latent(
                     eta,
                     max_iter,
                     tol,
+                    diffuse_ambient_gpu=diffuse_gpu,
                 )
                 corrected_expr[batch_gene_indices] = to_cpu(X_gpu.T, gpu)
                 batch_iterations.append(len(history))
@@ -322,6 +350,11 @@ def correct_cells_latent(
                 if len(history) > len(longest_history):
                     longest_history = history
         else:
+            diffuse_ambient = None
+            if betas is not None and subtract_diffuse:
+                diffuse_ambient = (
+                    betas[cpos][None, :] * cell_areas[:, None]
+                )
             X, history = _latent_fixed_point_cpu(
                 Y=cell_expr[cg_idx],
                 alphas=alphas[cpos],
@@ -333,6 +366,7 @@ def correct_cells_latent(
                 eta=eta,
                 max_iter=max_iter,
                 tol=tol,
+                diffuse_ambient=diffuse_ambient,
             )
             corrected_expr[cg_idx] = X
             batch_iterations.append(len(history))

@@ -43,6 +43,7 @@ from .graphs import build_cell_to_cell_graph, build_empty_to_cell_graph
 from .lambda_search import estimate_lambda
 from .alpha_estimation import estimate_alphas
 from .correction import correct_cells
+from .count_model import estimate_leakage_poisson
 from .latent_correction import correct_cells_latent
 
 
@@ -82,6 +83,9 @@ def cell_pipeline_fit(
     latent_max_iter: int = 20,
     latent_tol: float = 1e-4,
     latent_refit_rounds: int = 0,
+    observation_model: str = "weighted_ols",
+    fit_diffuse: bool = True,
+    subtract_diffuse: bool = False,
 ) -> Tuple[np.ndarray, Dict]:
     """Run cell-based SPARKLE pipeline.
 
@@ -119,6 +123,17 @@ def cell_pipeline_fit(
             latent solve is repeated with the updated parameters.  ``0``
             reproduces v2.0-alpha1.  Only valid for ``inference_mode=
             'latent'``.
+        observation_model: background observation model (Phase 2).
+            ``weighted_ols`` (default, 1.x behaviour: area-weighted least
+            squares for α) or ``poisson`` (count model μ = A·(β+ρ·S) fit
+            by projected Newton; requires ``inference_mode='latent'``).
+        fit_diffuse: include the non-local diffuse component β in the
+            Poisson background model.  ``False`` gives the local-only
+            model μ = A·ρ·S (ablation B1).
+        subtract_diffuse: during correction, subtract the diffuse term
+            A_c·β_g from cells in addition to the local component.
+            SPARKLE's conservative default (``False``) only removes the
+            locally predictable component; β then serves to debias ρ.
 
     Returns:
         corrected_cell_expr: [genes × n_cells] corrected per-cell expression.
@@ -139,6 +154,15 @@ def cell_pipeline_fit(
     if inference_mode != "latent" and latent_refit_rounds != 0:
         raise ValueError(
             "latent_refit_rounds requires inference_mode='latent'"
+        )
+    if observation_model not in {"weighted_ols", "poisson"}:
+        raise ValueError(
+            "observation_model must be 'weighted_ols' or 'poisson'; "
+            f"got {observation_model!r}"
+        )
+    if observation_model == "poisson" and inference_mode != "latent":
+        raise ValueError(
+            "observation_model='poisson' requires inference_mode='latent'"
         )
 
     gpu, gpu_fallback_reason = resolve_gpu(use_gpu)
@@ -282,6 +306,39 @@ def cell_pipeline_fit(
     )
     timings["alpha_estimation_sec"] = perf_counter() - stage_started
 
+    # Phase 2: optional Poisson count model for the background.  The OLS
+    # R² above still gates correction (Phase 3 replaces gating with a
+    # count-based evidence score); ρ/β take over the correction strength.
+    betas = None
+    poisson_stats = None
+    if observation_model == "poisson":
+        poisson_started = perf_counter()
+        if verbose:
+            print(
+                "Fitting Poisson background model "
+                f"({'diffuse+local' if fit_diffuse else 'local-only'})..."
+            )
+        betas, rhos, poisson_stats, poisson_batch_size = (
+            estimate_leakage_poisson(
+                gene_indices=gene_indices,
+                cell_expr=cell_expr,
+                cell_areas=cell_areas,
+                empty_bin_expr=empty_bin_expr,
+                empty_bin_areas=empty_bin_areas,
+                W_empty=W_empty,
+                use_expr_weight=use_expr_weight,
+                fit_diffuse=fit_diffuse,
+                gpu=gpu,
+                storage_dtype=storage_dtype,
+                reduction_dtype=reduction_dtype,
+                gpu_gene_batch_size=gpu_gene_batch_size,
+            )
+        )
+        if gpu is not None and effective_gpu_gene_batch_size is None:
+            effective_gpu_gene_batch_size = poisson_batch_size
+        alphas = rhos  # correction strength now comes from the count model
+        timings["poisson_estimation_sec"] = perf_counter() - poisson_started
+
     n_genes_use = len(gene_indices)
     n_corrected = int((r2_scores >= r2_threshold).sum())
     if verbose:
@@ -324,6 +381,10 @@ def cell_pipeline_fit(
         reduction_dtype=reduction_dtype,
         effective_gpu_gene_batch_size=effective_gpu_gene_batch_size,
     )
+    if betas is not None:
+        # Phase 2: hand the diffuse component to the latent correction.
+        correction_kwargs["betas"] = betas
+        correction_kwargs["subtract_diffuse"] = subtract_diffuse
     if inference_mode == "latent":
         corrected_expr, latent_info = correct_cells_latent(
             eta=latent_eta,
@@ -356,6 +417,24 @@ def cell_pipeline_fit(
                 reduction_dtype=reduction_dtype,
                 gpu_gene_batch_size=gpu_gene_batch_size,
             )
+            if observation_model == "poisson":
+                betas, rhos, poisson_stats, _ = estimate_leakage_poisson(
+                    gene_indices=gene_indices,
+                    cell_expr=corrected_expr,
+                    cell_areas=cell_areas,
+                    empty_bin_expr=empty_bin_expr,
+                    empty_bin_areas=empty_bin_areas,
+                    W_empty=W_empty,
+                    use_expr_weight=use_expr_weight,
+                    fit_diffuse=fit_diffuse,
+                    gpu=gpu,
+                    storage_dtype=storage_dtype,
+                    reduction_dtype=reduction_dtype,
+                    gpu_gene_batch_size=gpu_gene_batch_size,
+                )
+                alphas = rhos
+                correction_kwargs["betas"] = betas
+                correction_kwargs["subtract_diffuse"] = subtract_diffuse
             correction_kwargs["alphas"] = alphas
             correction_kwargs["r2_scores"] = r2_scores
             corrected_expr, latent_info = correct_cells_latent(
@@ -395,6 +474,12 @@ def cell_pipeline_fit(
         "n_high_genes_selected": n_genes_use,
         "r2_threshold": r2_threshold,
         "inference_mode": inference_mode,
+        "observation_model": observation_model,
+        "fit_diffuse": bool(fit_diffuse) if observation_model == "poisson" else None,
+        "subtract_diffuse": bool(subtract_diffuse) if observation_model == "poisson" else None,
+        "rhos_poisson": alphas if observation_model == "poisson" else None,
+        "betas_poisson": betas,
+        "poisson_stats": poisson_stats,
         "latent": latent_info,
         "latent_refit_rounds": int(latent_refit_rounds),
         "latent_refit_history": (

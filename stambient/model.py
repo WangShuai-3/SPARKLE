@@ -81,6 +81,19 @@ class SPARKLE:
         observations stay fixed; only α and R² are re-estimated against
         the current latent X. 0 (default) reproduces v2.0-alpha1.
         Requires ``inference_mode='latent'``.
+    observation_model : str
+        Background observation model (2.x Phase 2). 'weighted_ols'
+        (default, 1.x): gene-specific α by area-weighted OLS. 'poisson':
+        count model μ = A·(β + ρ·S) fit by projected Newton; requires
+        ``inference_mode='latent'``. The OLS R² still gates correction.
+    fit_diffuse : bool
+        Include the non-local diffuse component β in the Poisson model
+        (default True). False gives the local-only model μ = A·ρ·S.
+    subtract_diffuse : bool
+        Also subtract the diffuse term A_c·β_g from cells during
+        correction (default False). SPARKLE's conservative mode only
+        removes the locally predictable component; β then serves to
+        debias the ρ estimate instead of being removed from cells.
     """
 
     def __init__(
@@ -104,6 +117,9 @@ class SPARKLE:
         latent_max_iter: int = 20,
         latent_tol: float = 1e-4,
         latent_refit_rounds: int = 0,
+        observation_model: str = "weighted_ols",
+        fit_diffuse: bool = True,
+        subtract_diffuse: bool = False,
     ):
         if not cell_based:
             raise ValueError(
@@ -172,6 +188,15 @@ class SPARKLE:
             raise ValueError(
                 "latent_refit_rounds requires inference_mode='latent'"
             )
+        if observation_model not in ("weighted_ols", "poisson"):
+            raise ValueError(
+                "observation_model must be 'weighted_ols' or 'poisson'; "
+                f"got {observation_model!r}"
+            )
+        if observation_model == "poisson" and inference_mode != "latent":
+            raise ValueError(
+                "observation_model='poisson' requires inference_mode='latent'"
+            )
 
         self.bin_size = bin_size
         self.distance_metric = distance_metric
@@ -192,6 +217,9 @@ class SPARKLE:
         self.latent_max_iter = latent_max_iter
         self.latent_tol = latent_tol
         self.latent_refit_rounds = latent_refit_rounds
+        self.observation_model = observation_model
+        self.fit_diffuse = fit_diffuse
+        self.subtract_diffuse = subtract_diffuse
 
         # Results (populated after fit)
         self.lambda_ = None
@@ -236,6 +264,9 @@ class SPARKLE:
             latent_max_iter=self.latent_max_iter,
             latent_tol=self.latent_tol,
             latent_refit_rounds=self.latent_refit_rounds,
+            observation_model=self.observation_model,
+            fit_diffuse=self.fit_diffuse,
+            subtract_diffuse=self.subtract_diffuse,
         )
         try:
             corrected, diag = cell_pipeline_fit(
