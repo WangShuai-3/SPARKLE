@@ -54,14 +54,20 @@ from evaluation.synthetic import SCENARIOS
 def _aggregate_cell_expr(dnb_expr, dnb_labels, cell_ids):
     """Aggregate DNB expression into per-cell expression [genes x cells].
 
-    Unlike compute_cell_expr (which assumes 0-based contiguous labels),
-    this maps arbitrary cell identifiers through ``cell_ids``, matching the
-    axolotl path of final_comparison.run_axolotl_comparison.
+    Columns follow the sorted-unique-label order, which is exactly the
+    ``extract_cells``/corrected-matrix column order; every loader pairs its
+    ``cell_ids`` with that order (axolotl: labels are the original ids;
+    mousebrain/ovarian: labels are positional indices into ``cell_ids``).
     """
     from scipy.sparse import csr_matrix as _csr
 
-    cell_ids = np.asarray(cell_ids)
-    label_to_idx = {cid: i for i, cid in enumerate(cell_ids)}
+    unique_labels = np.unique(dnb_labels[dnb_labels >= 0])
+    if len(unique_labels) != len(cell_ids):
+        raise ValueError(
+            f"{len(unique_labels)} unique cell labels vs "
+            f"{len(cell_ids)} cell_ids: loader contract violated"
+        )
+    label_to_idx = {lab: i for i, lab in enumerate(unique_labels)}
     labels_0based = np.array(
         [label_to_idx.get(l, -1) for l in dnb_labels], dtype=np.int64
     )
@@ -71,7 +77,7 @@ def _aggregate_cell_expr(dnb_expr, dnb_labels, cell_ids):
             np.ones(int(valid.sum())),
             (np.flatnonzero(valid), labels_0based[valid]),
         ),
-        shape=(dnb_expr.shape[1], len(cell_ids)),
+        shape=(dnb_expr.shape[1], len(unique_labels)),
     )
     return (dnb_expr @ indicator).toarray()
 
