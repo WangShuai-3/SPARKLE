@@ -54,11 +54,12 @@ from evaluation.scripts.visualize_axolotl_sst_boxplots import (
     load_cell_masks,
 )
 
-METHODS = ["RAW", "SPARKLEv1", "SPARKLEv2", "SPARKLEv2NP"]
-METHOD_FILES = {"RAW": "raw", "SPARKLEv1": "SPARKLEv1",
-                "SPARKLEv2": "SPARKLEv2", "SPARKLEv2NP": "SPARKLEv2NP"}
+METHODS = ["RAW", "SPARKLEv1", "SPARKLEv2", "SPARKLEv2NP",
+           "SPARKLEv2R1", "SPARKLEv2R2"]
+METHOD_FILES = {m: ("raw" if m == "RAW" else m) for m in METHODS}
 METHOD_COLORS = {"RAW": "#7f8c8d", "SPARKLEv1": "#e74c3c",
-                 "SPARKLEv2": "#2980b9", "SPARKLEv2NP": "#27ae60"}
+                 "SPARKLEv2": "#2980b9", "SPARKLEv2NP": "#27ae60",
+                 "SPARKLEv2R1": "#8e44ad", "SPARKLEv2R2": "#d35400"}
 
 TAGS = {
     "mousebrain": "mousebrain_x12500-20000_y2000-10000",

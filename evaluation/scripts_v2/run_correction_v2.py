@@ -8,6 +8,8 @@ inference ablation:
     SPARKLEv1  - inference_mode="legacy", self_confidence_penalty=True   (A0)
     SPARKLEv2  - inference_mode="latent", self_confidence_penalty=True   (A1)
     SPARKLEv2NP- inference_mode="latent", self_confidence_penalty=False  (A2)
+    SPARKLEv2R1- latent + penalty, latent_refit_rounds=1 (v2.0-alpha2)
+    SPARKLEv2R2- latent + penalty, latent_refit_rounds=2 (v2.0-alpha2)
 
 Outputs (isolated from the v1 reports):
     evaluation/reports/v2/h5ad/{tag}_{method}.h5ad
@@ -74,7 +76,8 @@ def _aggregate_cell_expr(dnb_expr, dnb_labels, cell_ids):
     return (dnb_expr @ indicator).toarray()
 
 
-METHODS = ["raw", "SPARKLEv1", "SPARKLEv2", "SPARKLEv2NP"]
+METHODS = ["raw", "SPARKLEv1", "SPARKLEv2", "SPARKLEv2NP",
+           "SPARKLEv2R1", "SPARKLEv2R2"]
 LAMBDA_GRID = [10, 20, 30, 50, 70, 100, 150, 200, 300, 500]
 
 
@@ -107,7 +110,7 @@ DATASET_CONFIG = {
 
 
 def _run_sparkle_v2(sub, cfg, inference_mode, penalty, use_gpu, gpu_dtype,
-                    r2_threshold=0.01, verbose=False):
+                    r2_threshold=0.01, latent_refit_rounds=0, verbose=False):
     """Mirror run_sparkle_method with the 2.x ablation knobs exposed."""
     dnb_expr = sub["dnb_expr"]
     dnb_coords_um = np.asarray(sub["dnb_coords"], dtype=np.float64) * cfg["coord_scale"]
@@ -127,6 +130,7 @@ def _run_sparkle_v2(sub, cfg, inference_mode, penalty, use_gpu, gpu_dtype,
         use_gpu=use_gpu,
         gpu_dtype=gpu_dtype,
         inference_mode=inference_mode,
+        latent_refit_rounds=latent_refit_rounds,
     )
     t0 = time.time()
     corrected, diag = model.fit_transform_from_dnb(dnb_expr, dnb_coords_um, dnb_labels)
@@ -161,18 +165,21 @@ def run_dataset(dataset, sub, cell_ids, ann_map, tag, methods, use_gpu,
                          save_h5ad=save_h5ad)
 
     specs = {
-        "SPARKLEv1": dict(inference_mode="legacy", penalty=True),
-        "SPARKLEv2": dict(inference_mode="latent", penalty=True),
-        "SPARKLEv2NP": dict(inference_mode="latent", penalty=False),
+        "SPARKLEv1": dict(inference_mode="legacy", penalty=True, refit=0),
+        "SPARKLEv2": dict(inference_mode="latent", penalty=True, refit=0),
+        "SPARKLEv2NP": dict(inference_mode="latent", penalty=False, refit=0),
+        "SPARKLEv2R1": dict(inference_mode="latent", penalty=True, refit=1),
+        "SPARKLEv2R2": dict(inference_mode="latent", penalty=True, refit=2),
     }
     for name, spec in specs.items():
         if name not in methods:
             continue
         print(f"\n[{tag}] {name} ({spec['inference_mode']}, "
-              f"penalty={spec['penalty']})...")
+              f"penalty={spec['penalty']}, refit={spec['refit']})...")
         corrected, diag = _run_sparkle_v2(
             sub, cfg, spec["inference_mode"], spec["penalty"],
-            use_gpu, gpu_dtype, verbose=verbose,
+            use_gpu, gpu_dtype, latent_refit_rounds=spec["refit"],
+            verbose=verbose,
         )
         save_result_h5ad(corrected, sub["gene_names"], cell_ids, ann_map,
                          reports / "h5ad" / f"{tag}_{name}.h5ad", name,
@@ -180,6 +187,9 @@ def run_dataset(dataset, sub, cell_ids, ann_map, tag, methods, use_gpu,
         entry = {
             "inference_mode": spec["inference_mode"],
             "self_confidence_penalty": spec["penalty"],
+            "latent_refit_rounds": spec["refit"],
+            "alpha_mean": diag.get("alpha_mean"),
+            "latent_refit_history": diag.get("latent_refit_history"),
             "runtime_sec": diag["runtime"],
             "lambda_estimated": diag["lambda_estimated"],
             "n_genes_corrected": diag["n_genes_corrected"],

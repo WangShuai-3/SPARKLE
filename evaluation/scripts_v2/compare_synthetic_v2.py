@@ -51,11 +51,12 @@ from evaluation.scripts.final_comparison import (
 )
 from evaluation.synthetic import SCENARIOS
 
-METHODS = ["RAW", "SPARKLEv1", "SPARKLEv2", "SPARKLEv2NP"]
-METHOD_FILES = {"RAW": "raw", "SPARKLEv1": "SPARKLEv1",
-                "SPARKLEv2": "SPARKLEv2", "SPARKLEv2NP": "SPARKLEv2NP"}
+METHODS = ["RAW", "SPARKLEv1", "SPARKLEv2", "SPARKLEv2NP",
+           "SPARKLEv2R1", "SPARKLEv2R2"]
+METHOD_FILES = {m: ("raw" if m == "RAW" else m) for m in METHODS}
 METHOD_COLORS = {"RAW": "#7f8c8d", "SPARKLEv1": "#e74c3c",
-                 "SPARKLEv2": "#2980b9", "SPARKLEv2NP": "#27ae60"}
+                 "SPARKLEv2": "#2980b9", "SPARKLEv2NP": "#27ae60",
+                 "SPARKLEv2R1": "#8e44ad", "SPARKLEv2R2": "#d35400"}
 
 
 def _v2_reports_root():
