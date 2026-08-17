@@ -101,7 +101,11 @@ def _fit_poisson_batch_cpu(y, A, S, fit_diffuse, max_iter, tol):
         h_rr = (A**2 * S**2 * ymu2).sum(axis=0)
         nll = _poisson_nll(y, mu)
 
-        grad_norm = np.maximum(np.abs(g_b), np.abs(g_r))
+        # KKT-aware stopping: at a lower bound, a gradient component that
+        # points further out of the feasible set is already satisfied.
+        g_b_eff = np.where(beta > 0.0, g_b, np.minimum(g_b, 0.0))
+        g_r_eff = np.where(rho > 0.0, g_r, np.minimum(g_r, 0.0))
+        grad_norm = np.maximum(np.abs(g_b_eff), np.abs(g_r_eff))
         done = grad_norm < tol * (total_y + 1.0)
         active = free & ~done
         if not active.any():
@@ -122,6 +126,20 @@ def _fit_poisson_batch_cpu(y, A, S, fit_diffuse, max_iter, tol):
         if not fit_diffuse:
             d_b[:] = 0.0
         d_r[~has_signal] = 0.0
+        # Active set: a parameter at its lower bound whose unconstrained
+        # step (x - step*d) would leave the non-negative orthant is dropped
+        # from the system; the free coordinate is re-solved on the reduced
+        # block.  Without this, boundary genes stall: the clipped joint
+        # direction is not a descent direction for the constrained problem.
+        bind_b = active & (beta <= 0.0) & (d_b > 0.0)
+        bind_r = active & (rho <= 0.0) & (d_r > 0.0)
+        only_r = bind_b & ~bind_r
+        only_b = bind_r & ~bind_b
+        d_b = np.where(bind_b, 0.0, d_b)
+        d_r = np.where(bind_r, 0.0, d_r)
+        d_r[only_r] = g_r[only_r] / np.maximum(h_rr[only_r], _HESS_RIDGE)
+        if fit_diffuse:
+            d_b[only_b] = g_b[only_b] / np.maximum(h_bb[only_b], _HESS_RIDGE)
 
         # Backtracking line search with non-negativity projection.
         step = np.ones(batch, dtype=np.float64)
@@ -190,7 +208,10 @@ def _fit_poisson_batch_gpu(y_gpu, A_gpu, S_gpu, gpu, fit_diffuse, max_iter, tol)
         h_rr = (A**2 * S**2 * ymu2).sum(dim=0)
         nll = (mu - y * torch.log(mu)).sum(dim=0)
 
-        grad_norm = torch.maximum(g_b.abs(), g_r.abs())
+        # KKT-aware stopping (see the CPU branch).
+        g_b_eff = torch.where(beta > 0, g_b, g_b.clamp_max(0.0))
+        g_r_eff = torch.where(rho > 0, g_r, g_r.clamp_max(0.0))
+        grad_norm = torch.maximum(g_b_eff.abs(), g_r_eff.abs())
         active = free & (grad_norm >= tol * (total_y + 1.0))
         if not bool(active.any()):
             break
@@ -214,6 +235,16 @@ def _fit_poisson_batch_gpu(y_gpu, A_gpu, S_gpu, gpu, fit_diffuse, max_iter, tol)
         if not fit_diffuse:
             d_b = torch.zeros_like(d_b)
         d_r = torch.where(has_signal, d_r, fzero)
+        # Active set (see the CPU branch).
+        bind_b = active & (beta <= 0) & (d_b > 0)
+        bind_r = active & (rho <= 0) & (d_r > 0)
+        only_r = bind_b & ~bind_r
+        only_b = bind_r & ~bind_b
+        d_b = torch.where(bind_b, torch.zeros_like(d_b), d_b)
+        d_r = torch.where(bind_r, torch.zeros_like(d_r), d_r)
+        d_r[only_r] = g_r[only_r] / h_rr[only_r].clamp_min(_HESS_RIDGE)
+        if fit_diffuse:
+            d_b[only_b] = g_b[only_b] / h_bb[only_b].clamp_min(_HESS_RIDGE)
 
         step = torch.ones_like(beta)
         for _ls in range(30):
@@ -320,6 +351,18 @@ def estimate_leakage_poisson(
                 y_gpu, A_gpu, S_gpu, gpu, fit_diffuse,
                 max_newton_iter, newton_tol,
             )
+            if fit_diffuse:
+                # Nested-model safeguard: the local-only MLE is always
+                # feasible for the diffuse+local model, so keep the
+                # pointwise better solution (beta -> 0 there).
+                b1, r1, ll1, _ = _fit_poisson_batch_gpu(
+                    y_gpu, A_gpu, S_gpu, gpu, False,
+                    max_newton_iter, newton_tol,
+                )
+                better = ll1 > ll
+                b = gpu.torch.where(better, gpu.torch.zeros_like(b), b)
+                r = gpu.torch.where(better, r1, r)
+                ll = gpu.torch.where(better, ll1, ll)
             betas[start:stop] = to_cpu(b, gpu)
             rhos[start:stop] = to_cpu(r, gpu)
             logliks[start:stop] = to_cpu(ll, gpu)
@@ -327,14 +370,29 @@ def estimate_leakage_poisson(
     else:
         S_all = W_empty.dot(sources.T)  # [n_bins × n_genes_use]
         # CPU processes all genes in one dense Newton batch.
+        y_all = empty_bin_expr[gene_indices].T
         b, r, ll, ll0 = _fit_poisson_batch_cpu(
-            empty_bin_expr[gene_indices].T,
+            y_all,
             empty_bin_areas,
             S_all,
             fit_diffuse,
             max_newton_iter,
             newton_tol,
         )
+        if fit_diffuse:
+            # Nested-model safeguard (see the GPU branch).
+            b1, r1, ll1, _ = _fit_poisson_batch_cpu(
+                y_all,
+                empty_bin_areas,
+                S_all,
+                False,
+                max_newton_iter,
+                newton_tol,
+            )
+            better = ll1 > ll
+            b = np.where(better, 0.0, b)
+            r = np.where(better, r1, r)
+            ll = np.where(better, ll1, ll)
         betas, rhos, logliks, null_logliks = b, r, ll, ll0
 
     stats = {

@@ -10,6 +10,9 @@ inference ablation:
     SPARKLEv2NP- inference_mode="latent", self_confidence_penalty=False  (A2)
     SPARKLEv2R1- latent + penalty, latent_refit_rounds=1 (v2.0-alpha2)
     SPARKLEv2R2- latent + penalty, latent_refit_rounds=2 (v2.0-alpha2)
+    SPARKLEv2P1- v2R2 + Poisson count model, local-only (B1, 2.x Phase 2)
+    SPARKLEv2P2- v2R2 + Poisson count model, diffuse+local (B2, 2.x Phase 2)
+    SPARKLEv2P2D- v2P2 + subtract_diffuse=True (B3 ablation)
 
 Outputs (isolated from the v1 reports):
     evaluation/reports/v2/h5ad/{tag}_{method}.h5ad
@@ -49,6 +52,10 @@ from evaluation.scripts.final_comparison import (
     subsample_data,
 )
 from evaluation.synthetic import SCENARIOS
+from evaluation.scripts_v2.mismatch import (
+    MISMATCH_SCENARIOS,
+    load_mismatch_scenario_data,
+)
 
 
 def _aggregate_cell_expr(dnb_expr, dnb_labels, cell_ids):
@@ -83,7 +90,8 @@ def _aggregate_cell_expr(dnb_expr, dnb_labels, cell_ids):
 
 
 METHODS = ["raw", "SPARKLEv1", "SPARKLEv2", "SPARKLEv2NP",
-           "SPARKLEv2R1", "SPARKLEv2R2"]
+           "SPARKLEv2R1", "SPARKLEv2R2",
+           "SPARKLEv2P1", "SPARKLEv2P2", "SPARKLEv2P2D"]
 LAMBDA_GRID = [10, 20, 30, 50, 70, 100, 150, 200, 300, 500]
 
 
@@ -99,6 +107,9 @@ DATASET_CONFIG = {
     "synthetic": dict(x_range=None, y_range=None, n_genes=200, n_high_genes=80,
                       n_lambda_genes=50, coord_scale=1.0, max_radius=300.0,
                       tag="synthetic"),
+    "mismatch": dict(x_range=None, y_range=None, n_genes=200, n_high_genes=80,
+                     n_lambda_genes=50, coord_scale=1.0, max_radius=300.0,
+                     tag="mismatch"),
     "axolotl": dict(x_range=(10500, 12500), y_range=(6000, 11100),
                     n_genes=200, n_high_genes=200, n_lambda_genes=100,
                     coord_scale=STEREOSEQ_PITCH_UM,
@@ -116,7 +127,9 @@ DATASET_CONFIG = {
 
 
 def _run_sparkle_v2(sub, cfg, inference_mode, penalty, use_gpu, gpu_dtype,
-                    r2_threshold=0.01, latent_refit_rounds=0, verbose=False):
+                    r2_threshold=0.01, latent_refit_rounds=0,
+                    observation_model="weighted_ols", fit_diffuse=False,
+                    subtract_diffuse=False, verbose=False):
     """Mirror run_sparkle_method with the 2.x ablation knobs exposed."""
     dnb_expr = sub["dnb_expr"]
     dnb_coords_um = np.asarray(sub["dnb_coords"], dtype=np.float64) * cfg["coord_scale"]
@@ -137,6 +150,9 @@ def _run_sparkle_v2(sub, cfg, inference_mode, penalty, use_gpu, gpu_dtype,
         gpu_dtype=gpu_dtype,
         inference_mode=inference_mode,
         latent_refit_rounds=latent_refit_rounds,
+        observation_model=observation_model,
+        fit_diffuse=fit_diffuse,
+        subtract_diffuse=subtract_diffuse,
     )
     t0 = time.time()
     corrected, diag = model.fit_transform_from_dnb(dnb_expr, dnb_coords_um, dnb_labels)
@@ -144,6 +160,16 @@ def _run_sparkle_v2(sub, cfg, inference_mode, penalty, use_gpu, gpu_dtype,
     if hasattr(corrected, "toarray"):
         corrected = corrected.toarray()
     var_data = _build_sparkle_var_data(dnb_expr.shape[0], diag, r2_threshold)
+    if diag.get("rhos_poisson") is not None:
+        n_total = dnb_expr.shape[0]
+        gene_indices = np.asarray(diag["gene_indices"], dtype=int)
+        rho_col = np.full(n_total, np.nan)
+        rho_col[gene_indices] = diag["rhos_poisson"]
+        var_data["sparkle_rho_poisson"] = rho_col
+        if diag.get("betas_poisson") is not None:
+            beta_col = np.full(n_total, np.nan)
+            beta_col[gene_indices] = diag["betas_poisson"]
+            var_data["sparkle_beta_poisson"] = beta_col
     return corrected, {"runtime": runtime, "var_data": var_data, **diag}
 
 
@@ -176,15 +202,28 @@ def run_dataset(dataset, sub, cell_ids, ann_map, tag, methods, use_gpu,
         "SPARKLEv2NP": dict(inference_mode="latent", penalty=False, refit=0),
         "SPARKLEv2R1": dict(inference_mode="latent", penalty=True, refit=1),
         "SPARKLEv2R2": dict(inference_mode="latent", penalty=True, refit=2),
+        "SPARKLEv2P1": dict(inference_mode="latent", penalty=True, refit=2,
+                            observation_model="poisson", fit_diffuse=False),
+        "SPARKLEv2P2": dict(inference_mode="latent", penalty=True, refit=2,
+                            observation_model="poisson", fit_diffuse=True),
+        "SPARKLEv2P2D": dict(inference_mode="latent", penalty=True, refit=2,
+                             observation_model="poisson", fit_diffuse=True,
+                             subtract_diffuse=True),
     }
     for name, spec in specs.items():
         if name not in methods:
             continue
+        obs = spec.get("observation_model", "weighted_ols")
         print(f"\n[{tag}] {name} ({spec['inference_mode']}, "
-              f"penalty={spec['penalty']}, refit={spec['refit']})...")
+              f"penalty={spec['penalty']}, refit={spec['refit']}, "
+              f"obs={obs}, diffuse={spec.get('fit_diffuse')}, "
+              f"subtract={spec.get('subtract_diffuse', False)})...")
         corrected, diag = _run_sparkle_v2(
             sub, cfg, spec["inference_mode"], spec["penalty"],
             use_gpu, gpu_dtype, latent_refit_rounds=spec["refit"],
+            observation_model=obs,
+            fit_diffuse=spec.get("fit_diffuse", False),
+            subtract_diffuse=spec.get("subtract_diffuse", False),
             verbose=verbose,
         )
         save_result_h5ad(corrected, sub["gene_names"], cell_ids, ann_map,
@@ -194,6 +233,11 @@ def run_dataset(dataset, sub, cell_ids, ann_map, tag, methods, use_gpu,
             "inference_mode": spec["inference_mode"],
             "self_confidence_penalty": spec["penalty"],
             "latent_refit_rounds": spec["refit"],
+            "observation_model": obs,
+            "fit_diffuse": spec.get("fit_diffuse") if obs == "poisson" else None,
+            "subtract_diffuse": (
+                spec.get("subtract_diffuse", False) if obs == "poisson" else None
+            ),
             "alpha_mean": diag.get("alpha_mean"),
             "latent_refit_history": diag.get("latent_refit_history"),
             "runtime_sec": diag["runtime"],
@@ -212,6 +256,21 @@ def run_dataset(dataset, sub, cell_ids, ann_map, tag, methods, use_gpu,
                 "n_iterations_max": max(lat["n_iterations"], default=0),
                 "final_rel_change_max": max(lat["final_rel_change"], default=float("nan")),
             }
+        if diag.get("poisson_stats") is not None:
+            ps = diag["poisson_stats"]
+            dll = ps["loglik"] - ps["null_loglik"]
+            entry["poisson"] = {
+                "delta_loglik_mean": float(dll.mean()),
+                "delta_loglik_median": float(np.median(dll)),
+                "rho_positive_rate": ps["rho_positive_rate"],
+                "beta_positive_rate": ps["beta_positive_rate"],
+                "rho_mean": float(diag["alpha_mean"]),
+                "beta_mean": (
+                    float(np.mean(diag["betas_poisson"]))
+                    if diag.get("betas_poisson") is not None
+                    else 0.0
+                ),
+            }
         metrics["methods"][name] = entry
         print(f"  ✓ {name} done in {diag['runtime']:.1f}s "
               f"(λ={diag['lambda_estimated']}, backend={diag['compute_backend']})")
@@ -223,9 +282,10 @@ def run_dataset(dataset, sub, cell_ids, ann_map, tag, methods, use_gpu,
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True,
-                        choices=["synthetic", "axolotl", "mousebrain", "ovarian"])
+                        choices=["synthetic", "mismatch", "axolotl",
+                                 "mousebrain", "ovarian"])
     parser.add_argument("--scenario", type=str, default=None,
-                        help="Synthetic scenario id (e.g. S6)")
+                        help="Synthetic scenario id (e.g. S6, M1)")
     parser.add_argument("--all-scenarios", action="store_true")
     parser.add_argument("--methods", type=str, default=",".join(METHODS),
                         help=f"Comma list from: {','.join(METHODS)}")
@@ -251,6 +311,18 @@ def main():
             data = load_synthetic_scenario_data(sid, seed=args.seed)
             run_dataset("synthetic", data, data["cell_ids"], None,
                         f"synthetic_{sid}", methods, args.use_gpu,
+                        args.gpu_dtype, args.save_h5ad, seed=args.seed,
+                        verbose=args.verbose)
+        return
+
+    if args.dataset == "mismatch":
+        scenarios = sorted(MISMATCH_SCENARIOS.keys()) if args.all_scenarios else [
+            args.scenario or "M1"
+        ]
+        for mid in scenarios:
+            data = load_mismatch_scenario_data(mid, seed=args.seed)
+            run_dataset("mismatch", data, data["cell_ids"], None,
+                        f"mismatch_{mid}", methods, args.use_gpu,
                         args.gpu_dtype, args.save_h5ad, seed=args.seed,
                         verbose=args.verbose)
         return
