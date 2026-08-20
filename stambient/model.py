@@ -94,6 +94,19 @@ class SPARKLE:
         correction (default False). SPARKLE's conservative mode only
         removes the locally predictable component; β then serves to
         debias the ρ estimate instead of being removed from cells.
+    evidence_mode : str
+        Correction gating (2.x Phase 3). 'r2' (default, 1.x): hard
+        weighted-R² threshold. 'cv_deviance': spatial-block
+        cross-validated deviance gain E_g of the local-leakage model over
+        the diffuse-only null; requires ``observation_model='poisson'``.
+    evidence_weight : str
+        'hard' (default): correct genes with E_g > ``evidence_threshold``
+        at full strength (C1). 'linear': scale correction by
+        clip(E_g / ``evidence_saturation``, 0, 1) (C2).
+    evidence_threshold : float
+        Threshold τ of the hard evidence gate (default 0.0).
+    evidence_saturation : float
+        E_g at which the continuous weight saturates (default 0.1).
     """
 
     def __init__(
@@ -120,6 +133,10 @@ class SPARKLE:
         observation_model: str = "weighted_ols",
         fit_diffuse: bool = True,
         subtract_diffuse: bool = False,
+        evidence_mode: str = "r2",
+        evidence_weight: str = "hard",
+        evidence_threshold: float = 0.0,
+        evidence_saturation: float = 0.1,
     ):
         if not cell_based:
             raise ValueError(
@@ -197,6 +214,14 @@ class SPARKLE:
             raise ValueError(
                 "observation_model='poisson' requires inference_mode='latent'"
             )
+        if evidence_mode not in ("r2", "cv_deviance"):
+            raise ValueError(
+                f"evidence_mode must be 'r2' or 'cv_deviance'; got {evidence_mode!r}"
+            )
+        if evidence_mode == "cv_deviance" and observation_model != "poisson":
+            raise ValueError(
+                "evidence_mode='cv_deviance' requires observation_model='poisson'"
+            )
 
         self.bin_size = bin_size
         self.distance_metric = distance_metric
@@ -220,6 +245,10 @@ class SPARKLE:
         self.observation_model = observation_model
         self.fit_diffuse = fit_diffuse
         self.subtract_diffuse = subtract_diffuse
+        self.evidence_mode = evidence_mode
+        self.evidence_weight = evidence_weight
+        self.evidence_threshold = evidence_threshold
+        self.evidence_saturation = evidence_saturation
 
         # Results (populated after fit)
         self.lambda_ = None
@@ -267,6 +296,10 @@ class SPARKLE:
             observation_model=self.observation_model,
             fit_diffuse=self.fit_diffuse,
             subtract_diffuse=self.subtract_diffuse,
+            evidence_mode=self.evidence_mode,
+            evidence_weight=self.evidence_weight,
+            evidence_threshold=self.evidence_threshold,
+            evidence_saturation=self.evidence_saturation,
         )
         try:
             corrected, diag = cell_pipeline_fit(

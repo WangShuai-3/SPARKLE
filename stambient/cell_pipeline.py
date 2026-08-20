@@ -42,6 +42,7 @@ from .aggregation import (
 from .graphs import build_cell_to_cell_graph, build_empty_to_cell_graph
 from .lambda_search import estimate_lambda
 from .alpha_estimation import estimate_alphas
+from .evidence import spatial_cv_evidence
 from .correction import correct_cells
 from .count_model import estimate_leakage_poisson
 from .latent_correction import correct_cells_latent
@@ -58,6 +59,16 @@ def _latent_round_summary(latent_info, alphas, r2_scores, r2_threshold):
             latent_info["final_rel_change"], default=float("nan")
         ),
     }
+
+
+def _evidence_weights(evidence_scores, mode, threshold, saturation):
+    """Map evidence E_g to correction weights w_g in [0, 1].
+
+    ``hard``: 1[E > tau] (C1); ``linear``: clip(E / E_sat, 0, 1) (C2).
+    """
+    if mode == "hard":
+        return (evidence_scores > threshold).astype(np.float64)
+    return np.clip(evidence_scores / saturation, 0.0, 1.0)
 
 
 def cell_pipeline_fit(
@@ -86,6 +97,12 @@ def cell_pipeline_fit(
     observation_model: str = "weighted_ols",
     fit_diffuse: bool = True,
     subtract_diffuse: bool = False,
+    evidence_mode: str = "r2",
+    evidence_weight: str = "hard",
+    evidence_threshold: float = 0.0,
+    evidence_saturation: float = 0.1,
+    evidence_block_size: Optional[float] = None,
+    evidence_splits: int = 2,
 ) -> Tuple[np.ndarray, Dict]:
     """Run cell-based SPARKLE pipeline.
 
@@ -134,6 +151,20 @@ def cell_pipeline_fit(
             A_c·β_g from cells in addition to the local component.
             SPARKLE's conservative default (``False``) only removes the
             locally predictable component; β then serves to debias ρ.
+        evidence_mode: correction gating (Phase 3).  ``r2`` (default, 1.x
+            behaviour: hard weighted-R² threshold) or ``cv_deviance``
+            (spatial-block cross-validated deviance gain E_g of the local
+            leakage model over the diffuse-only null; requires
+            ``observation_model='poisson'``).
+        evidence_weight: how E_g gates correction.  ``hard`` keeps genes
+            with E_g > ``evidence_threshold`` at full strength (C1);
+            ``linear`` scales correction by clip(E_g/
+            ``evidence_saturation``, 0, 1) (C2).
+        evidence_threshold: τ for the hard evidence gate.
+        evidence_saturation: E_g at which the continuous weight reaches 1.
+        evidence_block_size: edge length of one spatial CV block; default
+            ``2 * bin_size``.
+        evidence_splits: checkerboard splits per axis (n_splits² folds).
 
     Returns:
         corrected_cell_expr: [genes × n_cells] corrected per-cell expression.
@@ -164,6 +195,31 @@ def cell_pipeline_fit(
         raise ValueError(
             "observation_model='poisson' requires inference_mode='latent'"
         )
+    if evidence_mode not in {"r2", "cv_deviance"}:
+        raise ValueError(
+            f"evidence_mode must be 'r2' or 'cv_deviance'; got {evidence_mode!r}"
+        )
+    if evidence_mode == "cv_deviance":
+        if observation_model != "poisson":
+            raise ValueError(
+                "evidence_mode='cv_deviance' requires "
+                "observation_model='poisson'"
+            )
+        if evidence_weight not in {"hard", "linear"}:
+            raise ValueError(
+                "evidence_weight must be 'hard' or 'linear'; "
+                f"got {evidence_weight!r}"
+            )
+        if evidence_saturation <= 0:
+            raise ValueError(
+                f"evidence_saturation must be positive; got {evidence_saturation}"
+            )
+        if evidence_splits < 2:
+            raise ValueError(
+                f"evidence_splits must be >= 2; got {evidence_splits}"
+            )
+    if evidence_block_size is None:
+        evidence_block_size = 2.0 * bin_size
 
     gpu, gpu_fallback_reason = resolve_gpu(use_gpu)
     if gpu is not None:
@@ -339,13 +395,59 @@ def cell_pipeline_fit(
         alphas = rhos  # correction strength now comes from the count model
         timings["poisson_estimation_sec"] = perf_counter() - poisson_started
 
-    n_genes_use = len(gene_indices)
-    n_corrected = int((r2_scores >= r2_threshold).sum())
-    if verbose:
-        print(
-            f"  → {n_corrected}/{n_genes_use} genes pass R² threshold "
-            f"({r2_threshold})"
+    # Phase 3: spatial-CV evidence gating replaces the hard R² gate.
+    evidence_info = None
+    correction_weights = None
+    if observation_model == "poisson" and evidence_mode == "cv_deviance":
+        evidence_started = perf_counter()
+        if verbose:
+            print(
+                "Computing spatial-CV leakage evidence "
+                f"({evidence_splits ** 2} block folds)..."
+            )
+        evidence_info = spatial_cv_evidence(
+            gene_indices=gene_indices,
+            cell_expr=cell_expr,
+            cell_areas=cell_areas,
+            empty_bin_expr=empty_bin_expr,
+            empty_bin_areas=empty_bin_areas,
+            empty_bin_coords=empty_bin_coords,
+            empty_to_cell_distances=empty_to_cell_distances,
+            lam_weights=lam_weights,
+            distance_metric=distance_metric,
+            fit_diffuse=fit_diffuse,
+            use_expr_weight=use_expr_weight,
+            n_splits=evidence_splits,
+            block_size=evidence_block_size,
+            gpu=gpu,
+            storage_dtype=storage_dtype,
+            reduction_dtype=reduction_dtype,
+            gpu_gene_batch_size=effective_gpu_gene_batch_size,
         )
+        correction_weights = _evidence_weights(
+            evidence_info["evidence"],
+            evidence_weight,
+            evidence_threshold,
+            evidence_saturation,
+        )
+        timings["evidence_sec"] = perf_counter() - evidence_started
+
+    n_genes_use = len(gene_indices)
+    if correction_weights is not None:
+        n_corrected = int((correction_weights > 0).sum())
+    else:
+        n_corrected = int((r2_scores >= r2_threshold).sum())
+    if verbose:
+        if correction_weights is not None:
+            print(
+                f"  → {n_corrected}/{n_genes_use} genes have positive "
+                f"correction weight (evidence mode={evidence_weight})"
+            )
+        else:
+            print(
+                f"  → {n_corrected}/{n_genes_use} genes pass R² threshold "
+                f"({r2_threshold})"
+            )
 
     # ── 7. Correct cells ───────────────────────────────────────
     if verbose:
@@ -385,6 +487,11 @@ def cell_pipeline_fit(
         # Phase 2: hand the diffuse component to the latent correction.
         correction_kwargs["betas"] = betas
         correction_kwargs["subtract_diffuse"] = subtract_diffuse
+    if correction_weights is not None:
+        # Phase 3: evidence-weighted correction strength and gating.
+        correction_kwargs["alphas"] = alphas * correction_weights
+        correction_kwargs["r2_scores"] = correction_weights
+        correction_kwargs["r2_threshold"] = 1e-12
     if inference_mode == "latent":
         corrected_expr, latent_info = correct_cells_latent(
             eta=latent_eta,
@@ -435,8 +542,39 @@ def cell_pipeline_fit(
                 alphas = rhos
                 correction_kwargs["betas"] = betas
                 correction_kwargs["subtract_diffuse"] = subtract_diffuse
-            correction_kwargs["alphas"] = alphas
-            correction_kwargs["r2_scores"] = r2_scores
+                if evidence_mode == "cv_deviance":
+                    # Phase 3: re-score evidence against the current X.
+                    evidence_info = spatial_cv_evidence(
+                        gene_indices=gene_indices,
+                        cell_expr=corrected_expr,
+                        cell_areas=cell_areas,
+                        empty_bin_expr=empty_bin_expr,
+                        empty_bin_areas=empty_bin_areas,
+                        empty_bin_coords=empty_bin_coords,
+                        empty_to_cell_distances=empty_to_cell_distances,
+                        lam_weights=lam_weights,
+                        distance_metric=distance_metric,
+                        fit_diffuse=fit_diffuse,
+                        use_expr_weight=use_expr_weight,
+                        n_splits=evidence_splits,
+                        block_size=evidence_block_size,
+                        gpu=gpu,
+                        storage_dtype=storage_dtype,
+                        reduction_dtype=reduction_dtype,
+                        gpu_gene_batch_size=effective_gpu_gene_batch_size,
+                    )
+                    correction_weights = _evidence_weights(
+                        evidence_info["evidence"],
+                        evidence_weight,
+                        evidence_threshold,
+                        evidence_saturation,
+                    )
+            if correction_weights is not None:
+                correction_kwargs["alphas"] = alphas * correction_weights
+                correction_kwargs["r2_scores"] = correction_weights
+            else:
+                correction_kwargs["alphas"] = alphas
+                correction_kwargs["r2_scores"] = r2_scores
             corrected_expr, latent_info = correct_cells_latent(
                 eta=latent_eta,
                 max_iter=latent_max_iter,
@@ -444,7 +582,12 @@ def cell_pipeline_fit(
                 **correction_kwargs,
             )
             refit_history.append(
-                _latent_round_summary(latent_info, alphas, r2_scores, r2_threshold)
+                _latent_round_summary(
+                    latent_info,
+                    correction_kwargs["alphas"],
+                    correction_kwargs["r2_scores"],
+                    correction_kwargs["r2_threshold"],
+                )
             )
             if verbose:
                 print(
@@ -455,8 +598,11 @@ def cell_pipeline_fit(
                 )
         if latent_refit_rounds:
             timings["alpha_refit_sec"] = perf_counter() - refit_started
-            # The R² gate and corrected-gene count follow the final refit.
-            n_corrected = int((r2_scores >= r2_threshold).sum())
+            # The gate and corrected-gene count follow the final refit.
+            n_corrected = int(
+                (correction_kwargs["r2_scores"]
+                 >= correction_kwargs["r2_threshold"]).sum()
+            )
     else:
         corrected_expr = correct_cells(**correction_kwargs)
     timings["correction_sec"] = perf_counter() - stage_started
@@ -480,6 +626,9 @@ def cell_pipeline_fit(
         "rhos_poisson": alphas if observation_model == "poisson" else None,
         "betas_poisson": betas,
         "poisson_stats": poisson_stats,
+        "evidence_mode": evidence_mode,
+        "evidence": evidence_info,
+        "correction_weights": correction_weights,
         "latent": latent_info,
         "latent_refit_rounds": int(latent_refit_rounds),
         "latent_refit_history": (
