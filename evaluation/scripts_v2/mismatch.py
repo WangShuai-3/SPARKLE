@@ -14,6 +14,10 @@ against a known truth.
     M2  clean S2 layout (ambient_alpha=0) + the same diffuse component:
         a world with *only* diffuse ambient.  Any local leakage detected
         here is a false positive.
+    M3  S2 geometry with weak local leakage (alpha=0.002): evidence
+        calibration near the detection limit (Phase 3).
+    M4  S2 with 50%% UMI dropout: tests whether evidence degrades
+        gracefully at low sequencing depth (Phase 3).
 
 Ground truth per cell excludes the injected diffuse counts (they are
 ambient, not cellular), so the same true_expr target applies.
@@ -44,12 +48,22 @@ MISMATCH_SCENARIOS = {
         "diffuse_fraction": 0.5,
         "drop_local": True,
     },
+    "M3": {
+        "name": "Weak local leakage (alpha=0.002)",
+        "base": "S2",
+        "ambient_alpha": 0.002,
+    },
+    "M4": {
+        "name": "Deep dropout (0.5, low evidence depth)",
+        "base": "S2",
+        "dropout_rate": 0.5,
+    },
 }
 
 _DIFFUSE_SEED_OFFSET = 7919
 
 
-def _generate_base(scenario, seed, ambient_alpha=None):
+def _generate_base(scenario, seed, ambient_alpha=None, dropout_rate=None):
     return generate_synthetic_data(
         n_cells=scenario.get("n_cells", 200),
         grid_width=SYNTHETIC_GRID_SIZE_DNB,
@@ -69,7 +83,10 @@ def _generate_base(scenario, seed, ambient_alpha=None):
         marker_fraction=scenario.get("marker_fraction", 0.0),
         cluster_strength=scenario.get("cluster_strength", 0.5),
         type_size_ratio=scenario.get("type_size_ratio", 1.0),
-        dropout_rate=scenario.get("dropout_rate", 0.0),
+        dropout_rate=(
+            scenario.get("dropout_rate", 0.0) if dropout_rate is None
+            else dropout_rate
+        ),
         seed=seed,
     )
 
@@ -86,20 +103,29 @@ def load_mismatch_scenario_data(mid, seed=42):
     # Clean DNB expression at empty DNBs is exactly zero in the generator,
     # so the empty-DNB mean is the local ambient level per DNB.
     local_rate = base["dnb_expr"][:, empty_mask].mean(axis=1)
-    true_beta = spec["diffuse_fraction"] * local_rate
+    true_beta = spec.get("diffuse_fraction", 0.0) * local_rate
 
     rng = np.random.RandomState(seed + _DIFFUSE_SEED_OFFSET)
     diffuse = rng.poisson(
         true_beta[:, None], base["dnb_expr"].shape
     ).astype(np.float64)
 
-    if spec["drop_local"]:
+    if spec.get("drop_local", False):
         # Same layout/RNG stream but without local leakage; the injected
         # diffuse level is still calibrated on the local run above.
         clean = _generate_base(scenario, seed, ambient_alpha=0.0)
         source = clean
         true_alpha = np.zeros_like(base["true_alpha"])
         assert np.array_equal(clean["dnb_labels"], base["dnb_labels"])
+    elif "ambient_alpha" in spec or "dropout_rate" in spec:
+        # Generator-parameter override scenario (no diffuse injection).
+        source = _generate_base(
+            scenario, seed,
+            ambient_alpha=spec.get("ambient_alpha"),
+            dropout_rate=spec.get("dropout_rate"),
+        )
+        true_alpha = source["true_alpha"]
+        assert np.array_equal(source["dnb_labels"], base["dnb_labels"])
     else:
         source = base
         true_alpha = base["true_alpha"]
@@ -110,7 +136,7 @@ def load_mismatch_scenario_data(mid, seed=42):
 
     print(f"  Injected diffuse: mean per-DNB rate {true_beta.mean():.4f} "
           f"(local level {local_rate.mean():.4f}, "
-          f"fraction={spec['diffuse_fraction']})")
+          f"fraction={spec.get('diffuse_fraction', 0.0)})")
 
     return {
         "dnb_expr": csr_matrix(dnb_expr.astype(np.float64)),
@@ -128,6 +154,6 @@ def load_mismatch_scenario_data(mid, seed=42):
         "true_lambda": float(scenario["ambient_lambda"]),
         "params": {**source["params"],
                    "mismatch_base": spec["base"],
-                   "diffuse_fraction": spec["diffuse_fraction"],
-                   "drop_local": spec["drop_local"]},
+                   "diffuse_fraction": spec.get("diffuse_fraction", 0.0),
+                   "drop_local": spec.get("drop_local", False)},
     }

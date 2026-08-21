@@ -13,6 +13,8 @@ inference ablation:
     SPARKLEv2P1- v2R2 + Poisson count model, local-only (B1, 2.x Phase 2)
     SPARKLEv2P2- v2R2 + Poisson count model, diffuse+local (B2, 2.x Phase 2)
     SPARKLEv2P2D- v2P2 + subtract_diffuse=True (B3 ablation)
+    SPARKLEv2E1- v2P2 + hard spatial-CV evidence gate (C1, 2.x Phase 3)
+    SPARKLEv2E2- v2P2 + continuous evidence weight (C2, 2.x Phase 3)
 
 Outputs (isolated from the v1 reports):
     evaluation/reports/v2/h5ad/{tag}_{method}.h5ad
@@ -91,7 +93,8 @@ def _aggregate_cell_expr(dnb_expr, dnb_labels, cell_ids):
 
 METHODS = ["raw", "SPARKLEv1", "SPARKLEv2", "SPARKLEv2NP",
            "SPARKLEv2R1", "SPARKLEv2R2",
-           "SPARKLEv2P1", "SPARKLEv2P2", "SPARKLEv2P2D"]
+           "SPARKLEv2P1", "SPARKLEv2P2", "SPARKLEv2P2D",
+           "SPARKLEv2E1", "SPARKLEv2E2"]
 LAMBDA_GRID = [10, 20, 30, 50, 70, 100, 150, 200, 300, 500]
 
 
@@ -129,7 +132,8 @@ DATASET_CONFIG = {
 def _run_sparkle_v2(sub, cfg, inference_mode, penalty, use_gpu, gpu_dtype,
                     r2_threshold=0.01, latent_refit_rounds=0,
                     observation_model="weighted_ols", fit_diffuse=False,
-                    subtract_diffuse=False, verbose=False):
+                    subtract_diffuse=False, evidence_mode="r2",
+                    evidence_weight="hard", verbose=False):
     """Mirror run_sparkle_method with the 2.x ablation knobs exposed."""
     dnb_expr = sub["dnb_expr"]
     dnb_coords_um = np.asarray(sub["dnb_coords"], dtype=np.float64) * cfg["coord_scale"]
@@ -153,6 +157,8 @@ def _run_sparkle_v2(sub, cfg, inference_mode, penalty, use_gpu, gpu_dtype,
         observation_model=observation_model,
         fit_diffuse=fit_diffuse,
         subtract_diffuse=subtract_diffuse,
+        evidence_mode=evidence_mode,
+        evidence_weight=evidence_weight,
     )
     t0 = time.time()
     corrected, diag = model.fit_transform_from_dnb(dnb_expr, dnb_coords_um, dnb_labels)
@@ -170,6 +176,16 @@ def _run_sparkle_v2(sub, cfg, inference_mode, penalty, use_gpu, gpu_dtype,
             beta_col = np.full(n_total, np.nan)
             beta_col[gene_indices] = diag["betas_poisson"]
             var_data["sparkle_beta_poisson"] = beta_col
+    if diag.get("evidence") is not None:
+        n_total = dnb_expr.shape[0]
+        gene_indices = np.asarray(diag["gene_indices"], dtype=int)
+        ev_col = np.full(n_total, np.nan)
+        ev_col[gene_indices] = diag["evidence"]["evidence"]
+        var_data["sparkle_evidence"] = ev_col
+        if diag.get("correction_weights") is not None:
+            w_col = np.full(n_total, np.nan)
+            w_col[gene_indices] = diag["correction_weights"]
+            var_data["sparkle_correction_weight"] = w_col
     return corrected, {"runtime": runtime, "var_data": var_data, **diag}
 
 
@@ -209,21 +225,33 @@ def run_dataset(dataset, sub, cell_ids, ann_map, tag, methods, use_gpu,
         "SPARKLEv2P2D": dict(inference_mode="latent", penalty=True, refit=2,
                              observation_model="poisson", fit_diffuse=True,
                              subtract_diffuse=True),
+        "SPARKLEv2E1": dict(inference_mode="latent", penalty=True, refit=2,
+                            observation_model="poisson", fit_diffuse=True,
+                            evidence_mode="cv_deviance",
+                            evidence_weight="hard"),
+        "SPARKLEv2E2": dict(inference_mode="latent", penalty=True, refit=2,
+                            observation_model="poisson", fit_diffuse=True,
+                            evidence_mode="cv_deviance",
+                            evidence_weight="linear"),
     }
     for name, spec in specs.items():
         if name not in methods:
             continue
         obs = spec.get("observation_model", "weighted_ols")
+        evm = spec.get("evidence_mode", "r2")
         print(f"\n[{tag}] {name} ({spec['inference_mode']}, "
               f"penalty={spec['penalty']}, refit={spec['refit']}, "
               f"obs={obs}, diffuse={spec.get('fit_diffuse')}, "
-              f"subtract={spec.get('subtract_diffuse', False)})...")
+              f"subtract={spec.get('subtract_diffuse', False)}, "
+              f"evidence={evm}/{spec.get('evidence_weight')})...")
         corrected, diag = _run_sparkle_v2(
             sub, cfg, spec["inference_mode"], spec["penalty"],
             use_gpu, gpu_dtype, latent_refit_rounds=spec["refit"],
             observation_model=obs,
             fit_diffuse=spec.get("fit_diffuse", False),
             subtract_diffuse=spec.get("subtract_diffuse", False),
+            evidence_mode=evm,
+            evidence_weight=spec.get("evidence_weight", "hard"),
             verbose=verbose,
         )
         save_result_h5ad(corrected, sub["gene_names"], cell_ids, ann_map,
@@ -234,6 +262,10 @@ def run_dataset(dataset, sub, cell_ids, ann_map, tag, methods, use_gpu,
             "self_confidence_penalty": spec["penalty"],
             "latent_refit_rounds": spec["refit"],
             "observation_model": obs,
+            "evidence_mode": evm if obs == "poisson" else None,
+            "evidence_weight": (
+                spec.get("evidence_weight") if evm == "cv_deviance" else None
+            ),
             "fit_diffuse": spec.get("fit_diffuse") if obs == "poisson" else None,
             "subtract_diffuse": (
                 spec.get("subtract_diffuse", False) if obs == "poisson" else None
@@ -270,6 +302,16 @@ def run_dataset(dataset, sub, cell_ids, ann_map, tag, methods, use_gpu,
                     if diag.get("betas_poisson") is not None
                     else 0.0
                 ),
+            }
+        if diag.get("evidence") is not None:
+            ev = diag["evidence"]
+            w = diag["correction_weights"]
+            entry["evidence"] = {
+                "evidence_mean": float(ev["evidence"].mean()),
+                "evidence_median": float(np.median(ev["evidence"])),
+                "evidence_positive_rate": float((ev["evidence"] > 0).mean()),
+                "weight_mean": float(w.mean()) if w is not None else None,
+                "n_genes_corrected": diag["n_genes_corrected"],
             }
         metrics["methods"][name] = entry
         print(f"  ✓ {name} done in {diag['runtime']:.1f}s "
