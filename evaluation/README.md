@@ -79,6 +79,16 @@ python evaluation/scripts/final_comparison.py \
   --methods sparkle,soupx,decontx
 ```
 
+SoupX and DecontX default to the community Python ports (`soupx-python` /
+`decontx-python`). Add `--baseline-impl r` to run the official R packages
+instead (SoupX from `constantAmateur/SoupX`, DecontX from Bioconductor
+`celda::decontX`), via the adapters in
+`evaluation/baselines/soupx_decontx_official.py` and the standalone wrappers
+`run_soupx_official.R` / `run_decontx_official.R`. The R packages must be
+installed in the `spotclean-official` conda environment (its `Rscript` is
+detected automatically). Metrics entries record
+`implementation: official_R_package` or `python_port`.
+
 SPARKLE must always be run with `self_confidence_penalty=True` (the default)
 on synthetic scenarios; do not disable it. Cell types form spatial domains,
 so marker-owning cells are each other's strongest leakage sources — without
@@ -365,6 +375,10 @@ python evaluation/scripts/benchmark_methods_mousebrain.py \
   --methods sparkle,soupx,decontx,spotclean \
   --plot
 ```
+
+`--baseline-impl r` runs the official-R SoupX/DecontX baselines; results are
+stored with a `_r` suffix (e.g. `w8_soupx_r.txt`) so the Python-port numbers
+are preserved.
 
 The per-window SpotClean run (official R package, non-tiled axolotl-style
 configuration) is handled by `benchmark_spotclean_worker.py`; a completed

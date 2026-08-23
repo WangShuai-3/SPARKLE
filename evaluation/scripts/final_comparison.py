@@ -28,6 +28,11 @@ STEREOSEQ_PITCH_UM = 0.5
 DEFAULT_EMPTY_BIN_SIZE_UM = 25.0
 SYNTHETIC_GRID_SIZE_DNB = 500
 
+# Baseline implementation selector: "python" uses the community ports
+# (soupx-python / decontx-python); "r" uses the official R packages via
+# evaluation/baselines/soupx_decontx_official.py.  Set by --baseline-impl.
+BASELINE_IMPL = "python"
+
 # Optional line-by-line memory profiler; falls back to no-op if not installed.
 try:
     from memory_profiler import profile
@@ -249,16 +254,35 @@ def run_synthetic_comparison(
             # power in SoupX's hypergeometric marker-enrichment test), relax
             # the tf-idf and soup-profile thresholds, and accept an extremely
             # high estimated contamination instead of failing (forceAccept).
-            sx_corr, sx_rho = run_soupx(
-                dnb_expr,
-                dnb_labels,
-                n_clusters=int(data["params"]["n_cell_types"]),
-                tfidf_min=0.05,
-                soup_quantile=0.5,
-                fdr=0.1,
-                force_accept=True,
-                verbose=False,
-            )
+            if BASELINE_IMPL == "r":
+                from evaluation.baselines.soupx_decontx_official import (
+                    run_soupx_official,
+                )
+                sx_corr, sx_rho = run_soupx_official(
+                    dnb_expr,
+                    dnb_labels,
+                    data["gene_names"],
+                    _r_baseline_work_dir(
+                        "soupx", f"synthetic_{data['scenario_id']}"
+                    ),
+                    n_clusters=int(data["params"]["n_cell_types"]),
+                    tfidf_min=0.05,
+                    soup_quantile=0.5,
+                    qmk_fdr=0.1,
+                    force_accept=True,
+                    verbose=False,
+                )
+            else:
+                sx_corr, sx_rho = run_soupx(
+                    dnb_expr,
+                    dnb_labels,
+                    n_clusters=int(data["params"]["n_cell_types"]),
+                    tfidf_min=0.05,
+                    soup_quantile=0.5,
+                    fdr=0.1,
+                    force_accept=True,
+                    verbose=False,
+                )
         except Exception as e:
             # No heuristic substitution: record the failure explicitly as NaN.
             sx_t = time.time() - t0
@@ -294,6 +318,7 @@ def run_synthetic_comparison(
             "dnb_labels": dnb_labels,
             "gene_names": list(data["gene_names"]),
             "cell_ids": data["cell_ids"],
+            "tag": f"synthetic_{data['scenario_id']}",
         }, verbose=False)
         dx_t = time.time() - t0
         if dx_corr is not None:
@@ -369,6 +394,8 @@ def run_synthetic_comparison(
             "runtime": r['runtime'],
             "r2_mean": r.get('r2', float('nan')),
         }
+        if method_name in ("SoupX", "DecontX"):
+            entry["implementation"] = _baseline_impl_label()
         if r.get("error"):
             entry["error"] = r["error"]
         metrics["methods"][method_name] = entry
@@ -696,7 +723,21 @@ def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2
         print(f"\n[{step}/{n_method_steps}] SoupX (top {n_genes} genes)...")
         t0 = time.time()
         try:
-            sx_corr, sx_rho = run_soupx(dnb_expr[top_n, :], labels_0based, verbose=False)
+            if BASELINE_IMPL == "r":
+                from evaluation.baselines.soupx_decontx_official import (
+                    run_soupx_official,
+                )
+                sx_corr, sx_rho = run_soupx_official(
+                    dnb_expr[top_n, :], labels_0based,
+                    [gene_names[i] for i in top_n],
+                    _r_baseline_work_dir("soupx", _window_tag("axolotl", data)),
+                    tfidf_min=0.1,
+                    soup_quantile=0.7,
+                    force_accept=True,
+                    verbose=False,
+                )
+            else:
+                sx_corr, sx_rho = run_soupx(dnb_expr[top_n, :], labels_0based, verbose=False)
         except Exception as e:
             # No heuristic substitution: record the failure explicitly as NaN.
             sx_t = time.time() - t0
@@ -730,6 +771,7 @@ def run_axolotl_comparison(data, n_genes=200, methods=None, lambda_grid=None, r2
             "dnb_labels": dnb_labels,
             "gene_names": list(gene_names),
             "cell_ids": list(cell_ids),
+            "tag": _window_tag("axolotl", data),
         }, verbose=True)
         dx_t = time.time() - t0
         if dx_corr is not None:
@@ -1525,6 +1567,26 @@ def run_sparkle_method(
     return corrected, {'lambda': float(model.lambda_), 'runtime': elapsed, 'var_data': var_data, **diag}
 
 
+def _baseline_impl_label() -> str:
+    """Implementation label recorded in metrics for SoupX/DecontX."""
+    return "official_R_package" if BASELINE_IMPL == "r" else "python_port"
+
+
+def _r_baseline_work_dir(method: str, tag: str) -> Path:
+    """Work directory for official-R baseline intermediates (input/output)."""
+    return _reports_root() / f"{method}_official" / tag
+
+
+def _window_tag(dataset_name: str, data: dict) -> str:
+    """Dataset tag matching the h5ad/metrics naming convention."""
+    x_range = data.get("x_range")
+    y_range = data.get("y_range")
+    if x_range is not None and y_range is not None:
+        return (f"{dataset_name}_x{x_range[0]}-{x_range[1]}"
+                f"_y{y_range[0]}-{y_range[1]}")
+    return f"{dataset_name}_full"
+
+
 def run_soupx_method(sub, verbose=True):
     """运行原始 SoupX（全局 ρ，无空间信息）。
 
@@ -1538,13 +1600,27 @@ def run_soupx_method(sub, verbose=True):
 
     输出 diagnostics 包含 ρ 和 runtime。
     """
-    print(f"\n  SoupX...")
+    print(f"\n  SoupX ({_baseline_impl_label()})...")
     dnb_expr = sub['dnb_expr']
     dnb_labels = sub['dnb_labels']
+    gene_names = sub.get('gene_names')
+    if gene_names is None:
+        gene_names = [f"gene_{i}" for i in range(dnb_expr.shape[0])]
 
     t0 = time.time()
     try:
-        corrected, rho = run_soupx(dnb_expr, dnb_labels, verbose=verbose)
+        if BASELINE_IMPL == "r":
+            from evaluation.baselines.soupx_decontx_official import (
+                run_soupx_official,
+            )
+            tag = sub.get("tag", "adhoc")
+            corrected, rho = run_soupx_official(
+                dnb_expr, dnb_labels, gene_names,
+                _r_baseline_work_dir("soupx", tag),
+                verbose=verbose,
+            )
+        else:
+            corrected, rho = run_soupx(dnb_expr, dnb_labels, verbose=verbose)
         elapsed = time.time() - t0
         print(f"    Done in {elapsed:.1f}s, ρ={rho:.4f}")
         return corrected, {'rho': float(rho), 'runtime': elapsed}
@@ -1567,6 +1643,21 @@ def run_decontx_method(sub, verbose=True):
 
 
 def _decontx_impl(sub, verbose=True):
+    if BASELINE_IMPL == "r":
+        from evaluation.baselines.soupx_decontx_official import (
+            run_decontx_official,
+        )
+        print(f"\n  DecontX ({_baseline_impl_label()})...")
+        dnb_expr_ = sub['dnb_expr']
+        gene_names_ = sub.get('gene_names')
+        if gene_names_ is None:
+            gene_names_ = [f"gene_{i}" for i in range(dnb_expr_.shape[0])]
+        tag = sub.get("tag", "adhoc")
+        return run_decontx_official(
+            dnb_expr_, sub['dnb_labels'], gene_names_,
+            _r_baseline_work_dir("decontx", tag),
+            verbose=verbose,
+        )
     import scanpy as sc
     from decontx import decontx as run_dx
     print(f"\n  DecontX...")
@@ -2604,10 +2695,21 @@ def main():
     parser.add_argument("--methods", type=str,
                         default=None,
                         help="Comma-separated methods to run")
+    parser.add_argument("--baseline-impl", type=str, default="python",
+                        choices=["python", "r"],
+                        help="SoupX/DecontX implementation: 'python' = community "
+                             "ports (soupx-python/decontx-python), 'r' = official "
+                             "R packages (SoupX / celda::decontX) via Rscript")
     parser.add_argument("--annotation-level", type=str, default="cell_group",
                         choices=["cell_class", "cell_subclass", "cell_group"],
                         help="MouseBrain annotation level to use (default: cell_group)")
     args = parser.parse_args()
+
+    global BASELINE_IMPL
+    BASELINE_IMPL = args.baseline_impl
+    if BASELINE_IMPL == "r":
+        from evaluation.baselines.soupx_decontx_official import DEFAULT_RSCRIPT
+        print(f"  Baseline implementation: official R packages ({DEFAULT_RSCRIPT})")
 
     x_range = tuple(args.x_range) if args.x_range else None
     y_range = tuple(args.y_range) if args.y_range else None
@@ -2650,12 +2752,14 @@ def main():
     elif args.dataset == "mousebrain":
         data = load_mousebrain_data(x_range=x_range, y_range=y_range, annotation_level=args.annotation_level)
         sub = subsample_data(data, args.n_genes, cut_genes=cut_genes)
+        sub["tag"] = _window_tag("mousebrain", data)
         run_mousebrain_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius, use_gpu=args.use_gpu)
     elif args.dataset == "ovarian":
         data = load_ovarian_data(x_range=x_range, y_range=y_range, n_genes=args.n_genes)
         if data is None:
             sys.exit(1)
         sub = subsample_data(data, args.n_genes, cut_genes=cut_genes)
+        sub["tag"] = _window_tag("ovarian", data)
         run_visiumhd_comparison(data, sub, args.n_genes, methods, n_high_genes=args.n_high_genes, lambda_grid=lambda_grid, r2_threshold=r2_threshold, save_h5ad=save_h5ad, max_radius=max_radius, dataset_tag="ovarian", use_gpu=args.use_gpu)
     else:  # synthetic
         if args.all_scenarios:
