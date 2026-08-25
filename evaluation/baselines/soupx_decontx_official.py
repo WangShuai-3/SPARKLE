@@ -120,6 +120,33 @@ def _run_r(r_script: Path, input_dir: Path, output_dir: Path,
            extra_args: list, rscript: str) -> None:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Reuse a completed run when the R script and arguments match: the
+    # mousebrain/ovarian decontX EM can take hours, so rerunning the whole
+    # comparison after an unrelated failure must not redo finished work.
+    import hashlib
+    import json as _json
+    manifest_key = hashlib.sha256(
+        _json.dumps(
+            {"script": r_script.name,
+             "script_sha": hashlib.sha256(r_script.read_bytes()).hexdigest(),
+             "args": [str(a) for a in extra_args]},
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    manifest_path = output_dir / "manifest.json"
+    outputs_complete = (
+        (output_dir / "decont.h5").exists()
+        and (output_dir / "diagnostics.tsv").exists()
+    )
+    if (
+        outputs_complete
+        and manifest_path.exists()
+        and _json.loads(manifest_path.read_text()).get("key") == manifest_key
+    ):
+        print(f"  [reuse] {r_script.name} output already complete: {output_dir}")
+        return
+
     command = [rscript, str(r_script), str(Path(input_dir)), str(output_dir)]
     command += [str(arg) for arg in extra_args]
     result = subprocess.run(command, capture_output=True, text=True)
@@ -128,6 +155,7 @@ def _run_r(r_script: Path, input_dir: Path, output_dir: Path,
             f"{r_script.name} failed (exit {result.returncode}):\n"
             f"{result.stderr[-2000:]}"
         )
+    manifest_path.write_text(_json.dumps({"key": manifest_key}))
 
 
 def run_soupx_official(
@@ -141,6 +169,7 @@ def run_soupx_official(
     soup_quantile: float = 0.9,
     qmk_fdr: float = None,
     force_accept: bool = False,
+    cont_max: float = 0.8,
     rscript: str = DEFAULT_RSCRIPT,
     verbose: bool = False,
 ) -> tuple[np.ndarray, float]:
@@ -172,6 +201,7 @@ def run_soupx_official(
         str(n_clusters) if n_clusters is not None else "NA",
         f"{(qmk_fdr if qmk_fdr is not None else 0.01):g}",
         "TRUE" if force_accept else "FALSE",
+        f"{cont_max:g}",
     ]
     if verbose:
         print(f"  [SoupX R] input={input_dir} args={extra_args}")

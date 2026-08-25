@@ -1617,6 +1617,14 @@ def run_soupx_method(sub, verbose=True):
             corrected, rho = run_soupx_official(
                 dnb_expr, dnb_labels, gene_names,
                 _r_baseline_work_dir("soupx", tag),
+                tfidf_min=0.1,
+                soup_quantile=0.7,
+                # 30 clusters: with only 6, cluster-level non-expressing-cell
+                # tests find zero usable cells on large real datasets (any
+                # gene is expressed somewhere in a ~5k-cell cluster).
+                n_clusters=30,
+                force_accept=True,
+                cont_max=0.99,
                 verbose=verbose,
             )
         else:

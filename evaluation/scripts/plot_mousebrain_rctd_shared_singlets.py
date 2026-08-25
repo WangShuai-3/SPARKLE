@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path(
             "evaluation/reports/rctd_mousebrain/"
-            "figure4c_rctd_singlet_shared_9190"
+            "figure4c_rctd_singlet_shared"
         ),
     )
     return parser.parse_args()
@@ -59,8 +59,8 @@ def load_metrics(path: Path) -> pd.DataFrame:
     if frame["n_cells"].nunique() != 1:
         raise ValueError("Figure 4C requires the same denominator for every method")
     denominator = int(frame["n_cells"].iloc[0])
-    if denominator != 9190:
-        raise ValueError(f"Expected 9,190 shared cells, observed {denominator:,}")
+    if denominator < 1000:
+        raise ValueError(f"Shared-cell denominator looks wrong: {denominator:,}")
     expected_pct = frame["n_singlet"] / frame["n_cells"] * 100
     if not np.allclose(frame["pct_singlet"], expected_pct, atol=1e-10):
         raise ValueError("pct_singlet does not match n_singlet / n_cells")

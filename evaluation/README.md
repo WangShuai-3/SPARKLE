@@ -237,8 +237,10 @@ python evaluation/scripts/inject_rctd_cellgroup_mousebrain.py
 
 The final comparison must consistently use `Cell_group`; do not combine RCTD
 labels or denominators from different hierarchy levels. For the Figure 4C
-singlet comparison, use the 9,190 cells retained by all five methods, reported
-in `evaluation/reports/rctd_mousebrain/rctd_Cell_group_all_methods_shared_metrics.csv`.
+singlet comparison, use the cells retained by all five methods, reported in
+`evaluation/reports/rctd_mousebrain/rctd_Cell_group_all_methods_shared_metrics.csv`
+(the shared denominator is 9,190 with the original Python-port baselines and
+18,120 with the official-R baselines — check the file, not this text).
 Do not use the method-specific denominators in `summary_metrics.csv` for this
 panel. Restrict expression evaluation explicitly to the final-manuscript
 methods:

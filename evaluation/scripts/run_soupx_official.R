@@ -38,6 +38,9 @@ n_clusters_arg <- if (length(args) >= 5) as.integer(args[[5]]) else NA_integer_
 # quickMarkers in the SoupX namespace for the duration of this session.
 qmk_fdr <- if (length(args) >= 6) as.numeric(args[[6]]) else 0.01
 force_accept <- if (length(args) >= 7) toupper(args[[7]]) == "TRUE" else FALSE
+# Upper bound of the contamination search range; mousebrain-scale data can
+# need >0.8 for estimateNonExpressingCells to find usable cells.
+cont_max <- if (length(args) >= 8) as.numeric(args[[8]]) else 0.8
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
 suppressPackageStartupMessages({
@@ -126,7 +129,8 @@ sc <- SoupX::autoEstCont(
     tfidfMin = tfidf_min,
     soupQuantile = soup_quantile,
     doPlot = FALSE,
-    forceAccept = force_accept
+    forceAccept = force_accept,
+    contaminationRange = c(0.01, cont_max)
 )
 
 # Adjust counts
@@ -169,13 +173,13 @@ diagnostics <- data.frame(
         "official_package", "soupx_version", "runtime_seconds",
         "rho", "n_genes", "n_dnb", "n_cells", "n_clusters",
         "n_empty_dnb", "tfidf_min", "soup_quantile", "n_clusters_arg",
-        "qmk_fdr", "force_accept"
+        "qmk_fdr", "force_accept", "cont_max"
     ),
     value = c(
         "SoupX", as.character(packageVersion("SoupX")), runtime_seconds,
         rho, n_genes, ncol(tod), n_cells, n_clusters,
         sum(cell_labels < 0L), tfidf_min, soup_quantile, n_clusters_arg,
-        qmk_fdr, force_accept
+        qmk_fdr, force_accept, cont_max
     )
 )
 write.table(diagnostics, file.path(output_dir, "diagnostics.tsv"),
