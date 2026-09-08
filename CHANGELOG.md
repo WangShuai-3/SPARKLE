@@ -2,6 +2,19 @@
 
 All notable changes to `stambient` are documented in this file.
 
+## [0.1.3] - 2026-09-08
+
+### Changed
+
+- Refactor: split the monolithic `cell_pipeline` module into per-stage
+  modules (`aggregation`, `alpha_estimation`, `binning`, `correction`,
+  `graphs`, `lambda_search`, `weights`). No behaviour change.
+
+### Evaluation
+
+- Add official-R SoupX/DecontX baselines and assorted manuscript figure
+  scripts; no impact on the library.
+
 ## [0.1.2] - 2026-08-10
 
 ### Changed

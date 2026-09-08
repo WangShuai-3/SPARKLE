@@ -54,9 +54,12 @@ def _measure(data, x_range, y_range, method):
 
 def main():
     method, x0, x1, y0, y1, out_prefix = sys.argv[1:7]
+    baseline_impl = sys.argv[7] if len(sys.argv) > 7 else "python"
+    import evaluation.scripts.final_comparison as _fc
+    _fc.BASELINE_IMPL = baseline_impl
     x_range = (float(x0), float(x1))
     y_range = (float(y0), float(y1))
-    print(f"[worker] {method} window x={x_range} y={y_range}", flush=True)
+    print(f"[worker] {method} window x={x_range} y={y_range} impl={baseline_impl}", flush=True)
 
     data = load_mousebrain_data(x_range=x_range, y_range=y_range)
     elapsed = _measure(data, x_range, y_range, method)

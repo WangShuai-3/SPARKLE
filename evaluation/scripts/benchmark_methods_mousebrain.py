@@ -48,31 +48,34 @@ def _parse_rss(stderr):
     return None
 
 
-def run_python_method(method, win, skip_existing):
+def run_python_method(method, win, skip_existing, baseline_impl="python"):
     x0, x1 = win["x_range"]
     y0, y1 = win["y_range"]
-    res_path, rss_path = _result_paths(win, method)
+    # R-implementation results use a _r suffix so they never overwrite the
+    # Python-port numbers.
+    label = f"{method}_r" if baseline_impl == "r" else method
+    res_path, rss_path = _result_paths(win, label)
     if skip_existing and res_path.exists() and rss_path.exists():
         info = dict(l.split("=", 1) for l in res_path.read_text().splitlines() if "=" in l)
         peak = float(rss_path.read_text().strip())
         rt = float(info.get("runtime_sec", "nan"))
-        print(f"  [{method:>8} {win['id']}] (skip) runtime={rt:8.1f}s  peakRSS={peak:8.1f} MB")
-        return rt, peak
+        print(f"  [{label:>8} {win['id']}] (skip) runtime={rt:8.1f}s  peakRSS={peak:8.1f} MB")
+        return rt, peak, label
     res_path.unlink(missing_ok=True)
     rss_path.unlink(missing_ok=True)
     cmd = [TIME_BIN, "-v", sys.executable, str(WORKER),
-           method, str(x0), str(x1), str(y0), str(y1), str(res_path)]
+           method, str(x0), str(x1), str(y0), str(y1), str(res_path), baseline_impl]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     peak = _parse_rss(proc.stderr)
     if not res_path.exists():
-        print(f"  [{method} {win['id']}] FAILED\n{proc.stderr[-2000:]}")
-        return None, peak
+        print(f"  [{label} {win['id']}] FAILED\n{proc.stderr[-2000:]}")
+        return None, peak, label
     info = dict(l.split("=", 1) for l in res_path.read_text().splitlines() if "=" in l)
     rt = float(info.get("runtime_sec", "nan"))
     if peak is not None:
         rss_path.write_text(f"{peak:.1f}")
-    print(f"  [{method:>8} {win['id']}] runtime={rt:8.1f}s  peakRSS={peak:8.1f} MB")
-    return rt, peak
+    print(f"  [{label:>8} {win['id']}] runtime={rt:8.1f}s  peakRSS={peak:8.1f} MB")
+    return rt, peak, label
 
 
 def run_spotclean(win, skip_existing):
@@ -107,6 +110,9 @@ def main():
     parser.add_argument("--methods", type=str, default="sparkle,soupx,decontx,spotclean")
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--plot", action="store_true")
+    parser.add_argument("--baseline-impl", type=str, default="python",
+                        choices=["python", "r"],
+                        help="Soupx/DecontX implementation (python port or official R)")
     args = parser.parse_args()
     methods = [m.strip().lower() for m in args.methods.split(",")]
 
@@ -115,11 +121,14 @@ def main():
         for m in methods:
             if m == "spotclean":
                 rt, peak = run_spotclean(win, args.skip_existing)
+                label = m
             else:
-                rt, peak = run_python_method(m, win, args.skip_existing)
+                rt, peak, label = run_python_method(
+                    m, win, args.skip_existing, args.baseline_impl
+                )
             rows.append({
                 "window": win["id"], "area_mm2": win["area_mm2"],
-                "n_cells": win["n_cells"], "method": m,
+                "n_cells": win["n_cells"], "method": label,
                 "runtime_sec": rt, "peak_rss_mb": peak,
             })
 
@@ -139,13 +148,17 @@ def _plot(df, out_dir):
     import matplotlib.pyplot as plt
     colors = {"sparkle": "#1f4e79", "soupx": "#bc8e36",
               "decontx": "#457f78", "spotclean": "#8f6aa8"}
+
+    def _color(m):
+        return colors.get(m, colors.get(m.removesuffix("_r"), "#666666"))
+
     for win in df["window"].unique():
         sub = df[df.window == win].sort_values("runtime_sec")
         fig, axes = plt.subplots(1, 2, figsize=(11, 4))
-        axes[0].bar(sub["method"], sub["runtime_sec"], color=[colors[m] for m in sub["method"]])
+        axes[0].bar(sub["method"], sub["runtime_sec"], color=[_color(m) for m in sub["method"]])
         axes[0].set_ylabel("Runtime (s)")
         axes[0].set_title(f"{win} ({sub.iloc[0]['area_mm2']:.2f} mm²)")
-        axes[1].bar(sub["method"], sub["peak_rss_mb"], color=[colors[m] for m in sub["method"]])
+        axes[1].bar(sub["method"], sub["peak_rss_mb"], color=[_color(m) for m in sub["method"]])
         axes[1].set_ylabel("Peak RSS (MB)")
         for ax in axes:
             ax.tick_params(axis="x", rotation=30)
@@ -155,8 +168,8 @@ def _plot(df, out_dir):
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
     for m in df["method"].unique():
         s = df[df.method == m].sort_values("area_mm2")
-        axes[0].plot(s["area_mm2"], s["runtime_sec"], marker="o", label=m, color=colors[m])
-        axes[1].plot(s["area_mm2"], s["peak_rss_mb"], marker="o", label=m, color=colors[m])
+        axes[0].plot(s["area_mm2"], s["runtime_sec"], marker="o", label=m, color=_color(m))
+        axes[1].plot(s["area_mm2"], s["peak_rss_mb"], marker="o", label=m, color=_color(m))
     axes[0].set_xlabel("Area (mm²)"); axes[0].set_ylabel("Runtime (s)"); axes[0].legend()
     axes[1].set_xlabel("Area (mm²)"); axes[1].set_ylabel("Peak RSS (MB)"); axes[1].legend()
     plt.tight_layout()

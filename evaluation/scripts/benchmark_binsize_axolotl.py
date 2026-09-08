@@ -39,7 +39,8 @@ from evaluation.scripts.final_comparison import (
 
 SST_GENE = "AMEX60DD003175"
 DNB_PITCH_UM = STEREOSEQ_PITCH_UM  # Axolotl Stereo-seq DNB pitch
-NEIGHBOR_RADIUS_UM = 50.0
+# 与主分析(Fig 3c)一致: 邻域半径 25 µm
+NEIGHBOR_RADIUS_UM = 25.0
 
 
 def _prepare_axolotl_eval(data):
@@ -58,7 +59,7 @@ def _prepare_axolotl_eval(data):
 
     sstin_mask = np.array([cell_ids[i] in sstin_set for i in range(n_cells)])
 
-    # Cell centroids -> neighbour / other masks (radius default 50 µm)
+    # Cell centroids -> neighbour / other masks (radius 25 µm, 与主分析一致)
     cc = np.zeros((n_cells, 2))
     for c in range(n_cells):
         m = dnb_labels == cell_ids[c]

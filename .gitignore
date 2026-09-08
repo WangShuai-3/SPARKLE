@@ -49,6 +49,7 @@ Thumbs.db
 # Evaluation datasets (large raw data)
 evaluation/data/
 evaluation/reports
+evaluation/Report_V2/
 
 # Log files
 evaluation/logs/
