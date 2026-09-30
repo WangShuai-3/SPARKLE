@@ -69,6 +69,13 @@ Install GEF (BGI Stereo-seq) I/O support:
 pip install "stambient[gef]"
 ```
 
+Optionally install stereopy for interoperability checks with BGI's own
+toolchain (Python 3.9-3.10 only; not required by `stambient.gef_io`):
+
+```bash
+pip install "stambient[stereopy]"
+```
+
 For local development:
 
 ```bash
@@ -154,7 +161,9 @@ restarts the analysis on CPU and records the fallback in `diagnostics`.
 ## Data loading
 
 Loaders return a common dictionary containing `spot_expr`, `spot_coords`,
-`spot_labels`, `gene_names` and `cell_ids`.
+`spot_labels`, `gene_names` and `cell_ids`. The GEF loaders additionally
+return cell-level metadata (`cell_coords`, `cell_areas`, `cell_dnb_counts`,
+`cell_borders`) used when saving results back to GEF.
 
 ### Stereo-seq GEM with cell labels
 
@@ -207,9 +216,12 @@ not covered by the mask are assigned `-1`.
 `stambient.gef_io` reads and writes BGI's official HDF5-based GEF format
 natively (only `h5py` is required; stereopy is **not** needed). Both the
 current `/cellBin` layout (SAW >= 7.1, GEF versions 3/4) and the legacy
-`cellExp`/`cellData` layout (SAW 5.x-7.0) are supported.
+`cellExp`/`cellData` layout (SAW 5.x-7.0) are supported. Standalone
+readers are also available: `read_cellbin_gef` (alias `load_cellbin_gef`)
+for cellbin files and `read_bin_gef` for raw/tissue DNB layers.
 
 ```python
+from stambient import SPARKLE
 from stambient.gef_io import load_bgi_gef, save_cellbin_gef
 
 # Pair a cellbin GEF with its raw/tissue GEF for a SPARKLE-ready
@@ -221,6 +233,7 @@ data = load_bgi_gef(
     region_um=[5000, 6000, 5000, 6000],  # optional 1 mm^2 crop
 )
 
+model = SPARKLE(bin_size=25.0, max_radius=100.0, r2_threshold=0.01)
 corrected, diagnostics = model.fit_transform(
     data["spot_expr"], data["spot_coords"], data["spot_labels"]
 )
@@ -236,11 +249,18 @@ save_cellbin_gef(
     cell_ids=data["cell_ids"],
     cell_areas=data["cell_areas"],
     cell_borders=data["cell_borders"],
+    cell_dnb_counts=data["cell_dnb_counts"],
+    gene_ids=data["gene_ids"],
 )
 ```
 
 Notes:
 
+- `corrected` has one column per cell carrying at least one in-mask DNB;
+  the `cell_ids`, `cell_coords`, `cell_areas`, `cell_dnb_counts` and
+  `cell_borders` keys of the loaded dictionary are subset to exactly
+  those cells in the same order, so they can be passed to
+  `save_cellbin_gef` unchanged.
 - A cellbin GEF alone contains only segmented cells (no out-of-mask
   layer), so `load_bgi_gef` without `raw_gef_path` returns a cell-level
   dictionary that does not satisfy the SPARKLE input contract.
@@ -251,8 +271,9 @@ Notes:
 - Coordinates are converted to micrometres using each file's
   `resolution` attribute (default 0.5 µm per raw unit).
 - The official format stores integer counts, so corrected values are
-  rounded on save; the exact floats are preserved in a non-standard
-  `/sparkleInfo` group that `read_cellbin_gef` restores automatically.
+  rounded on save; exact floats are preserved in a non-standard
+  `/sparkleInfo` group that `read_cellbin_gef` restores automatically
+  (integer-valued matrices skip the sidecar entirely).
 - Large chips: pass `region_um` to crop the DNB layer instead of
   loading the whole bin group into memory.
 
