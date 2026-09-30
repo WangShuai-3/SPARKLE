@@ -60,6 +60,12 @@ dev = [
 gpu = [
     "torch>=2.0",
 ]
+gef = [
+    "h5py>=3.0",
+]
+stereopy = [
+    "stereopy>=1.3.0; python_version < '3.11'",
+]
 
 [tool.setuptools]
 packages = ["stambient"]
