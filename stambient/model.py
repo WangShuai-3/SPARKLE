@@ -62,6 +62,11 @@ class SPARKLE:
         (float32 sparse products and float64 reductions), or 'float32'.
     gpu_gene_batch_size : int or None
         Genes per GPU batch. None chooses a batch from available VRAM.
+    cpu_gene_batch_size : int or None
+        Genes per CPU batch. None keeps the dense per-batch working set
+        within a fixed RAM budget (~1 GiB), so peak memory no longer grows
+        with the number of genes; the aggregated gene matrices stay sparse
+        on the CPU path.
     """
 
     def __init__(
@@ -80,6 +85,7 @@ class SPARKLE:
         use_gpu: bool = False,
         gpu_dtype: str = "float64",
         gpu_gene_batch_size: Optional[int] = None,
+        cpu_gene_batch_size: Optional[int] = None,
     ):
         if not cell_based:
             raise ValueError(
@@ -119,6 +125,14 @@ class SPARKLE:
             raise ValueError(
                 f"r2_threshold must be a finite value in [0, 1]; got {r2_threshold!r}"
             )
+        if cpu_gene_batch_size is not None and (
+            not isinstance(cpu_gene_batch_size, (int, np.integer))
+            or cpu_gene_batch_size <= 0
+        ):
+            raise ValueError(
+                "cpu_gene_batch_size must be a positive integer or None; "
+                f"got {cpu_gene_batch_size!r}"
+            )
 
         self.bin_size = bin_size
         self.distance_metric = distance_metric
@@ -134,6 +148,7 @@ class SPARKLE:
         self.use_gpu = use_gpu
         self.gpu_dtype = gpu_dtype
         self.gpu_gene_batch_size = gpu_gene_batch_size
+        self.cpu_gene_batch_size = cpu_gene_batch_size
 
         # Results (populated after fit)
         self.lambda_ = None
@@ -180,6 +195,7 @@ class SPARKLE:
                 use_gpu=self.use_gpu,
                 gpu_dtype=self.gpu_dtype,
                 gpu_gene_batch_size=self.gpu_gene_batch_size,
+                cpu_gene_batch_size=self.cpu_gene_batch_size,
                 **kwargs,
             )
         except (GPUExecutionError, RuntimeError) as exc:

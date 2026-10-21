@@ -2,6 +2,41 @@
 
 All notable changes to `stambient` are documented in this file.
 
+## [0.1.4] - 2026-10-21
+
+### Changed
+
+- CPU path memory: the estimation stages (λ search, α estimation,
+  correction) now process genes in batches like the GPU path, and the
+  aggregated gene × cell / gene × bin matrices stay sparse with only the
+  active batch densified. Peak RAM no longer grows with the number of
+  genes, which makes all-gene (`n_high_genes=None`) runs on large datasets
+  feasible; on a 25k-gene × 1.1M-DNB synthetic benchmark peak RSS dropped
+  from 27.8 GiB to 7.4 GiB (now dominated by the dense corrected output)
+  while runtime improved 2.4x. New `cpu_gene_batch_size` parameter
+  (default: adaptive, ~1 GiB dense working set per batch); results are
+  unchanged up to floating-point rounding from the batched sparse products.
+
+### Added
+
+- Native BGI GEF I/O (`stambient.gef_io`, h5py-only; stereopy stays
+  optional): `read_cellbin_gef`/`load_cellbin_gef` reads official
+  cellbin GEF files (current `/cellBin` layout of SAW >= 7.1 and the
+  legacy `cellExp`/`cellData` layout), `read_bin_gef` reads raw/tissue
+  GEF DNB layers with optional µm-region cropping, and
+  `load_bgi_gef` pairs the two so DNBs are labelled from the cell
+  border polygons (out-of-mask DNBs become the `-1` ambient layer
+  required by the SPARKLE input contract).
+- `save_cellbin_gef` writes corrected gene-by-cell matrices back to an
+  official-layout cellbin GEF readable by stereopy and StereoMap; exact
+  floating-point values are preserved in a non-standard `/sparkleInfo`
+  group restored automatically by the reader.
+- Optional dependency extras: `gef` (h5py) and `stereopy`
+  (Python < 3.11).
+- Validated against the official SAW 8.1 demo dataset (mouse whole
+  brain, `C04042E3`), including value-exact round-trips through
+  gefpy's `CgefR` reader.
+
 ## [0.1.3] - 2026-09-08
 
 ### Changed

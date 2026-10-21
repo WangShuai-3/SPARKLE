@@ -18,6 +18,10 @@ Manuscript/
 *.tsv.gz
 *.csv.gz
 
+# BGI GEF files (large, downloaded for testing)
+*.gef
+data/bgi/
+
 # Large Visium HD / Space Ranger output directories
 *segmented_outputs/
 

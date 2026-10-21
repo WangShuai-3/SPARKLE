@@ -63,6 +63,19 @@ Install optional CUDA support:
 pip install "stambient[gpu]"
 ```
 
+Install GEF (BGI Stereo-seq) I/O support:
+
+```bash
+pip install "stambient[gef]"
+```
+
+Optionally install stereopy for interoperability checks with BGI's own
+toolchain (Python 3.9-3.10 only; not required by `stambient.gef_io`):
+
+```bash
+pip install "stambient[stereopy]"
+```
+
 For local development:
 
 ```bash
@@ -145,10 +158,22 @@ approximate modes and should be validated on the target dataset.
 If CUDA execution cannot be initialized or fails during fitting, SPARKLE
 restarts the analysis on CPU and records the fallback in `diagnostics`.
 
+### Memory and full-transcriptome runs
+
+The CPU path processes genes in batches, mirroring the GPU path: the
+aggregated gene-by-cell and gene-by-bin matrices stay sparse, and only the
+rows of the current batch are densified. Peak RAM therefore no longer grows
+with the number of genes — the dominant allocations are the input matrix
+and the dense gene-by-cell corrected output. `cpu_gene_batch_size` overrides
+the adaptive batch choice (about 1 GiB of dense working set per batch); the
+effective value is reported in `diagnostics["cpu_gene_batch_size"]`.
+
 ## Data loading
 
 Loaders return a common dictionary containing `spot_expr`, `spot_coords`,
-`spot_labels`, `gene_names` and `cell_ids`.
+`spot_labels`, `gene_names` and `cell_ids`. The GEF loaders additionally
+return cell-level metadata (`cell_coords`, `cell_areas`, `cell_dnb_counts`,
+`cell_borders`) used when saving results back to GEF.
 
 ### Stereo-seq GEM with cell labels
 
@@ -196,6 +221,72 @@ data = load_visiumhd("Visium_HD_feature_slice.h5")
 The feature-slice file must contain a cell-segmentation mask. Capture squares
 not covered by the mask are assigned `-1`.
 
+### BGI Stereo-seq GEF (cellbin / raw)
+
+`stambient.gef_io` reads and writes BGI's official HDF5-based GEF format
+natively (only `h5py` is required; stereopy is **not** needed). Both the
+current `/cellBin` layout (SAW >= 7.1, GEF versions 3/4) and the legacy
+`cellExp`/`cellData` layout (SAW 5.x-7.0) are supported. Standalone
+readers are also available: `read_cellbin_gef` (alias `load_cellbin_gef`)
+for cellbin files and `read_bin_gef` for raw/tissue DNB layers.
+
+```python
+from stambient import SPARKLE
+from stambient.gef_io import load_bgi_gef, save_cellbin_gef
+
+# Pair a cellbin GEF with its raw/tissue GEF for a SPARKLE-ready
+# DNB-level view (labels come from the cell border polygons;
+# DNBs outside every polygon form the out-of-mask layer).
+data = load_bgi_gef(
+    "sample.cellbin.gef",
+    raw_gef_path="sample.raw.gef",
+    region_um=[5000, 6000, 5000, 6000],  # optional 1 mm^2 crop
+)
+
+model = SPARKLE(bin_size=25.0, max_radius=100.0, r2_threshold=0.01)
+corrected, diagnostics = model.fit_transform(
+    data["spot_expr"], data["spot_coords"], data["spot_labels"]
+)
+
+# Save corrected counts back to an official-layout cellbin GEF
+# readable by stereopy (st.io.read_gef(..., bin_type="cell_bins"))
+# and StereoMap.
+save_cellbin_gef(
+    "sample.sparkle.cellbin.gef",
+    corrected,
+    data["gene_names"],
+    data["cell_coords"],
+    cell_ids=data["cell_ids"],
+    cell_areas=data["cell_areas"],
+    cell_borders=data["cell_borders"],
+    cell_dnb_counts=data["cell_dnb_counts"],
+    gene_ids=data["gene_ids"],
+)
+```
+
+Notes:
+
+- `corrected` has one column per cell carrying at least one in-mask DNB;
+  the `cell_ids`, `cell_coords`, `cell_areas`, `cell_dnb_counts` and
+  `cell_borders` keys of the loaded dictionary are subset to exactly
+  those cells in the same order, so they can be passed to
+  `save_cellbin_gef` unchanged.
+- A cellbin GEF alone contains only segmented cells (no out-of-mask
+  layer), so `load_bgi_gef` without `raw_gef_path` returns a cell-level
+  dictionary that does not satisfy the SPARKLE input contract.
+- Border polygons are the 32-point approximations stored in the GEF;
+  DNBs near cell boundaries follow the simplified polygons rather than
+  the exact segmentation masks. When a cellbin GEM with exact labels is
+  available, `load_stereoseq` remains the exact alternative.
+- Coordinates are converted to micrometres using each file's
+  `resolution` attribute (default 0.5 µm per raw unit).
+- The official format stores integer counts, so corrected values are
+  rounded on save; exact floats are preserved in a non-standard
+  `/sparkleInfo` group that `read_cellbin_gef` restores automatically
+  (integer-valued matrices skip the sidecar entirely).
+- Large chips: pass `region_um` to crop the DNB layer instead of
+  loading the whole bin group into memory.
+
 Loaders must return coordinates in micrometres before fitting. For raw
 Stereo-seq DNB-index coordinates, pass `pitch_um=0.5` to the loader. Visium HD
 coordinates are converted to micrometres by `load_visiumhd`. Once loaded,
@@ -216,6 +307,7 @@ it by the capture-location pitch again.
 | `use_gpu` | `False` | Requests the CUDA backend |
 | `gpu_dtype` | `"float64"` | GPU precision mode |
 | `gpu_gene_batch_size` | `None` | Gene batch size; `None` adapts to available GPU memory |
+| `cpu_gene_batch_size` | `None` | Gene batch size on CPU; `None` adapts to a fixed RAM working set |
 | `verbose` | `True` | Prints progress and model diagnostics |
 
 The manuscript uses the standard cell-based framework, a shared

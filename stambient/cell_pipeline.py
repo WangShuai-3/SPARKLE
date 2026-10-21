@@ -62,6 +62,7 @@ def cell_pipeline_fit(
     verbose: bool = True,
     use_gpu: bool = False,
     gpu_gene_batch_size: Optional[int] = None,
+    cpu_gene_batch_size: Optional[int] = None,
     gpu_dtype: str = "float64",
 ) -> Tuple[np.ndarray, Dict]:
     """Run cell-based SPARKLE pipeline.
@@ -83,6 +84,10 @@ def cell_pipeline_fit(
             Falls back to CPU with a warning if CUDA is unavailable.
         gpu_gene_batch_size: Number of genes processed per CUDA batch. If None,
             choose it adaptively from currently available GPU memory.
+        cpu_gene_batch_size: Number of genes processed per CPU batch. If
+            None, choose it adaptively so the dense per-batch working set
+            stays within a fixed RAM budget; the aggregated gene matrices
+            remain sparse either way.
         gpu_dtype: GPU precision mode: ``float64`` for strict reproducibility,
             ``mixed`` for float32 sparse products plus float64 reductions, or
             ``float32`` for maximum throughput.
@@ -212,6 +217,7 @@ def cell_pipeline_fit(
         storage_dtype=storage_dtype,
         reduction_dtype=reduction_dtype,
         verbose=verbose,
+        cpu_gene_batch_size=cpu_gene_batch_size,
     )
     # λ is unused by the inverse kernel; any value yields the same weights.
     lam_weights = best_lam if best_lam is not None else 1.0
@@ -222,7 +228,7 @@ def cell_pipeline_fit(
     if verbose:
         print("Estimating gene-specific leakage rates α...")
 
-    alphas, r2_scores, effective_gpu_gene_batch_size = estimate_alphas(
+    alphas, r2_scores, effective_gene_batch_size = estimate_alphas(
         gene_indices=gene_indices,
         cell_expr=cell_expr,
         cell_areas=cell_areas,
@@ -234,8 +240,13 @@ def cell_pipeline_fit(
         storage_dtype=storage_dtype,
         reduction_dtype=reduction_dtype,
         gpu_gene_batch_size=gpu_gene_batch_size,
+        cpu_gene_batch_size=cpu_gene_batch_size,
     )
     timings["alpha_estimation_sec"] = perf_counter() - stage_started
+    if verbose and gpu is None:
+        print(
+            f"  CPU gene batching: {effective_gene_batch_size} genes/batch"
+        )
 
     n_genes_use = len(gene_indices)
     n_corrected = int((r2_scores >= r2_threshold).sum())
@@ -276,7 +287,7 @@ def cell_pipeline_fit(
         gpu=gpu,
         storage_dtype=storage_dtype,
         reduction_dtype=reduction_dtype,
-        effective_gpu_gene_batch_size=effective_gpu_gene_batch_size,
+        effective_gene_batch_size=effective_gene_batch_size,
     )
     timings["correction_sec"] = perf_counter() - stage_started
     timings["total_sec"] = perf_counter() - total_started
@@ -308,7 +319,8 @@ def cell_pipeline_fit(
         "gpu_requested": bool(use_gpu),
         "gpu_device": gpu.name if gpu is not None else None,
         "gpu_fallback_reason": gpu_fallback_reason,
-        "gpu_gene_batch_size": effective_gpu_gene_batch_size if gpu is not None else None,
+        "gpu_gene_batch_size": effective_gene_batch_size if gpu is not None else None,
+        "cpu_gene_batch_size": effective_gene_batch_size if gpu is None else None,
         "gpu_dtype": gpu_dtype if gpu is not None else None,
         "gpu_sparse_format": "csr" if gpu is not None else None,
         "empty_to_cell_graph_nnz": empty_to_cell_graph_nnz,
