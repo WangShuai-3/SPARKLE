@@ -8,5 +8,5 @@ spots as built-in ambient probes.
 
 from .model import SPARKLE
 
-__version__ = "0.1.3beta"
+__version__ = "0.1.4"
 __all__ = ["SPARKLE"]

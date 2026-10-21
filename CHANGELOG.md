@@ -2,7 +2,7 @@
 
 All notable changes to `stambient` are documented in this file.
 
-## [Unreleased]
+## [0.1.4] - 2026-10-21
 
 ### Changed
 
