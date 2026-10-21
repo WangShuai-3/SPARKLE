@@ -4,6 +4,19 @@ All notable changes to `stambient` are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- CPU path memory: the estimation stages (λ search, α estimation,
+  correction) now process genes in batches like the GPU path, and the
+  aggregated gene × cell / gene × bin matrices stay sparse with only the
+  active batch densified. Peak RAM no longer grows with the number of
+  genes, which makes all-gene (`n_high_genes=None`) runs on large datasets
+  feasible; on a 25k-gene × 1.1M-DNB synthetic benchmark peak RSS dropped
+  from 27.8 GiB to 7.4 GiB (now dominated by the dense corrected output)
+  while runtime improved 2.4x. New `cpu_gene_batch_size` parameter
+  (default: adaptive, ~1 GiB dense working set per batch); results are
+  unchanged up to floating-point rounding from the batched sparse products.
+
 ### Added
 
 - Native BGI GEF I/O (`stambient.gef_io`, h5py-only; stereopy stays

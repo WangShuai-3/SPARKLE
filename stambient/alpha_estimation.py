@@ -10,12 +10,15 @@ The closed-form alpha is area-weighted and clamped to non-negative values.
 The weighted R² measures how much of the empty-bin expression variance the
 spatial predictor explains and gates whether correction is applied.
 
-Both the batched CPU (SciPy) and GPU (PyTorch) branches live here.
+Both backends process genes in batches: only the rows of the current
+batch are densified from the sparse aggregated matrices, so peak memory
+stays independent of the total gene count.
 """
 
 import numpy as np
 from typing import Optional, Tuple
 
+from .batching import choose_cpu_gene_batch_size, densify_gene_rows
 from .gpu import (
     GPUContext,
     choose_gpu_gene_batch_size,
@@ -28,9 +31,9 @@ from .weights import expression_weight
 
 def estimate_alphas(
     gene_indices: np.ndarray,
-    cell_expr: np.ndarray,
+    cell_expr,
     cell_areas: np.ndarray,
-    empty_bin_expr: np.ndarray,
+    empty_bin_expr,
     empty_bin_areas: np.ndarray,
     W_empty,
     use_expr_weight: bool,
@@ -38,14 +41,17 @@ def estimate_alphas(
     storage_dtype,
     reduction_dtype,
     gpu_gene_batch_size: Optional[int],
+    cpu_gene_batch_size: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[int]]:
     """Estimate gene-specific leakage rates alpha and their R² scores.
 
     Args:
         gene_indices: high-expression genes (ranked, descending).
-        cell_expr: [genes × n_cells] dense per-cell expression.
+        cell_expr: [genes × n_cells] per-cell expression, sparse CSR or
+            dense; only the selected gene rows are densified, per batch.
         cell_areas: [n_cells] DNB count per cell.
-        empty_bin_expr: [genes × n_empty_bins] dense bin expression.
+        empty_bin_expr: [genes × n_empty_bins] bin expression, sparse CSR
+            or dense; densified per batch like ``cell_expr``.
         empty_bin_areas: [n_empty_bins] DNB count per bin.
         W_empty: empty→cell weight matrix evaluated at the winning lambda
             (GPU tensor or CPU SciPy CSR).
@@ -54,9 +60,11 @@ def estimate_alphas(
         storage_dtype: torch dtype for sparse/dense products.
         reduction_dtype: torch dtype for reductions.
         gpu_gene_batch_size: genes per GPU batch; None selects adaptively.
+        cpu_gene_batch_size: genes per CPU batch; None selects adaptively
+            from a fixed RAM working-set budget.
 
     Returns:
-        (alphas, r2_scores, effective_gpu_gene_batch_size). The batch size is
+        (alphas, r2_scores, effective_gene_batch_size). The batch size is
         returned because the correction stage reuses it for its own batching.
     """
     n_genes_use = len(gene_indices)
@@ -65,7 +73,7 @@ def estimate_alphas(
     alphas = np.zeros(n_genes_use, dtype=np.float64)
     r2_scores = np.zeros(n_genes_use, dtype=np.float64)
     w_empty = empty_bin_areas.astype(np.float64)
-    effective_gpu_gene_batch_size: Optional[int] = None
+    effective_gene_batch_size: Optional[int] = None
 
     eps = 1e-15
     if gpu is not None:
@@ -74,7 +82,7 @@ def estimate_alphas(
             empty_bin_areas[:, None], gpu, dtype=reduction_dtype
         )
         if gpu_gene_batch_size is None:
-            effective_gpu_gene_batch_size = choose_gpu_gene_batch_size(
+            effective_gene_batch_size = choose_gpu_gene_batch_size(
                 gpu,
                 n_rows=n_empty_bins,
                 n_cells=n_cells,
@@ -82,12 +90,12 @@ def estimate_alphas(
                 max_batch_size=n_genes_use,
             )
         else:
-            effective_gpu_gene_batch_size = max(1, int(gpu_gene_batch_size))
-        for start in range(0, n_genes_use, effective_gpu_gene_batch_size):
-            stop = min(start + effective_gpu_gene_batch_size, n_genes_use)
+            effective_gene_batch_size = max(1, int(gpu_gene_batch_size))
+        for start in range(0, n_genes_use, effective_gene_batch_size):
+            stop = min(start + effective_gene_batch_size, n_genes_use)
             batch_gene_indices = gene_indices[start:stop]
             sources_batch = np.divide(
-                cell_expr[batch_gene_indices],
+                densify_gene_rows(cell_expr, batch_gene_indices),
                 cell_areas[None, :],
                 out=np.zeros((stop - start, n_cells), dtype=np.float64),
                 where=cell_areas[None, :] > 0,
@@ -96,7 +104,9 @@ def estimate_alphas(
                 sources_batch = np.array(
                     [expression_weight(s) for s in sources_batch]
                 )
-            y_obs_batch = empty_bin_expr[batch_gene_indices].T
+            y_obs_batch = densify_gene_rows(
+                empty_bin_expr, batch_gene_indices
+            ).T
 
             sources_gpu = to_gpu(sources_batch.T, gpu, dtype=storage_dtype)
             y_obs_gpu = to_gpu(y_obs_batch, gpu, dtype=reduction_dtype)
@@ -138,53 +148,75 @@ def estimate_alphas(
             alphas[start:stop] = to_cpu(alphas_gpu, gpu)
             r2_scores[start:stop] = to_cpu(r2_gpu, gpu)
     else:
-        # Precompute source strengths for all high-expression genes in one matrix
-        sources = np.divide(
-            cell_expr[gene_indices],
-            cell_areas[None, :],
-            out=np.zeros((n_genes_use, n_cells), dtype=np.float64),
-            where=cell_areas[None, :] > 0,
-        )
-        if use_expr_weight:
-            sources = np.array([expression_weight(s) for s in sources])
-        y_obs_all = empty_bin_expr[gene_indices].T
+        # Process genes in batches: only the current batch's rows of the
+        # sparse cell/bin matrices are densified, and the dense products
+        # stay within a fixed RAM working set instead of scaling with the
+        # total gene count.
+        w_total = w_empty.sum()
+        if cpu_gene_batch_size is None:
+            effective_gene_batch_size = choose_cpu_gene_batch_size(
+                n_rows=n_empty_bins,
+                n_cols=n_cells,
+                max_batch_size=n_genes_use,
+            )
+        else:
+            effective_gene_batch_size = max(1, int(cpu_gene_batch_size))
+        for start in range(0, n_genes_use, effective_gene_batch_size):
+            stop = min(start + effective_gene_batch_size, n_genes_use)
+            batch_gene_indices = gene_indices[start:stop]
+            n_batch = stop - start
 
-        # Batched weighted sums and OLS for all genes
-        weighted_sums = W_empty.dot(sources.T)
-        N_gb_all = empty_bin_areas[:, None] * weighted_sums
+            sources_batch = np.divide(
+                densify_gene_rows(cell_expr, batch_gene_indices),
+                cell_areas[None, :],
+                out=np.zeros((n_batch, n_cells), dtype=np.float64),
+                where=cell_areas[None, :] > 0,
+            )
+            if use_expr_weight:
+                sources_batch = np.array(
+                    [expression_weight(s) for s in sources_batch]
+                )
+            y_obs_batch = densify_gene_rows(
+                empty_bin_expr, batch_gene_indices
+            ).T
 
-        denom = (w_empty[:, None] * N_gb_all ** 2).sum(axis=0)
-        alphas = np.divide(
-            (w_empty[:, None] * y_obs_all * N_gb_all).sum(axis=0),
-            denom,
-            out=np.zeros(n_genes_use, dtype=np.float64),
-            where=denom > 0,
-        )
-        alphas = np.maximum(alphas, 0.0)
-        alphas[denom == 0] = 0.0
+            weighted_sums = W_empty.dot(sources_batch.T)
+            N_gb_batch = empty_bin_areas[:, None] * weighted_sums
 
-        ss_res = (
-            w_empty[:, None] * (y_obs_all - alphas[None, :] * N_gb_all) ** 2
-        ).sum(axis=0)
-        y_mean = (
-            (w_empty[:, None] * y_obs_all).sum(axis=0) / w_empty.sum()
-            if w_empty.sum() > 0
-            else 0.0
-        )
-        ss_tot = (
-            w_empty[:, None] * (y_obs_all - y_mean[None, :]) ** 2
-        ).sum(axis=0)
-        ss_ratio = np.divide(
-            ss_res,
-            ss_tot,
-            out=np.zeros_like(ss_res),
-            where=ss_tot > eps,
-        )
-        r2_scores = np.where(
-            ss_tot > eps,
-            1.0 - ss_ratio,
-            np.where(ss_res > eps, 0.0, 1.0),
-        )
-        effective_gpu_gene_batch_size = None
+            denom = (w_empty[:, None] * N_gb_batch ** 2).sum(axis=0)
+            alphas_batch = np.divide(
+                (w_empty[:, None] * y_obs_batch * N_gb_batch).sum(axis=0),
+                denom,
+                out=np.zeros(n_batch, dtype=np.float64),
+                where=denom > 0,
+            )
+            alphas_batch = np.maximum(alphas_batch, 0.0)
+            alphas_batch[denom == 0] = 0.0
 
-    return alphas, r2_scores, effective_gpu_gene_batch_size
+            ss_res = (
+                w_empty[:, None]
+                * (y_obs_batch - alphas_batch[None, :] * N_gb_batch) ** 2
+            ).sum(axis=0)
+            y_mean = (
+                (w_empty[:, None] * y_obs_batch).sum(axis=0) / w_total
+                if w_total > 0
+                else 0.0
+            )
+            ss_tot = (
+                w_empty[:, None] * (y_obs_batch - y_mean[None, :]) ** 2
+            ).sum(axis=0)
+            ss_ratio = np.divide(
+                ss_res,
+                ss_tot,
+                out=np.zeros_like(ss_res),
+                where=ss_tot > eps,
+            )
+            r2_batch = np.where(
+                ss_tot > eps,
+                1.0 - ss_ratio,
+                np.where(ss_res > eps, 0.0, 1.0),
+            )
+            alphas[start:stop] = alphas_batch
+            r2_scores[start:stop] = r2_batch
+
+    return alphas, r2_scores, effective_gene_batch_size

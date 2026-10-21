@@ -158,6 +158,16 @@ approximate modes and should be validated on the target dataset.
 If CUDA execution cannot be initialized or fails during fitting, SPARKLE
 restarts the analysis on CPU and records the fallback in `diagnostics`.
 
+### Memory and full-transcriptome runs
+
+The CPU path processes genes in batches, mirroring the GPU path: the
+aggregated gene-by-cell and gene-by-bin matrices stay sparse, and only the
+rows of the current batch are densified. Peak RAM therefore no longer grows
+with the number of genes — the dominant allocations are the input matrix
+and the dense gene-by-cell corrected output. `cpu_gene_batch_size` overrides
+the adaptive batch choice (about 1 GiB of dense working set per batch); the
+effective value is reported in `diagnostics["cpu_gene_batch_size"]`.
+
 ## Data loading
 
 Loaders return a common dictionary containing `spot_expr`, `spot_coords`,
@@ -297,6 +307,7 @@ it by the capture-location pitch again.
 | `use_gpu` | `False` | Requests the CUDA backend |
 | `gpu_dtype` | `"float64"` | GPU precision mode |
 | `gpu_gene_batch_size` | `None` | Gene batch size; `None` adapts to available GPU memory |
+| `cpu_gene_batch_size` | `None` | Gene batch size on CPU; `None` adapts to a fixed RAM working set |
 | `verbose` | `True` | Prints progress and model diagnostics |
 
 The manuscript uses the standard cell-based framework, a shared

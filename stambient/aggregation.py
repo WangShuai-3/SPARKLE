@@ -3,11 +3,16 @@
 Three responsibilities live here:
 
 - ``extract_cells``: unique cell IDs, per-cell DNB counts (areas), centroids,
-  and the dense gene × cell expression matrix.
-- ``aggregate_empty_bin_expression``: gene × bin expression from the sparse
+  and the sparse gene × cell expression matrix.
+- ``aggregate_empty_bin_expression``: sparse gene × bin expression from the
   DNB-to-bin mapping produced by :func:`stambient.binning.bin_empty_dnbs`.
 - ``select_high_expression_genes``: rank genes by mean empty-bin expression
   and keep the top ``n_high_genes`` for correction.
+
+The aggregated matrices stay sparse (SciPy CSR, genes as rows) so
+full-transcriptome runs never materialize a dense genes × cells / genes ×
+bins copy; downstream stages densify one gene batch at a time via
+:func:`stambient.batching.densify_gene_rows`.
 
 The public pipeline orchestrator times these steps individually.
 """
@@ -33,7 +38,7 @@ def extract_cells(
         unique_cells: sorted unique cell IDs.
         cell_areas: [n_cells] DNB count per cell.
         cell_centroids: [n_cells × 2] mean DNB coordinates per cell.
-        cell_expr: [genes × n_cells] dense per-cell expression.
+        cell_expr: [genes × n_cells] sparse CSR per-cell expression.
     """
     cell_mask_labels = dnb_labels >= 0
     unique_cells = np.unique(dnb_labels[cell_mask_labels])
@@ -53,18 +58,14 @@ def extract_cells(
     cell_centroids[valid, 0] /= cell_areas[valid]
     cell_centroids[valid, 1] /= cell_areas[valid]
 
-    # Build cell expression via sparse matrix multiplication
+    # Build cell expression via sparse matrix multiplication; the product
+    # stays sparse (genes as rows) and is densified per gene batch later.
     cell_dnb_idx = np.where(cell_mask_labels)[0]
     C = csr_matrix(
         (np.ones(len(cell_dnb_idx), dtype=np.float64), (cell_dnb_idx, cell_indices)),
         shape=(len(dnb_coords), n_cells),
     )
-    cell_expr_sp = dnb_csc @ C
-    cell_expr = (
-        np.asarray(cell_expr_sp.todense())
-        if hasattr(cell_expr_sp, "todense")
-        else cell_expr_sp.toarray()
-    )
+    cell_expr = (dnb_csc @ C).tocsr()
     return unique_cells, cell_areas, cell_centroids, cell_expr
 
 
@@ -74,7 +75,7 @@ def aggregate_empty_bin_expression(
     empty_bin_indices: np.ndarray,
     n_empty_bins: int,
     n_genes: int,
-) -> np.ndarray:
+):
     """Sum empty DNB expression into bins using a sparse indicator matrix.
 
     Args:
@@ -86,7 +87,7 @@ def aggregate_empty_bin_expression(
         n_genes: number of genes (rows of the output).
 
     Returns:
-        empty_bin_expr: [genes × n_empty_bins] dense bin expression.
+        empty_bin_expr: [genes × n_empty_bins] sparse CSR bin expression.
     """
     if len(empty_dnb_indices) > 0:
         C_empty = csr_matrix(
@@ -96,26 +97,22 @@ def aggregate_empty_bin_expression(
             ),
             shape=(dnb_csc.shape[1], n_empty_bins),
         )
-        empty_bin_expr_sp = dnb_csc @ C_empty
-        empty_bin_expr = (
-            np.asarray(empty_bin_expr_sp.todense())
-            if hasattr(empty_bin_expr_sp, "todense")
-            else empty_bin_expr_sp.toarray()
-        )
+        empty_bin_expr = (dnb_csc @ C_empty).tocsr()
     else:
-        empty_bin_expr = np.zeros((n_genes, 0), dtype=np.float64)
+        empty_bin_expr = csr_matrix((n_genes, 0), dtype=np.float64)
     return empty_bin_expr
 
 
 def select_high_expression_genes(
-    empty_bin_expr: np.ndarray,
+    empty_bin_expr,
     empty_bin_areas: np.ndarray,
     n_high_genes: int,
 ) -> np.ndarray:
     """Rank genes by mean empty-bin expression and keep the top ones.
 
     Args:
-        empty_bin_expr: [genes × n_empty_bins] dense bin expression.
+        empty_bin_expr: [genes × n_empty_bins] bin expression, sparse CSR or
+            dense; only row sums are needed, so no densification occurs.
         empty_bin_areas: [n_empty_bins] DNB count per bin (area weighting).
         n_high_genes: number of top genes to select; None means all genes.
 
@@ -124,6 +121,6 @@ def select_high_expression_genes(
     """
     n_genes = empty_bin_expr.shape[0]
     total_empty = empty_bin_areas.sum()
-    mean_empty = empty_bin_expr.sum(axis=1) / total_empty
+    mean_empty = np.asarray(empty_bin_expr.sum(axis=1)).ravel() / total_empty
     n_select = n_genes if n_high_genes is None else min(n_high_genes, n_genes)
     return np.argsort(mean_empty)[::-1][:n_select]
